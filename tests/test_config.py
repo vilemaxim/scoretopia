@@ -7,6 +7,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+
 from scoretopia.config import ConfigError, ScoretopiaConfig, load_config
 
 KNOWN_REPORTS = frozenset({"active_games", "recent_completions", "win_ratios"})

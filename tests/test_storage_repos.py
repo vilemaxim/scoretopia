@@ -6,6 +6,7 @@ import sqlite3
 from datetime import UTC, datetime
 
 import pytest
+
 from scoretopia.storage.db import open_database
 from scoretopia.storage.errors import DuplicatePolytopiaNameError
 from scoretopia.storage.models import DisputeCreate, GameParticipantInput
