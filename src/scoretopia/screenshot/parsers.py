@@ -51,11 +51,21 @@ def detect_screenshot_type(results: list[OCRLine]) -> str:
     text = "\n".join(_line_texts(results)).lower()
     if "friend list" in text or "add friend" in text:
         return "friend_profile"
+    if _looks_like_game_basics(text):
+        return "game_basics"
     if re.search(r"\bwins?\b|\bwinst\b", text) or "resigned on turn" in text:
         return "game_end"
     raise ValueError(
-        "Unrecognized screenshot type; expected game end or friend profile"
+        "Unrecognized screenshot type; expected game end, "
+        "friend profile, or game basics"
     )
+
+
+def _looks_like_game_basics(text: str) -> bool:
+    has_resign = "resign" in text
+    has_game_timer = "game timer" in text
+    has_score_mode = "glory" in text or "might" in text
+    return has_resign and has_game_timer and has_score_mode
 
 
 def parse_game_end(results: list[OCRLine]) -> GameEndExtraction:
@@ -311,3 +321,4 @@ def _parse_win_ratio(lines: list[str], friend_name: str | None) -> WinRatio:
         friend_name=friend_name,
         friend_wins=friend_wins,
     )
+
