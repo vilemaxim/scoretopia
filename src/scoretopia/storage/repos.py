@@ -7,6 +7,7 @@ import sqlite3
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 
+from scoretopia.domain.matching import is_bot_name
 from scoretopia.storage.errors import DuplicatePolytopiaNameError
 from scoretopia.storage.models import (
     Dispute,
@@ -75,10 +76,6 @@ def _format_datetime(value: datetime | None) -> str | None:
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
     return value.isoformat()
-
-
-def _is_bot_name(name: str) -> bool:
-    return name.strip().lower().endswith(" bot")
 
 
 class PlayerRepo:
@@ -216,7 +213,7 @@ class GameRepo:
         query_humans = {
             normalize_polytopia_name(name)
             for name in participant_names
-            if not _is_bot_name(name)
+            if not is_bot_name(name)
         }
         matches: list[Game] = []
         for game in self.list_active():
@@ -297,6 +294,38 @@ class GameParticipantRepo:
         )
         self._conn.commit()
 
+    def get_participant_names(self, game_id: int) -> tuple[str, ...]:
+        rows = self._conn.execute(
+            """
+            SELECT p.polytopia_name
+            FROM game_participants gp
+            JOIN players p ON p.id = gp.player_id
+            WHERE gp.game_id = ?
+            ORDER BY p.polytopia_name
+            """,
+            (game_id,),
+        ).fetchall()
+        return tuple(str(row[0]) for row in rows)
+
+    def update_participant_results(
+        self,
+        game_id: int,
+        results: Sequence[tuple[int, int, int]],
+    ) -> None:
+        """Update score and placement for participants (player_id, score, placement)."""
+        self._conn.executemany(
+            """
+            UPDATE game_participants
+            SET score = ?, placement = ?
+            WHERE game_id = ? AND player_id = ?
+            """,
+            [
+                (score, placement, game_id, player_id)
+                for player_id, score, placement in results
+            ],
+        )
+        self._conn.commit()
+
 
 class PendingInteractionRepo:
     def __init__(self, conn: sqlite3.Connection) -> None:
@@ -349,6 +378,34 @@ class PendingInteractionRepo:
         interaction = self.get_by_id(interaction_id)
         assert interaction is not None
         return interaction
+
+    def resolve_with_payload(
+        self,
+        interaction_id: int,
+        payload_updates: dict[str, object],
+    ) -> PendingInteraction:
+        interaction = self.get_by_id(interaction_id)
+        assert interaction is not None
+        updated_payload = {**interaction.payload, **payload_updates}
+        self._conn.execute(
+            """
+            UPDATE pending_interactions
+            SET status = 'resolved', payload = ?
+            WHERE id = ?
+            """,
+            (json.dumps(updated_payload), interaction_id),
+        )
+        self._conn.commit()
+        resolved = self.get_by_id(interaction_id)
+        assert resolved is not None
+        return resolved
+
+    def list_open_by_kind(self, kind: str) -> list[PendingInteraction]:
+        rows = self._conn.execute(
+            f"{_PENDING_SELECT} WHERE kind = ? AND status = 'open' ORDER BY id",
+            (kind,),
+        ).fetchall()
+        return [_pending_from_row(row) for row in rows]
 
     def mark_disputed(self, interaction_id: int) -> PendingInteraction:
         self._conn.execute(
@@ -403,6 +460,22 @@ class PlayerPairRatioRepo:
         ratio = self.get_ratio(player_a_id, player_b_id)
         assert ratio is not None
         return ratio
+
+    def increment_ratio(
+        self,
+        player_a_id: int,
+        player_b_id: int,
+        *,
+        source: str,
+    ) -> PlayerPairRatio:
+        existing = self.get_ratio(player_a_id, player_b_id)
+        wins = existing.wins + 1 if existing is not None else 1
+        return self.upsert_ratio(
+            player_a_id,
+            player_b_id,
+            wins=wins,
+            source=source,
+        )
 
 
 class DisputeRepo:
