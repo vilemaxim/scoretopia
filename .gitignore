@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Editors
+.idea/
+.vscode/
+
+# AI orchestrator infra — local agent tooling, not application code.
+# See .agent-context.md / SETUP.md before deleting anything here.
+.cursor/history/
+.cursor/chat/
+tdd-mcp/
+.cursor/mcp.json
+.cursor/rules/*
+!.cursor/rules/planner.mdc
+!.cursor/rules/tdd-worker.mdc
+docs/tasks/
+project-documentation/
+
+# Local Polytopia screenshot samples for dev/testing (not committed)
+samples/screenshots/
+
+# EasyOCR model cache (downloaded on first run)
+.easyocr_models/
