@@ -18,6 +18,7 @@ from scoretopia.domain.actions import (
 )
 from scoretopia.domain.games import GameService
 from scoretopia.domain.players import PlayerService
+from scoretopia.domain.results import MatchOutcome
 from scoretopia.screenshot.extract import DEFAULT_MODEL_DIR, extract_screenshot
 from scoretopia.screenshot.models import (
     FriendProfileExtraction,
@@ -97,13 +98,12 @@ class IngestService:
         *,
         uploader_discord_id: str,
     ) -> GameStarted:
-        self._player_service.auto_link_from_game_basics(
-            uploader_discord_id=uploader_discord_id,
-            extraction=extraction,
-        )
         game_name = extraction.game_name or "Unnamed Game"
-        game = self._game_service.start_game(name=game_name, extraction=extraction)
-        self._game_service.add_participants_from_basics(game.id, extraction)
+        game = self._game_service.start_game(
+            name=game_name,
+            extraction=extraction,
+            uploader_id=uploader_discord_id,
+        )
         player_names = tuple(player.name for player in extraction.players)
         report = ActiveGameReport(
             game_id=game.id,
@@ -119,18 +119,26 @@ class IngestService:
         stored_path: Path,
         uploader_discord_id: str,
     ) -> GameEndNeedsConfirmation | GameEndNeedsPick | GameEndPendingStart:
-        participant_names = tuple(player.name for player in extraction.players)
-        matches = self._game_service.find_active_games_by_participants(
-            participant_names
-        )
+        match = self._game_service.match_game_end(extraction)
 
         payload: dict[str, object] = {
             "screenshot_path": str(stored_path),
-            "participant_names": list(participant_names),
+            "participant_names": [player.name for player in extraction.players],
             "winner": extraction.winner,
+            "extraction": {
+                "winner": extraction.winner,
+                "players": [
+                    {
+                        "name": player.name,
+                        "score": player.score,
+                        "is_winner": player.is_winner,
+                    }
+                    for player in extraction.players
+                ],
+            },
         }
 
-        if not matches:
+        if match.outcome == MatchOutcome.NONE:
             pending = self._create_pending(
                 kind="game_end_pending_start",
                 discord_user_id=uploader_discord_id,
@@ -138,11 +146,11 @@ class IngestService:
             )
             return GameEndPendingStart(interaction_id=pending.id)
 
-        if len(matches) == 1:
-            game = matches[0]
+        if match.outcome == MatchOutcome.ONE:
+            game = match.games[0]
             payload["game_id"] = game.id
             pending = self._create_pending(
-                kind="game_end_needs_confirmation",
+                kind="confirm_game_end",
                 discord_user_id=uploader_discord_id,
                 payload=payload,
             )
@@ -151,10 +159,10 @@ class IngestService:
                 interaction_id=pending.id,
             )
 
-        game_ids = tuple(game.id for game in matches)
+        game_ids = tuple(game.id for game in match.games)
         payload["game_ids"] = list(game_ids)
         pending = self._create_pending(
-            kind="game_end_needs_pick",
+            kind="pick_game",
             discord_user_id=uploader_discord_id,
             payload=payload,
         )

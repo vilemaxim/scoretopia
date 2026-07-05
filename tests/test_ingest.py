@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 from PIL import Image
+
 from scoretopia.domain.actions import (
     GameEndNeedsConfirmation,
     GameEndNeedsPick,
@@ -18,7 +19,6 @@ from scoretopia.domain.actions import (
 )
 from scoretopia.domain.games import GameService
 from scoretopia.domain.ingest import IngestService
-
 from scoretopia.domain.players import PlayerService
 from scoretopia.screenshot.models import (
     FriendProfileExtraction,
@@ -29,7 +29,6 @@ from scoretopia.screenshot.models import (
     WinRatio,
 )
 from scoretopia.storage.db import open_database
-from scoretopia.storage.models import GameParticipantInput
 from scoretopia.storage.repos import (
     GameParticipantRepo,
     GameRepo,
@@ -126,8 +125,6 @@ def _game_end_extraction(
 
 def _create_active_game_with_players(
     game_service: GameService,
-    player_repo: PlayerRepo,
-    participant_repo: GameParticipantRepo,
     *,
     game_name: str,
     player_names: tuple[str, ...],
@@ -139,12 +136,6 @@ def _create_active_game_with_players(
             players=tuple(GameBasicsPlayer(name=name) for name in player_names),
         ),
     )
-    participants = []
-    for name in player_names:
-        player = player_repo.get_by_polytopia_name(name)
-        assert player is not None
-        participants.append(GameParticipantInput(player_id=player.id))
-    participant_repo.add_participants(game.id, participants)
     return game.id
 
 
@@ -175,16 +166,12 @@ def test_ingest_unrecognized_screenshot_returns_helpful_message(
 def test_ingest_game_end_one_match_returns_needs_confirmation(
     ingest_service: IngestService,
     game_service: GameService,
-    player_repo: PlayerRepo,
-    participant_repo: GameParticipantRepo,
     pending_repo: PendingInteractionRepo,
     tmp_path: Path,
 ) -> None:
     player_names = ("Diremouse01", "Lord Union 409", "vilemaxim")
     game_id = _create_active_game_with_players(
         game_service,
-        player_repo,
-        participant_repo,
         game_name="Doomed Gods",
         player_names=player_names,
     )
@@ -240,22 +227,16 @@ def test_ingest_game_end_zero_matches_returns_pending_start(
 def test_ingest_game_end_multiple_matches_returns_needs_pick(
     ingest_service: IngestService,
     game_service: GameService,
-    player_repo: PlayerRepo,
-    participant_repo: GameParticipantRepo,
     tmp_path: Path,
 ) -> None:
     player_names = ("Alice", "Bob")
     game_id_a = _create_active_game_with_players(
         game_service,
-        player_repo,
-        participant_repo,
         game_name="Game A",
         player_names=player_names,
     )
     game_id_b = _create_active_game_with_players(
         game_service,
-        player_repo,
-        participant_repo,
         game_name="Game B",
         player_names=player_names,
     )
