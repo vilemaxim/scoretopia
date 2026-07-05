@@ -1,0 +1,37 @@
+# Scoretopia configuration example
+#
+# Copy to config/scoretopia.yaml and adjust for your Discord guild.
+# Relative paths resolve against the directory containing this file.
+
+# Discord channel names (not IDs — resolved by the bot adapter).
+channels:
+  input: polytopia-screenshots # screenshots and user interactions
+  reports: polytopia-reports # scheduled and on-demand report output
+
+# SQLite database file. Default: data/scoretopia.db (relative to this file).
+database:
+  path: data/scoretopia.db
+
+# Directory where screenshot attachments are saved before OCR.
+# Default: data/inbox (relative to this file).
+inbox:
+  path: data/inbox
+
+# Scheduled reports. Each entry must use a known report name.
+# channel references a key under channels (input or reports), not the name.
+reports:
+  active_games:
+    enabled: true
+    schedule: "0 9 * * *" # daily at 09:00 — cron parsed by scheduler (task 012)
+    channel: reports
+
+  recent_completions:
+    enabled: true
+    schedule: "0 10 * * 1" # Mondays at 10:00
+    channel: reports
+    lookback_days: 14 # report-specific: games completed in the last N days
+
+  win_ratios:
+    enabled: true
+    schedule: "0 8 1 * *" # first day of month at 08:00
+    channel: reports
