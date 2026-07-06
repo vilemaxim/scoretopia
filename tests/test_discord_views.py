@@ -15,7 +15,6 @@ from scoretopia.discord.views import (
     parse_custom_id,
     unauthorized_confirmation_message,
 )
-
 from scoretopia.storage.models import Game
 
 

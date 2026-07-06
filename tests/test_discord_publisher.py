@@ -5,7 +5,6 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from scoretopia.discord.publisher import DiscordReportPublisher
-
 from scoretopia.reports.dto import ReportDTO, ReportField
 
 

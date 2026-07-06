@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
+
+from scoretopia.config import ChannelsConfig
 from scoretopia.discord.adapter import (
     DiscordBotAdapter,
     DiscordConfigError,
@@ -15,9 +17,6 @@ from scoretopia.discord.adapter import (
     plan_ingest_response,
     resolve_guild_channels,
 )
-from scoretopia.ports.bot import BotPort
-
-from scoretopia.config import ChannelsConfig
 from scoretopia.domain.actions import (
     ActiveGameReport,
     GameEndNeedsConfirmation,
@@ -28,6 +27,7 @@ from scoretopia.domain.actions import (
     WinRatioNeedsConfirmation,
 )
 from scoretopia.domain.win_ratios import DisputeResult
+from scoretopia.ports.bot import BotPort
 from scoretopia.storage.models import Game
 
 
