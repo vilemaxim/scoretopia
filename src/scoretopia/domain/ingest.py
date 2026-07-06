@@ -92,7 +92,8 @@ class IngestService:
 
     def _store_in_inbox(self, source: Path) -> Path:
         destination = self._inbox_path / source.name
-        shutil.copy2(source, destination)
+        if source.resolve() != destination.resolve():
+            shutil.copy2(source, destination)
         return destination
 
     def _handle_game_basics(

@@ -326,6 +326,32 @@ def test_ingest_friend_profile_returns_win_ratio_needs_confirmation(
     assert pending.discord_user_id == "uploader-5"
 
 
+def test_ingest_succeeds_when_image_already_in_inbox(
+    ingest_service: IngestService,
+    inbox_path: Path,
+) -> None:
+    source = inbox_path / "already_there.png"
+    Image.new("RGB", (10, 10), color=(255, 0, 0)).save(source)
+    extraction = GameBasicsExtraction(
+        game_name="Test Game",
+        players=(
+            GameBasicsPlayer(name="Alice", is_you=True),
+            GameBasicsPlayer(name="Bob"),
+        ),
+    )
+
+    with patch(
+        "scoretopia.domain.ingest.extract_screenshot",
+        return_value=extraction,
+    ):
+        result = ingest_service.ingest(source, uploader_discord_id="uploader-6b")
+
+    assert isinstance(result, GameStarted)
+    stored = list(inbox_path.iterdir())
+    assert len(stored) == 1
+    assert stored[0] == source
+
+
 def test_ingest_copies_screenshot_into_inbox(
     ingest_service: IngestService,
     inbox_path: Path,
