@@ -6,6 +6,8 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 
 from scoretopia.reports.dto import ReportDTO, ReportField
+from scoretopia.reports.game_settings import settings_summary
+from scoretopia.reports.kinds import ReportKind
 from scoretopia.storage.models import Game
 from scoretopia.storage.repos import (
     GameParticipantRepo,
@@ -40,6 +42,7 @@ class ReportService:
             title="Active Games",
             description=f"{len(fields)} game(s) currently in progress.",
             fields=fields,
+            kind=ReportKind.active_games,
         )
 
     def recent_completions(self, lookback_days: int) -> ReportDTO:
@@ -55,6 +58,7 @@ class ReportService:
                 f"{len(fields)} game(s) completed in the last {lookback_days} day(s)."
             ),
             fields=fields,
+            kind=ReportKind.recent_completions,
         )
 
     def win_ratios(self) -> ReportDTO:
@@ -94,6 +98,7 @@ class ReportService:
             title="Win Ratios",
             description=f"Head-to-head records for {len(fields)} player(s).",
             fields=fields,
+            kind=ReportKind.win_ratios,
         )
 
     def _empty_report(self, title: str, description: str) -> ReportDTO:
@@ -122,7 +127,7 @@ class ReportService:
         value_parts = [self._participants_text(game.id)]
         if started := self._format_datetime(game.created_at):
             value_parts.append(f"Started {started}")
-        if settings := self._settings_summary(game):
+        if settings := settings_summary(game):
             value_parts.append(settings)
         return ReportField(label=game.name, value=_FIELD_SEP.join(value_parts))
 
@@ -134,27 +139,19 @@ class ReportService:
         return ReportField(label=game.name, value=_FIELD_SEP.join(value_parts))
 
     def _participants_text(self, game_id: int) -> str:
-        return ", ".join(self._participant_repo.get_participant_names(game_id))
+        humans, bot_count = self._participant_repo.get_human_and_bot_count(game_id)
+        parts: list[str] = []
+        if humans:
+            parts.append(", ".join(humans))
+        if bot_count > 0:
+            parts.append(f"Bots: {bot_count}")
+        return _FIELD_SEP.join(parts)
 
     def _winner_name(self, game: Game) -> str:
         if game.winner_player_id is None:
             return "Unknown"
         winner = self._player_repo.get_by_id(game.winner_player_id)
         return winner.polytopia_name if winner is not None else "Unknown"
-
-    def _settings_summary(self, game: Game) -> str:
-        parts: list[str] = []
-        if game.terrain:
-            parts.append(game.terrain)
-        if game.map_size is not None:
-            parts.append(str(game.map_size))
-        if game.game_type:
-            parts.append(game.game_type)
-        if game.target_score is not None:
-            parts.append(f"score {game.target_score}")
-        if game.game_timer:
-            parts.append(game.game_timer)
-        return _FIELD_SEP.join(parts)
 
     def _format_datetime(self, value: datetime | None) -> str | None:
         if value is None:

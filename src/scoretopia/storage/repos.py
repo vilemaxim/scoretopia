@@ -316,6 +316,26 @@ class GameParticipantRepo:
         ).fetchall()
         return tuple(str(row[0]) for row in rows)
 
+    def get_human_and_bot_count(self, game_id: int) -> tuple[tuple[str, ...], int]:
+        rows = self._conn.execute(
+            """
+            SELECT p.polytopia_name, gp.is_bot
+            FROM game_participants gp
+            JOIN players p ON p.id = gp.player_id
+            WHERE gp.game_id = ?
+            ORDER BY p.polytopia_name
+            """,
+            (game_id,),
+        ).fetchall()
+        humans: list[str] = []
+        bot_count = 0
+        for name, is_bot in rows:
+            if is_bot:
+                bot_count += 1
+            else:
+                humans.append(str(name))
+        return tuple(humans), bot_count
+
     def update_participant_results(
         self,
         game_id: int,

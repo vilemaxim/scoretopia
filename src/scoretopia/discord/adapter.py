@@ -19,6 +19,11 @@ from discord import app_commands
 from discord.ext import commands
 
 from scoretopia.config import ChannelsConfig, ScoretopiaConfig
+from scoretopia.discord.embeds import (
+    build_dispute_embed,
+    build_game_completed_embed,
+    build_game_started_embed,
+)
 from scoretopia.discord.publisher import DiscordReportPublisher, report_to_embed
 from scoretopia.discord.views import (
     GameEndConfirmView,
@@ -395,15 +400,7 @@ class DiscordBotAdapter(BotPort):
             if plan.kind == "embed" and isinstance(result, GameStarted):
                 reports_channel = self._channel("reports")
                 if reports_channel is not None:
-                    embed = discord.Embed(
-                        title="Game started",
-                        description=result.report.game_name,
-                    )
-                    embed.add_field(
-                        name="Players",
-                        value=", ".join(result.report.player_names),
-                        inline=False,
-                    )
+                    embed = build_game_started_embed(result.game, result.report)
                     await reports_channel.send(embed=embed)
                 return
 
@@ -493,7 +490,11 @@ class DiscordBotAdapter(BotPort):
             confirmer_id=str(interaction.user.id),
         )
         reports_channel = self._channel("reports")
-        await self._post_game_completed(reports_channel, complete.game.name)
+        await self._post_game_completed(
+            reports_channel,
+            complete.game.name,
+            winner_name=self._winner_name(complete.game),
+        )
         await interaction.response.send_message(
             f"Recorded completion for **{complete.game.name}**.",
             ephemeral=True,
@@ -546,7 +547,11 @@ class DiscordBotAdapter(BotPort):
             confirmer_id=str(interaction.user.id),
         )
         reports_channel = self._channel("reports")
-        await self._post_game_completed(reports_channel, complete.game.name)
+        await self._post_game_completed(
+            reports_channel,
+            complete.game.name,
+            winner_name=self._winner_name(complete.game),
+        )
         await interaction.response.send_message(
             f"Recorded completion for **{complete.game.name}**.",
             ephemeral=True,
@@ -599,10 +604,7 @@ class DiscordBotAdapter(BotPort):
         plan = plan_dispute_response(dispute)
         input_channel = self._channel("input")
         if input_channel is not None:
-            embed = discord.Embed(
-                title="Win-ratio dispute",
-                description=plan.body,
-            )
+            embed = build_dispute_embed(plan.body)
             await input_channel.send(embed=embed)
         await interaction.response.send_message(
             "Win ratio rejected and flagged as a dispute.",
@@ -623,11 +625,19 @@ class DiscordBotAdapter(BotPort):
         self,
         reports_channel: discord.TextChannel | None,
         game_name: str,
+        *,
+        winner_name: str | None = None,
     ) -> None:
         if reports_channel is None:
             return
-        embed = discord.Embed(title="Game completed", description=game_name)
+        embed = build_game_completed_embed(game_name, winner_name=winner_name)
         await reports_channel.send(embed=embed)
+
+    def _winner_name(self, game: Game) -> str | None:
+        if game.winner_player_id is None or self._player_repo is None:
+            return None
+        winner = self._player_repo.get_by_id(game.winner_player_id)
+        return winner.polytopia_name if winner is not None else None
 
     async def _reply_unauthorized(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(

@@ -17,6 +17,7 @@ from scoretopia.domain.actions import (
     WinRatioNeedsConfirmation,
 )
 from scoretopia.domain.games import GameService
+from scoretopia.domain.matching import is_bot_name
 from scoretopia.domain.players import PlayerService
 from scoretopia.domain.results import MatchOutcome
 from scoretopia.domain.win_ratios import WinRatioService
@@ -131,11 +132,17 @@ class IngestService:
             extraction=extraction,
             uploader_id=uploader_discord_id,
         )
-        player_names = tuple(player.name for player in extraction.players)
+        human_player_names = tuple(
+            player.name for player in extraction.players if not is_bot_name(player.name)
+        )
+        bot_count = sum(
+            1 for player in extraction.players if is_bot_name(player.name)
+        )
         report = ActiveGameReport(
             game_id=game.id,
             game_name=game.name,
-            player_names=player_names,
+            human_player_names=human_player_names,
+            bot_count=bot_count,
         )
         return GameStarted(game=game, report=report)
 

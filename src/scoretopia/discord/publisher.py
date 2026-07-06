@@ -7,6 +7,7 @@ from typing import Any
 
 import discord
 
+from scoretopia.discord.embeds import embed_from_report_dto
 from scoretopia.reports.dto import ReportDTO
 
 
@@ -25,7 +26,7 @@ class DiscordReportPublisher:
     def publish(self, report_name: str, dto: ReportDTO, channel_key: str) -> None:
         del report_name
         channel = self._channel_lookup[channel_key]
-        embed = _report_to_embed(dto)
+        embed = report_to_embed(dto)
         send_result = channel.send(embed=embed)
         if asyncio.iscoroutine(send_result):
             if self._bot is None:
@@ -34,13 +35,4 @@ class DiscordReportPublisher:
 
 
 def report_to_embed(dto: ReportDTO) -> discord.Embed:
-    return _report_to_embed(dto)
-
-
-def _report_to_embed(dto: ReportDTO) -> discord.Embed:
-    embed = discord.Embed(title=dto.title, description=dto.description)
-    for field in dto.fields:
-        embed.add_field(name=field.label, value=field.value, inline=False)
-    if dto.footer:
-        embed.set_footer(text=dto.footer)
-    return embed
+    return embed_from_report_dto(dto)

@@ -13,7 +13,8 @@ class ActiveGameReport:
 
     game_id: int
     game_name: str
-    player_names: tuple[str, ...]
+    human_player_names: tuple[str, ...]
+    bot_count: int
 
 
 @dataclass(frozen=True)
