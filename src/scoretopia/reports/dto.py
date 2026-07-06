@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from scoretopia.reports.kinds import ReportKind
+
 
 @dataclass(frozen=True)
 class ReportField:
@@ -21,3 +23,4 @@ class ReportDTO:
     description: str
     fields: list[ReportField]
     footer: str | None = None
+    kind: ReportKind | None = None

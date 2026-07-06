@@ -99,52 +99,56 @@ def test_resolve_guild_channels_fails_fast_when_channel_missing() -> None:
 
 
 @pytest.mark.parametrize(
-    ("result", "expected_channel", "expected_kind"),
+    ("build_result", "expected_channel", "expected_kind"),
     [
         (
-            GameStarted(
+            lambda: GameStarted(
                 game=_sample_game(),
                 report=ActiveGameReport(
                     game_id=1,
                     game_name="Friday Night",
-                    player_names=("Alice", "Bob"),
+                    human_player_names=("Alice", "Bob"),
+                    bot_count=0,
                 ),
             ),
             "reports",
             "embed",
         ),
         (
-            GameEndNeedsConfirmation(game_id=1, interaction_id=10),
+            lambda: GameEndNeedsConfirmation(game_id=1, interaction_id=10),
             "input",
             "game_end_confirm_view",
         ),
         (
-            GameEndNeedsPick(game_ids=(1, 2), interaction_id=11),
+            lambda: GameEndNeedsPick(game_ids=(1, 2), interaction_id=11),
             "input",
             "game_end_pick_view",
         ),
         (
-            GameEndPendingStart(interaction_id=12),
+            lambda: GameEndPendingStart(interaction_id=12),
             "input",
             "pending_start_reply",
         ),
         (
-            WinRatioNeedsConfirmation(other_player_id=5, interaction_id=13),
+            lambda: WinRatioNeedsConfirmation(other_player_id=5, interaction_id=13),
             "input",
             "win_ratio_confirm_view",
         ),
         (
-            UnrecognizedScreenshot(message="Could not recognize this screenshot."),
+            lambda: UnrecognizedScreenshot(
+                message="Could not recognize this screenshot."
+            ),
             "input",
             "guidance_reply",
         ),
     ],
 )
 def test_plan_ingest_response_routes_by_action_type(
-    result: object,
+    build_result: object,
     expected_channel: str,
     expected_kind: str,
 ) -> None:
+    result = build_result()
     plan = plan_ingest_response(result)
 
     assert plan.channel == expected_channel
@@ -315,40 +319,49 @@ def _upload_attachment(filename: str = "shot.png") -> MagicMock:
 
 
 @pytest.mark.parametrize(
-    ("result", "expected"),
+    ("build_result", "expected"),
     [
         (
-            GameStarted(
+            lambda: GameStarted(
                 game=_sample_game(),
                 report=ActiveGameReport(
                     game_id=1,
                     game_name="Friday Night",
-                    player_names=("Alice", "Bob"),
+                    human_player_names=("Alice", "Bob"),
+                    bot_count=0,
                 ),
             ),
             _SUCCESS_REACTION,
         ),
-        (GameEndNeedsConfirmation(game_id=1, interaction_id=10), _SUCCESS_REACTION),
-        (GameEndNeedsPick(game_ids=(1, 2), interaction_id=11), _SUCCESS_REACTION),
-        (GameEndPendingStart(interaction_id=12), _SUCCESS_REACTION),
         (
-            WinRatioNeedsConfirmation(other_player_id=5, interaction_id=13),
+            lambda: GameEndNeedsConfirmation(game_id=1, interaction_id=10),
             _SUCCESS_REACTION,
         ),
         (
-            UnrecognizedScreenshot(message="Could not recognize this screenshot."),
+            lambda: GameEndNeedsPick(game_ids=(1, 2), interaction_id=11),
+            _SUCCESS_REACTION,
+        ),
+        (lambda: GameEndPendingStart(interaction_id=12), _SUCCESS_REACTION),
+        (
+            lambda: WinRatioNeedsConfirmation(other_player_id=5, interaction_id=13),
+            _SUCCESS_REACTION,
+        ),
+        (
+            lambda: UnrecognizedScreenshot(
+                message="Could not recognize this screenshot."
+            ),
             _FAILURE_REACTION,
         ),
-        (IngestError(message="Failed to read screenshot"), _FAILURE_REACTION),
+        (lambda: IngestError(message="Failed to read screenshot"), _FAILURE_REACTION),
     ],
 )
 def test_plan_ingest_ack_reaction_maps_result_to_final_emoji(
-    result: object,
+    build_result: object,
     expected: str,
 ) -> None:
     from scoretopia.discord.adapter import plan_ingest_ack_reaction
 
-    assert plan_ingest_ack_reaction(result) == expected
+    assert plan_ingest_ack_reaction(build_result()) == expected
 
 
 def test_begin_screenshot_ack_adds_processing_reaction() -> None:
@@ -563,3 +576,102 @@ def test_readme_lists_add_reactions_permission() -> None:
     )
 
     assert "Add Reactions" in readme
+
+
+def _adapter_with_channels(
+    *,
+    reports_channel: MagicMock | None = None,
+    input_channel: MagicMock | None = None,
+) -> DiscordBotAdapter:
+    reports_channel = reports_channel or MagicMock()
+    reports_channel.send = AsyncMock()
+    input_channel = input_channel or MagicMock()
+    input_channel.send = AsyncMock()
+
+    adapter = DiscordBotAdapter(
+        config=MagicMock(),
+        ingest_service=MagicMock(),
+        game_service=MagicMock(),
+        win_ratio_service=MagicMock(),
+        player_service=MagicMock(),
+        report_service=MagicMock(),
+        token="test-token",
+    )
+    adapter._channel_ids = {"input": 100, "reports": 200}
+    adapter._channels_by_id = {100: input_channel, 200: reports_channel}
+    return adapter
+
+
+def test_deliver_game_started_posts_unified_embed_to_reports_channel() -> None:
+    reports_channel = MagicMock()
+    reports_channel.send = AsyncMock()
+    adapter = _adapter_with_channels(reports_channel=reports_channel)
+    message = _upload_message()
+    result = GameStarted(
+        game=_sample_game(),
+        report=ActiveGameReport(
+            game_id=1,
+            game_name="Friday Night",
+            human_player_names=("Alice", "Bob"),
+            bot_count=1,
+        ),
+    )
+
+    asyncio.run(adapter._deliver_ingest_result(message, result))
+
+    reports_channel.send.assert_awaited_once()
+    embed = reports_channel.send.await_args.kwargs["embed"]
+    assert embed.title == "Game started: Friday Night"
+    assert embed.colour.value == 0x57F287
+    assert embed.timestamp is not None
+    field_map = {field.name: field.value for field in embed.fields}
+    assert field_map["Players"] == "Alice, Bob"
+    assert field_map["Bots"] == "1"
+
+
+def test_post_game_completed_posts_unified_embed_with_winner() -> None:
+    reports_channel = MagicMock()
+    reports_channel.send = AsyncMock()
+    adapter = _adapter_with_channels(reports_channel=reports_channel)
+
+    asyncio.run(
+        adapter._post_game_completed(
+            reports_channel,
+            "Friday Night",
+            winner_name="Alice",
+        )
+    )
+
+    reports_channel.send.assert_awaited_once()
+    embed = reports_channel.send.await_args.kwargs["embed"]
+    assert embed.title == "Game completed: Friday Night"
+    assert embed.colour.value == 0xFEE75C
+    assert embed.timestamp is not None
+    field_map = {field.name: field.value for field in embed.fields}
+    assert field_map["Winner"] == "Alice"
+
+
+def test_reject_win_ratio_posts_dispute_embed_to_input_channel() -> None:
+    input_channel = MagicMock()
+    input_channel.send = AsyncMock()
+    adapter = _adapter_with_channels(input_channel=input_channel)
+    adapter._other_player_discord_id_for_pending = MagicMock(return_value="999")
+    adapter._win_ratio_service.reject.return_value = DisputeResult(
+        dispute_id=1,
+        message="Win-ratio dispute: Alice claimed 9–11 vs Bob.",
+    )
+
+    interaction = MagicMock()
+    interaction.user.id = 999
+    interaction.response.send_message = AsyncMock()
+    parsed = MagicMock()
+    parsed.interaction_id = 42
+
+    asyncio.run(adapter._handle_reject_win_ratio(interaction, parsed))
+
+    input_channel.send.assert_awaited_once()
+    embed = input_channel.send.await_args.kwargs["embed"]
+    assert embed.title == "Win-ratio dispute"
+    assert embed.colour.value == 0xED4245
+    assert embed.timestamp is not None
+    assert "Alice claimed 9–11 vs Bob" in (embed.description or "")

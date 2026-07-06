@@ -60,13 +60,21 @@ def report_service(
 def _add_participants(
     participant_repo: GameParticipantRepo,
     game_id: int,
+    *participants: GameParticipantInput,
+) -> None:
+    participant_repo.add_participants(game_id, participants)
+
+
+def _add_human_participants(
+    participant_repo: GameParticipantRepo,
+    game_id: int,
     *player_ids: int,
 ) -> None:
     participants = [
         GameParticipantInput(player_id=player_id, is_bot=False)
         for player_id in player_ids
     ]
-    participant_repo.add_participants(game_id, participants)
+    _add_participants(participant_repo, game_id, *participants)
 
 
 def test_active_games_lists_open_games_with_player_names(
@@ -85,7 +93,7 @@ def test_active_games_lists_open_games_with_player_names(
         target_score=10000,
         game_timer="One Week",
     )
-    _add_participants(participant_repo, game.id, alice.id, bob.id)
+    _add_human_participants(participant_repo, game.id, alice.id, bob.id)
 
     dto = report_service.active_games()
 
@@ -110,8 +118,8 @@ def test_active_games_excludes_completed_games(
     alice = player_repo.create(polytopia_name="Alice")
     active = game_repo.create_active_game(name="Still Going")
     done = game_repo.create_active_game(name="Finished")
-    _add_participants(participant_repo, active.id, alice.id)
-    _add_participants(participant_repo, done.id, alice.id)
+    _add_human_participants(participant_repo, active.id, alice.id)
+    _add_human_participants(participant_repo, done.id, alice.id)
     game_repo.complete_game(done.id, alice.id)
 
     dto = report_service.active_games()
@@ -139,7 +147,7 @@ def test_recent_completions_includes_games_within_lookback(
     alice = player_repo.create(polytopia_name="Alice")
     bob = player_repo.create(polytopia_name="Bob")
     recent = game_repo.create_active_game(name="Recent Win")
-    _add_participants(participant_repo, recent.id, alice.id, bob.id)
+    _add_human_participants(participant_repo, recent.id, alice.id, bob.id)
     completed_at = datetime.now(tz=UTC) - timedelta(days=3)
     game_repo.complete_game(recent.id, alice.id, completed_at=completed_at)
 
@@ -161,7 +169,7 @@ def test_recent_completions_excludes_games_outside_lookback(
 ) -> None:
     alice = player_repo.create(polytopia_name="Alice")
     old_game = game_repo.create_active_game(name="Ancient Match")
-    _add_participants(participant_repo, old_game.id, alice.id)
+    _add_human_participants(participant_repo, old_game.id, alice.id)
     completed_at = datetime.now(tz=UTC) - timedelta(days=30)
     game_repo.complete_game(old_game.id, alice.id, completed_at=completed_at)
 
@@ -247,3 +255,55 @@ def test_format_report_text_handles_empty_fields() -> None:
 
     assert "Active Games" in text
     assert "No active games." in text
+
+
+def test_active_games_participants_separate_humans_from_bots(
+    report_service: ReportService,
+    game_repo: GameRepo,
+    player_repo: PlayerRepo,
+    participant_repo: GameParticipantRepo,
+) -> None:
+    alice = player_repo.create(polytopia_name="Alice")
+    bob = player_repo.create(polytopia_name="Bob")
+    crazy_bot = player_repo.create(polytopia_name="Crazy Bot")
+    game = game_repo.create_active_game(name="Bots Included")
+    _add_participants(
+        participant_repo,
+        game.id,
+        GameParticipantInput(player_id=alice.id, is_bot=False),
+        GameParticipantInput(player_id=bob.id, is_bot=False),
+        GameParticipantInput(player_id=crazy_bot.id, is_bot=True),
+    )
+
+    dto = report_service.active_games()
+    field = dto.fields[0]
+
+    assert "Alice" in field.value
+    assert "Bob" in field.value
+    assert "Crazy Bot" not in field.value
+    assert "Bots: 1" in field.value
+
+
+def test_recent_completions_participants_separate_humans_from_bots(
+    report_service: ReportService,
+    game_repo: GameRepo,
+    player_repo: PlayerRepo,
+    participant_repo: GameParticipantRepo,
+) -> None:
+    alice = player_repo.create(polytopia_name="Alice")
+    hard_bot = player_repo.create(polytopia_name="Hard Bot")
+    game = game_repo.create_active_game(name="Bot Match")
+    _add_participants(
+        participant_repo,
+        game.id,
+        GameParticipantInput(player_id=alice.id, is_bot=False),
+        GameParticipantInput(player_id=hard_bot.id, is_bot=True),
+    )
+    game_repo.complete_game(game.id, alice.id)
+
+    dto = report_service.recent_completions(lookback_days=7)
+    field = dto.fields[0]
+
+    assert "Alice" in field.value
+    assert "Hard Bot" not in field.value
+    assert "Bots: 1" in field.value

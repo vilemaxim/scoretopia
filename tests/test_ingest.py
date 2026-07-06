@@ -379,6 +379,33 @@ def test_ingest_copies_screenshot_into_inbox(
     assert stored[0].stat().st_size == source.stat().st_size
 
 
+def test_ingest_game_basics_splits_human_and_bot_players_in_report(
+    ingest_service: IngestService,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "start_with_bots.png"
+    Image.new("RGB", (10, 10), color=(0, 0, 255)).save(source)
+    extraction = GameBasicsExtraction(
+        game_name="Bots Included",
+        players=(
+            GameBasicsPlayer(name="Alice", is_you=True),
+            GameBasicsPlayer(name="Bob"),
+            GameBasicsPlayer(name="Crazy Bot"),
+            GameBasicsPlayer(name="Hard Bot"),
+        ),
+    )
+
+    with patch(
+        "scoretopia.domain.ingest.extract_screenshot",
+        return_value=extraction,
+    ):
+        result = ingest_service.ingest(source, uploader_discord_id="uploader-bots")
+
+    assert isinstance(result, GameStarted)
+    assert result.report.human_player_names == ("Alice", "Bob")
+    assert result.report.bot_count == 2
+
+
 # --- Integration tests (real OCR on local samples) ---
 
 
