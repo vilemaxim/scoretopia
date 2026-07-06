@@ -59,6 +59,7 @@ Still on the **Bot** page, under **Privileged Gateway Intents**, turn on:
    - Embed Links
    - Attach Files
    - Read Message History
+   - Add Reactions
 4. Copy the generated URL, open it in a browser, choose your server, and
    authorize the bot.
 

@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass
+from typing import Literal
 
 import discord
 from discord import app_commands
@@ -50,6 +51,10 @@ from scoretopia.storage.models import Game
 from scoretopia.storage.repos import GameRepo, PlayerRepo
 
 _EXTRACT_FAILURE_TYPES = (UnrecognizedScreenshot, IngestError)
+
+_PROCESSING_REACTION = "👀"
+_SUCCESS_REACTION = "👍"
+_FAILURE_REACTION = "❌"
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +126,12 @@ def plan_ingest_response(result: IngestResult) -> ResponsePlan:
     raise TypeError(f"Unsupported ingest result: {type(result)!r}")
 
 
+def plan_ingest_ack_reaction(result: IngestResult) -> Literal["👍", "❌"]:
+    if isinstance(result, (UnrecognizedScreenshot, IngestError)):
+        return _FAILURE_REACTION
+    return _SUCCESS_REACTION
+
+
 def plan_dispute_response(dispute: DisputeResult) -> ResponsePlan:
     return ResponsePlan(
         channel="input",
@@ -163,6 +174,7 @@ class DiscordBotAdapter(BotPort):
         self._channel_ids: dict[str, int] = {}
         self._channels_by_id: dict[int, discord.TextChannel] = {}
         self._publisher: DiscordReportPublisher | None = None
+        self._screenshot_ack_in_flight: dict[int, int] = {}
         self._register_handlers()
 
     def run(self) -> None:
@@ -280,6 +292,26 @@ class DiscordBotAdapter(BotPort):
         message: discord.Message,
         attachment: discord.Attachment,
     ) -> None:
+        await self._begin_screenshot_ack(message)
+        result: IngestResult | None = None
+        try:
+            result = await self._ingest_screenshot_attachment(message, attachment)
+            await self._deliver_ingest_result(message, result)
+        except Exception:
+            await self._finish_screenshot_ack(
+                message,
+                IngestError(message="Screenshot processing failed"),
+            )
+            raise
+        finally:
+            if result is not None:
+                await self._finish_screenshot_ack(message, result)
+
+    async def _ingest_screenshot_attachment(
+        self,
+        message: discord.Message,
+        attachment: discord.Attachment,
+    ) -> IngestResult:
         inbox_path = self._config.inbox.path
         inbox_path.mkdir(parents=True, exist_ok=True)
         destination = inbox_path / attachment.filename
@@ -290,81 +322,141 @@ class DiscordBotAdapter(BotPort):
             stored_path,
         )
         if isinstance(extracted, _EXTRACT_FAILURE_TYPES):
-            result: IngestResult = extracted
-        else:
-            result = self._ingest_service.complete_ingest(
-                stored_path,
-                extracted,
-                uploader_discord_id=str(message.author.id),
-            )
-        await self._deliver_ingest_result(message, result)
+            return extracted
+        return self._ingest_service.complete_ingest(
+            stored_path,
+            extracted,
+            uploader_discord_id=str(message.author.id),
+        )
+
+    async def _begin_screenshot_ack(self, message: discord.Message) -> None:
+        message_id = message.id
+        in_flight = self._screenshot_ack_in_flight.get(message_id, 0)
+        self._screenshot_ack_in_flight[message_id] = in_flight + 1
+        if in_flight == 0:
+            await self._safe_add_reaction(message, _PROCESSING_REACTION)
+
+    async def _finish_screenshot_ack(
+        self,
+        message: discord.Message,
+        result: IngestResult,
+    ) -> None:
+        message_id = message.id
+        in_flight = self._screenshot_ack_in_flight.get(message_id, 0)
+        if in_flight <= 0:
+            await self._apply_final_ack_reaction(message, result)
+            return
+        in_flight -= 1
+        self._screenshot_ack_in_flight[message_id] = in_flight
+        if in_flight == 0:
+            await self._safe_remove_reaction(message, _PROCESSING_REACTION)
+            self._screenshot_ack_in_flight.pop(message_id, None)
+        await self._apply_final_ack_reaction(message, result)
+
+    async def _apply_final_ack_reaction(
+        self,
+        message: discord.Message,
+        result: IngestResult,
+    ) -> None:
+        emoji = plan_ingest_ack_reaction(result)
+        if not self._message_has_reaction(message, emoji):
+            await self._safe_add_reaction(message, emoji)
+
+    async def _safe_add_reaction(
+        self,
+        message: discord.Message,
+        emoji: str,
+    ) -> None:
+        try:
+            await message.add_reaction(emoji)
+        except Exception as exc:
+            logger.warning("Failed to add reaction %s: %s", emoji, exc)
+
+    async def _safe_remove_reaction(
+        self,
+        message: discord.Message,
+        emoji: str,
+    ) -> None:
+        try:
+            await message.remove_reaction(emoji, self._bot.user)
+        except Exception as exc:
+            logger.warning("Failed to remove reaction %s: %s", emoji, exc)
+
+    def _message_has_reaction(self, message: discord.Message, emoji: str) -> bool:
+        return any(str(reaction.emoji) == emoji for reaction in message.reactions)
 
     async def _deliver_ingest_result(
         self,
         message: discord.Message,
         result: IngestResult,
     ) -> None:
-        plan = plan_ingest_response(result)
-        if plan.kind == "embed" and isinstance(result, GameStarted):
-            reports_channel = self._channel("reports")
-            if reports_channel is not None:
-                embed = discord.Embed(
-                    title="Game started",
-                    description=result.report.game_name,
+        try:
+            plan = plan_ingest_response(result)
+            if plan.kind == "embed" and isinstance(result, GameStarted):
+                reports_channel = self._channel("reports")
+                if reports_channel is not None:
+                    embed = discord.Embed(
+                        title="Game started",
+                        description=result.report.game_name,
+                    )
+                    embed.add_field(
+                        name="Players",
+                        value=", ".join(result.report.player_names),
+                        inline=False,
+                    )
+                    await reports_channel.send(embed=embed)
+                return
+
+            if plan.kind == "game_end_confirm_view" and isinstance(
+                result, GameEndNeedsConfirmation
+            ):
+                view = GameEndConfirmView(
+                    interaction_id=result.interaction_id,
+                    game_id=result.game_id,
+                    uploader_discord_id=str(message.author.id),
                 )
-                embed.add_field(
-                    name="Players",
-                    value=", ".join(result.report.player_names),
-                    inline=False,
+                await message.reply(
+                    "Confirm this game end, or mark it as the wrong game.",
+                    view=view,
                 )
-                await reports_channel.send(embed=embed)
-            return
+                return
 
-        if plan.kind == "game_end_confirm_view" and isinstance(
-            result, GameEndNeedsConfirmation
-        ):
-            view = GameEndConfirmView(
-                interaction_id=result.interaction_id,
-                game_id=result.game_id,
-                uploader_discord_id=str(message.author.id),
-            )
-            await message.reply(
-                "Confirm this game end, or mark it as the wrong game.",
-                view=view,
-            )
-            return
+            if plan.kind == "game_end_pick_view" and isinstance(
+                result, GameEndNeedsPick
+            ):
+                games = self._games_for_ids(result.game_ids)
+                view = GameEndPickView(
+                    interaction_id=result.interaction_id,
+                    games=games,
+                    uploader_discord_id=str(message.author.id),
+                )
+                await message.reply("Multiple active games match. Pick one:", view=view)
+                return
 
-        if plan.kind == "game_end_pick_view" and isinstance(result, GameEndNeedsPick):
-            games = self._games_for_ids(result.game_ids)
-            view = GameEndPickView(
-                interaction_id=result.interaction_id,
-                games=games,
-                uploader_discord_id=str(message.author.id),
-            )
-            await message.reply("Multiple active games match. Pick one:", view=view)
-            return
+            if plan.kind == "win_ratio_confirm_view" and isinstance(
+                result, WinRatioNeedsConfirmation
+            ):
+                other_discord_id = self._other_player_discord_id(result.other_player_id)
+                other_mention = (
+                    f"<@{other_discord_id}>" if other_discord_id is not None else ""
+                )
+                view = WinRatioConfirmView(
+                    interaction_id=result.interaction_id,
+                    other_player_discord_id=other_discord_id or "",
+                )
+                content = (
+                    f"{other_mention}, please confirm or reject this win-ratio "
+                    "screenshot."
+                    if other_mention
+                    else "Please confirm or reject this win-ratio screenshot."
+                )
+                await message.reply(content, view=view)
+                return
 
-        if plan.kind == "win_ratio_confirm_view" and isinstance(
-            result, WinRatioNeedsConfirmation
-        ):
-            other_discord_id = self._other_player_discord_id(result.other_player_id)
-            other_mention = (
-                f"<@{other_discord_id}>" if other_discord_id is not None else ""
-            )
-            view = WinRatioConfirmView(
-                interaction_id=result.interaction_id,
-                other_player_discord_id=other_discord_id or "",
-            )
-            content = (
-                f"{other_mention}, please confirm or reject this win-ratio screenshot."
-                if other_mention
-                else "Please confirm or reject this win-ratio screenshot."
-            )
-            await message.reply(content, view=view)
-            return
-
-        if plan.body:
-            await message.reply(plan.body)
+            if plan.body:
+                await message.reply(plan.body)
+        finally:
+            await self._apply_final_ack_reaction(message, result)
 
     async def _handle_component(
         self,

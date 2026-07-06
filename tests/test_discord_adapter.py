@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -26,6 +27,7 @@ from scoretopia.domain.actions import (
     GameEndNeedsPick,
     GameEndPendingStart,
     GameStarted,
+    IngestError,
     UnrecognizedScreenshot,
     WinRatioNeedsConfirmation,
 )
@@ -273,3 +275,291 @@ def test_screenshot_upload_completes_ingest_on_event_loop(tmp_path: Path) -> Non
         uploader_discord_id="99",
     )
     adapter._deliver_ingest_result.assert_awaited_once_with(message, expected)
+
+
+_PROCESSING_REACTION = "👀"
+_SUCCESS_REACTION = "👍"
+_FAILURE_REACTION = "❌"
+
+
+def _screenshot_adapter(tmp_path: Path, ingest_service: MagicMock) -> DiscordBotAdapter:
+    config = MagicMock()
+    config.inbox.path = tmp_path
+    return DiscordBotAdapter(
+        config=config,
+        ingest_service=ingest_service,
+        game_service=MagicMock(),
+        win_ratio_service=MagicMock(),
+        player_service=MagicMock(),
+        report_service=MagicMock(),
+        token="test-token",
+    )
+
+
+def _upload_message(*, message_id: int = 1001) -> MagicMock:
+    message = MagicMock()
+    message.id = message_id
+    message.author.id = 42
+    message.reactions = []
+    message.add_reaction = AsyncMock()
+    message.remove_reaction = AsyncMock()
+    message.reply = AsyncMock()
+    return message
+
+
+def _upload_attachment(filename: str = "shot.png") -> MagicMock:
+    attachment = MagicMock()
+    attachment.filename = filename
+    attachment.save = AsyncMock()
+    return attachment
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (
+            GameStarted(
+                game=_sample_game(),
+                report=ActiveGameReport(
+                    game_id=1,
+                    game_name="Friday Night",
+                    player_names=("Alice", "Bob"),
+                ),
+            ),
+            _SUCCESS_REACTION,
+        ),
+        (GameEndNeedsConfirmation(game_id=1, interaction_id=10), _SUCCESS_REACTION),
+        (GameEndNeedsPick(game_ids=(1, 2), interaction_id=11), _SUCCESS_REACTION),
+        (GameEndPendingStart(interaction_id=12), _SUCCESS_REACTION),
+        (
+            WinRatioNeedsConfirmation(other_player_id=5, interaction_id=13),
+            _SUCCESS_REACTION,
+        ),
+        (
+            UnrecognizedScreenshot(message="Could not recognize this screenshot."),
+            _FAILURE_REACTION,
+        ),
+        (IngestError(message="Failed to read screenshot"), _FAILURE_REACTION),
+    ],
+)
+def test_plan_ingest_ack_reaction_maps_result_to_final_emoji(
+    result: object,
+    expected: str,
+) -> None:
+    from scoretopia.discord.adapter import plan_ingest_ack_reaction
+
+    assert plan_ingest_ack_reaction(result) == expected
+
+
+def test_begin_screenshot_ack_adds_processing_reaction() -> None:
+    adapter = _screenshot_adapter(Path("/tmp"), MagicMock())
+    message = _upload_message()
+
+    asyncio.run(adapter._begin_screenshot_ack(message))
+
+    message.add_reaction.assert_awaited_once_with(_PROCESSING_REACTION)
+
+
+def test_finish_screenshot_ack_removes_processing_and_adds_success() -> None:
+    adapter = _screenshot_adapter(Path("/tmp"), MagicMock())
+    message = _upload_message()
+    result = GameEndNeedsConfirmation(game_id=1, interaction_id=10)
+
+    asyncio.run(adapter._begin_screenshot_ack(message))
+    message.add_reaction.reset_mock()
+    asyncio.run(adapter._finish_screenshot_ack(message, result))
+
+    message.remove_reaction.assert_awaited_once_with(
+        _PROCESSING_REACTION,
+        adapter._bot.user,
+    )
+    message.add_reaction.assert_awaited_once_with(_SUCCESS_REACTION)
+
+
+def test_finish_screenshot_ack_adds_failure_reaction_for_unrecognized() -> None:
+    adapter = _screenshot_adapter(Path("/tmp"), MagicMock())
+    message = _upload_message()
+    result = UnrecognizedScreenshot(message="Could not recognize this screenshot.")
+
+    asyncio.run(adapter._begin_screenshot_ack(message))
+    message.add_reaction.reset_mock()
+    asyncio.run(adapter._finish_screenshot_ack(message, result))
+
+    message.remove_reaction.assert_awaited_once_with(
+        _PROCESSING_REACTION,
+        adapter._bot.user,
+    )
+    message.add_reaction.assert_awaited_once_with(_FAILURE_REACTION)
+
+
+def test_screenshot_upload_reaction_lifecycle_for_recognized_result(
+    tmp_path: Path,
+) -> None:
+    stored_path = tmp_path / "start.png"
+    result = GameEndNeedsConfirmation(game_id=1, interaction_id=10)
+    ingest_service = MagicMock()
+    ingest_service.prepare_stored_path.return_value = stored_path
+    ingest_service.extract_stored_screenshot.return_value = MagicMock()
+    ingest_service.complete_ingest.return_value = result
+
+    adapter = _screenshot_adapter(tmp_path, ingest_service)
+    adapter._deliver_ingest_result = AsyncMock()
+    message = _upload_message()
+    attachment = _upload_attachment("start.png")
+
+    asyncio.run(adapter._handle_screenshot_upload(message, attachment))
+
+    reaction_calls = [call.args[0] for call in message.add_reaction.await_args_list]
+    assert reaction_calls[0] == _PROCESSING_REACTION
+    assert _SUCCESS_REACTION in reaction_calls
+    message.remove_reaction.assert_awaited_with(
+        _PROCESSING_REACTION,
+        adapter._bot.user,
+    )
+    adapter._deliver_ingest_result.assert_awaited_once_with(message, result)
+
+
+def test_screenshot_upload_reaction_lifecycle_for_unrecognized_result(
+    tmp_path: Path,
+) -> None:
+    stored_path = tmp_path / "bad.png"
+    result = UnrecognizedScreenshot(message="Could not recognize this screenshot.")
+    ingest_service = MagicMock()
+    ingest_service.prepare_stored_path.return_value = stored_path
+    ingest_service.extract_stored_screenshot.return_value = result
+
+    adapter = _screenshot_adapter(tmp_path, ingest_service)
+    adapter._deliver_ingest_result = AsyncMock()
+    message = _upload_message()
+    attachment = _upload_attachment("bad.png")
+
+    asyncio.run(adapter._handle_screenshot_upload(message, attachment))
+
+    reaction_calls = [call.args[0] for call in message.add_reaction.await_args_list]
+    assert reaction_calls[0] == _PROCESSING_REACTION
+    assert _FAILURE_REACTION in reaction_calls
+    message.remove_reaction.assert_awaited_with(
+        _PROCESSING_REACTION,
+        adapter._bot.user,
+    )
+    adapter._deliver_ingest_result.assert_awaited_once_with(message, result)
+
+
+def test_deliver_ingest_result_applies_final_ack_reaction(tmp_path: Path) -> None:
+    adapter = _screenshot_adapter(tmp_path, MagicMock())
+    message = _upload_message()
+    result = UnrecognizedScreenshot(message="Could not recognize this screenshot.")
+
+    asyncio.run(adapter._deliver_ingest_result(message, result))
+
+    message.add_reaction.assert_awaited_with(_FAILURE_REACTION)
+
+
+def test_multi_attachment_adds_processing_reaction_once() -> None:
+    adapter = _screenshot_adapter(Path("/tmp"), MagicMock())
+    message = _upload_message()
+
+    asyncio.run(adapter._begin_screenshot_ack(message))
+    asyncio.run(adapter._begin_screenshot_ack(message))
+
+    processing_calls = [
+        call.args[0]
+        for call in message.add_reaction.await_args_list
+        if call.args[0] == _PROCESSING_REACTION
+    ]
+    assert len(processing_calls) == 1
+
+
+def test_multi_attachment_keeps_processing_reaction_until_all_complete() -> None:
+    adapter = _screenshot_adapter(Path("/tmp"), MagicMock())
+    message = _upload_message()
+    success = GameEndNeedsConfirmation(game_id=1, interaction_id=10)
+
+    asyncio.run(adapter._begin_screenshot_ack(message))
+    asyncio.run(adapter._begin_screenshot_ack(message))
+    asyncio.run(adapter._finish_screenshot_ack(message, success))
+    message.remove_reaction.assert_not_awaited()
+
+    asyncio.run(adapter._finish_screenshot_ack(message, success))
+    message.remove_reaction.assert_awaited_once_with(
+        _PROCESSING_REACTION,
+        adapter._bot.user,
+    )
+
+
+def test_multi_attachment_does_not_duplicate_success_reaction() -> None:
+    adapter = _screenshot_adapter(Path("/tmp"), MagicMock())
+    message = _upload_message()
+    existing = MagicMock()
+    existing.emoji = _SUCCESS_REACTION
+    message.reactions = [existing]
+    success = GameEndNeedsConfirmation(game_id=1, interaction_id=10)
+
+    asyncio.run(adapter._begin_screenshot_ack(message))
+    asyncio.run(adapter._finish_screenshot_ack(message, success))
+    asyncio.run(adapter._begin_screenshot_ack(message))
+    asyncio.run(adapter._finish_screenshot_ack(message, success))
+
+    success_calls = [
+        call.args[0]
+        for call in message.add_reaction.await_args_list
+        if call.args[0] == _SUCCESS_REACTION
+    ]
+    assert len(success_calls) == 0
+
+
+def test_reaction_api_failure_does_not_block_ingest_delivery(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stored_path = tmp_path / "shot.png"
+    result = UnrecognizedScreenshot(message="Could not recognize this screenshot.")
+    ingest_service = MagicMock()
+    ingest_service.prepare_stored_path.return_value = stored_path
+    ingest_service.extract_stored_screenshot.return_value = result
+
+    adapter = _screenshot_adapter(tmp_path, ingest_service)
+    adapter._deliver_ingest_result = AsyncMock()
+    message = _upload_message()
+    message.add_reaction = AsyncMock(side_effect=RuntimeError("missing permission"))
+    attachment = _upload_attachment()
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(adapter._handle_screenshot_upload(message, attachment))
+
+    adapter._deliver_ingest_result.assert_awaited_once_with(message, result)
+    assert any("missing permission" in record.message for record in caplog.records)
+
+
+def test_screenshot_upload_applies_failure_reaction_on_unexpected_error(
+    tmp_path: Path,
+) -> None:
+    stored_path = tmp_path / "shot.png"
+    ingest_service = MagicMock()
+    ingest_service.prepare_stored_path.return_value = stored_path
+    ingest_service.extract_stored_screenshot.side_effect = RuntimeError("boom")
+
+    adapter = _screenshot_adapter(tmp_path, ingest_service)
+    adapter._deliver_ingest_result = AsyncMock()
+    message = _upload_message()
+    attachment = _upload_attachment()
+
+    with pytest.raises(RuntimeError, match="boom"):
+        asyncio.run(adapter._handle_screenshot_upload(message, attachment))
+
+    reaction_calls = [call.args[0] for call in message.add_reaction.await_args_list]
+    assert reaction_calls[0] == _PROCESSING_REACTION
+    assert _FAILURE_REACTION in reaction_calls
+    message.remove_reaction.assert_awaited_with(
+        _PROCESSING_REACTION,
+        adapter._bot.user,
+    )
+    adapter._deliver_ingest_result.assert_not_awaited()
+
+
+def test_readme_lists_add_reactions_permission() -> None:
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Add Reactions" in readme
