@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+
 from scoretopia.domain.matching import (
     human_participant_key,
     normalize_participant_name,

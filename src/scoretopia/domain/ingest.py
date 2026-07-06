@@ -19,6 +19,7 @@ from scoretopia.domain.actions import (
 from scoretopia.domain.games import GameService
 from scoretopia.domain.players import PlayerService
 from scoretopia.domain.results import MatchOutcome
+from scoretopia.domain.win_ratios import WinRatioService
 from scoretopia.screenshot.extract import DEFAULT_MODEL_DIR, extract_screenshot
 from scoretopia.screenshot.models import (
     FriendProfileExtraction,
@@ -39,12 +40,14 @@ class IngestService:
         *,
         player_service: PlayerService,
         game_service: GameService,
+        win_ratio_service: WinRatioService,
         pending_repo: PendingInteractionRepo,
         inbox_path: Path,
         model_dir: str | Path = DEFAULT_MODEL_DIR,
     ) -> None:
         self._player_service = player_service
         self._game_service = game_service
+        self._win_ratio_service = win_ratio_service
         self._pending_repo = pending_repo
         self._inbox_path = inbox_path
         self._model_dir = model_dir
@@ -188,23 +191,12 @@ class IngestService:
         stored_path: Path,
         uploader_discord_id: str,
     ) -> WinRatioNeedsConfirmation:
-        friend_name = extraction.friend_name or extraction.win_ratio.friend_name
-        assert friend_name is not None
-        friend = self._player_service.resolve_or_create_polytopia_name(friend_name)
-
-        payload: dict[str, object] = {
-            "screenshot_path": str(stored_path),
-            "friend_name": friend_name,
-            "you_wins": extraction.win_ratio.you_wins,
-            "friend_wins": extraction.win_ratio.friend_wins,
-            "other_player_id": friend.id,
-        }
-        pending = self._create_pending(
-            kind="win_ratio_needs_confirmation",
-            discord_user_id=uploader_discord_id,
-            payload=payload,
+        pending = self._win_ratio_service.submit_from_screenshot(
+            extraction,
+            uploader_discord_id,
+            screenshot_path=str(stored_path),
         )
         return WinRatioNeedsConfirmation(
-            other_player_id=friend.id,
-            interaction_id=pending.id,
+            other_player_id=pending.other_player_id,
+            interaction_id=pending.interaction_id,
         )
