@@ -200,6 +200,15 @@ class GameRepo:
         ).fetchall()
         return [_game_from_row(row) for row in rows]
 
+    def list_completed_since(self, since: datetime) -> list[Game]:
+        rows = self._conn.execute(
+            f"{_GAME_SELECT} "
+            "WHERE status = 'completed' AND completed_at >= ? "
+            "ORDER BY completed_at DESC",
+            (_format_datetime(since),),
+        ).fetchall()
+        return [_game_from_row(row) for row in rows]
+
     def list_active_by_participants(
         self, participant_names: Iterable[str]
     ) -> list[Game]:
@@ -476,6 +485,16 @@ class PlayerPairRatioRepo:
             wins=wins,
             source=source,
         )
+
+    def list_all(self) -> list[PlayerPairRatio]:
+        rows = self._conn.execute(
+            """
+            SELECT player_a_id, player_b_id, wins, source, updated_at
+            FROM player_pair_ratios
+            ORDER BY player_a_id, player_b_id
+            """
+        ).fetchall()
+        return [_ratio_from_row(row) for row in rows]
 
 
 class DisputeRepo:
