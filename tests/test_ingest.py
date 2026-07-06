@@ -20,6 +20,7 @@ from scoretopia.domain.actions import (
 from scoretopia.domain.games import GameService
 from scoretopia.domain.ingest import IngestService
 from scoretopia.domain.players import PlayerService
+from scoretopia.domain.win_ratios import WinRatioService
 from scoretopia.screenshot.models import (
     FriendProfileExtraction,
     GameBasicsExtraction,
@@ -30,9 +31,11 @@ from scoretopia.screenshot.models import (
 )
 from scoretopia.storage.db import open_database
 from scoretopia.storage.repos import (
+    DisputeRepo,
     GameParticipantRepo,
     GameRepo,
     PendingInteractionRepo,
+    PlayerPairRatioRepo,
     PlayerRepo,
 )
 
@@ -73,6 +76,16 @@ def pending_repo(conn: sqlite3.Connection) -> PendingInteractionRepo:
 
 
 @pytest.fixture
+def ratio_repo(conn: sqlite3.Connection) -> PlayerPairRatioRepo:
+    return PlayerPairRatioRepo(conn)
+
+
+@pytest.fixture
+def dispute_repo(conn: sqlite3.Connection) -> DisputeRepo:
+    return DisputeRepo(conn)
+
+
+@pytest.fixture
 def player_service(player_repo: PlayerRepo) -> PlayerService:
     return PlayerService(player_repo)
 
@@ -87,6 +100,21 @@ def game_service(
 
 
 @pytest.fixture
+def win_ratio_service(
+    player_repo: PlayerRepo,
+    pending_repo: PendingInteractionRepo,
+    ratio_repo: PlayerPairRatioRepo,
+    dispute_repo: DisputeRepo,
+) -> WinRatioService:
+    return WinRatioService(
+        player_repo,
+        pending_repo,
+        ratio_repo,
+        dispute_repo,
+    )
+
+
+@pytest.fixture
 def inbox_path(tmp_path: Path) -> Path:
     path = tmp_path / "inbox"
     path.mkdir()
@@ -97,12 +125,14 @@ def inbox_path(tmp_path: Path) -> Path:
 def ingest_service(
     player_service: PlayerService,
     game_service: GameService,
+    win_ratio_service: WinRatioService,
     pending_repo: PendingInteractionRepo,
     inbox_path: Path,
 ) -> IngestService:
     return IngestService(
         player_service=player_service,
         game_service=game_service,
+        win_ratio_service=win_ratio_service,
         pending_repo=pending_repo,
         inbox_path=inbox_path,
         model_dir=MODEL_DIR,
