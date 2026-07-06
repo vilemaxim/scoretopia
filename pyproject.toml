@@ -8,12 +8,14 @@ version = "0.1.0"
 description = "Discord bot for tracking Polytopia game results"
 requires-python = ">=3.12"
 dependencies = [
+    "croniter>=2.0",
     "easyocr>=1.7",
     "pillow>=10.0",
     "pyyaml>=6.0",
 ]
 
 [project.scripts]
+scoretopia = "scoretopia.cli:main"
 scoretopia-extract = "scoretopia.screenshot.cli:main"
 
 [tool.setuptools.packages.find]
