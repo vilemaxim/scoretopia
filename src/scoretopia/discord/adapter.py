@@ -8,6 +8,7 @@ Create a bot at https://discord.com/developers, invite it with the
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass
@@ -281,7 +282,8 @@ class DiscordBotAdapter(BotPort):
         inbox_path.mkdir(parents=True, exist_ok=True)
         destination = inbox_path / attachment.filename
         await attachment.save(destination)
-        result = self._ingest_service.ingest(
+        result = await asyncio.to_thread(
+            self._ingest_service.ingest,
             destination,
             uploader_discord_id=str(message.author.id),
         )

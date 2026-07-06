@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from unittest.mock import MagicMock
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -171,3 +174,76 @@ def test_discord_bot_adapter_implements_bot_port() -> None:
     )
 
     assert isinstance(adapter, BotPort)
+
+
+def test_screenshot_upload_runs_ingest_off_event_loop(tmp_path: Path) -> None:
+    loop_thread_id = threading.get_ident()
+    ingest_thread_id: int | None = None
+
+    def ingest(_path: Path, *, uploader_discord_id: str) -> UnrecognizedScreenshot:
+        nonlocal ingest_thread_id
+        ingest_thread_id = threading.get_ident()
+        return UnrecognizedScreenshot(message="Could not recognize this screenshot.")
+
+    ingest_service = MagicMock()
+    ingest_service.ingest.side_effect = ingest
+
+    config = MagicMock()
+    config.inbox.path = tmp_path
+
+    adapter = DiscordBotAdapter(
+        config=config,
+        ingest_service=ingest_service,
+        game_service=MagicMock(),
+        win_ratio_service=MagicMock(),
+        player_service=MagicMock(),
+        report_service=MagicMock(),
+        token="test-token",
+    )
+    adapter._deliver_ingest_result = AsyncMock()
+
+    message = MagicMock()
+    message.author.id = 42
+    attachment = MagicMock()
+    attachment.filename = "shot.png"
+    attachment.save = AsyncMock()
+
+    asyncio.run(adapter._handle_screenshot_upload(message, attachment))
+
+    assert ingest_thread_id is not None
+    assert ingest_thread_id != loop_thread_id
+    ingest_service.ingest.assert_called_once_with(
+        tmp_path / "shot.png",
+        uploader_discord_id="42",
+    )
+    adapter._deliver_ingest_result.assert_awaited_once()
+
+
+def test_screenshot_upload_delivers_ingest_result(tmp_path: Path) -> None:
+    expected = UnrecognizedScreenshot(message="Could not recognize this screenshot.")
+    ingest_service = MagicMock()
+    ingest_service.ingest.return_value = expected
+
+    config = MagicMock()
+    config.inbox.path = tmp_path
+
+    adapter = DiscordBotAdapter(
+        config=config,
+        ingest_service=ingest_service,
+        game_service=MagicMock(),
+        win_ratio_service=MagicMock(),
+        player_service=MagicMock(),
+        report_service=MagicMock(),
+        token="test-token",
+    )
+    adapter._deliver_ingest_result = AsyncMock()
+
+    message = MagicMock()
+    message.author.id = 99
+    attachment = MagicMock()
+    attachment.filename = "end.png"
+    attachment.save = AsyncMock()
+
+    asyncio.run(adapter._handle_screenshot_upload(message, attachment))
+
+    adapter._deliver_ingest_result.assert_awaited_once_with(message, expected)
