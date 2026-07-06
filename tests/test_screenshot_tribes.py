@@ -1,6 +1,7 @@
 """Tests for OCR tribe name resolution (Task 002)."""
 
 import pytest
+
 from scoretopia.screenshot.tribes import CANONICAL_TRIBES, resolve_ocr_tribe
 
 

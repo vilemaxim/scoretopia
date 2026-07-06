@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
-from scoretopia.screenshot.icons import is_skull_avatar
 
 from scoretopia.screenshot.extract import extract_screenshot, format_extraction
+from scoretopia.screenshot.icons import is_skull_avatar
 from scoretopia.screenshot.models import GameBasicsExtraction, GameBasicsPlayer
 from scoretopia.screenshot.parsers import OCRLine, detect_screenshot_type
 
