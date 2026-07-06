@@ -49,6 +49,8 @@ from scoretopia.reports.service import ReportService
 from scoretopia.storage.models import Game
 from scoretopia.storage.repos import GameRepo, PlayerRepo
 
+_EXTRACT_FAILURE_TYPES = (UnrecognizedScreenshot, IngestError)
+
 logger = logging.getLogger(__name__)
 
 _TOKEN_ENV_VAR = "SCORETOPIA_DISCORD_TOKEN"
@@ -282,11 +284,19 @@ class DiscordBotAdapter(BotPort):
         inbox_path.mkdir(parents=True, exist_ok=True)
         destination = inbox_path / attachment.filename
         await attachment.save(destination)
-        result = await asyncio.to_thread(
-            self._ingest_service.ingest,
-            destination,
-            uploader_discord_id=str(message.author.id),
+        stored_path = self._ingest_service.prepare_stored_path(destination)
+        extracted = await asyncio.to_thread(
+            self._ingest_service.extract_stored_screenshot,
+            stored_path,
         )
+        if isinstance(extracted, _EXTRACT_FAILURE_TYPES):
+            result: IngestResult = extracted
+        else:
+            result = self._ingest_service.complete_ingest(
+                stored_path,
+                extracted,
+                uploader_discord_id=str(message.author.id),
+            )
         await self._deliver_ingest_result(message, result)
 
     async def _deliver_ingest_result(

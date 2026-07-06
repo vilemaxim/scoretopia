@@ -22,6 +22,7 @@ from scoretopia.domain.results import MatchOutcome
 from scoretopia.domain.win_ratios import WinRatioService
 from scoretopia.screenshot.extract import DEFAULT_MODEL_DIR, extract_screenshot
 from scoretopia.screenshot.models import (
+    ExtractionResult,
     FriendProfileExtraction,
     GameBasicsExtraction,
     GameEndExtraction,
@@ -59,11 +60,26 @@ class IngestService:
         *,
         uploader_discord_id: str,
     ) -> IngestResult:
-        source = Path(image_path)
-        stored_path = self._store_in_inbox(source)
+        stored_path = self.prepare_stored_path(image_path)
+        extracted = self.extract_stored_screenshot(stored_path)
+        if isinstance(extracted, (UnrecognizedScreenshot, IngestError)):
+            return extracted
+        return self.complete_ingest(
+            stored_path,
+            extracted,
+            uploader_discord_id=uploader_discord_id,
+        )
 
+    def prepare_stored_path(self, image_path: str | Path) -> Path:
+        return self._store_in_inbox(Path(image_path))
+
+    def extract_stored_screenshot(
+        self,
+        stored_path: str | Path,
+    ) -> ExtractionResult | UnrecognizedScreenshot | IngestError:
+        path = Path(stored_path)
         try:
-            extraction = extract_screenshot(stored_path, model_dir=self._model_dir)
+            return extract_screenshot(path, model_dir=self._model_dir)
         except ValueError:
             return UnrecognizedScreenshot(message=_UNRECOGNIZED_MESSAGE)
         except FileNotFoundError as exc:
@@ -71,6 +87,13 @@ class IngestService:
         except OSError as exc:
             return IngestError(message="Failed to read screenshot", detail=str(exc))
 
+    def complete_ingest(
+        self,
+        stored_path: Path,
+        extraction: ExtractionResult,
+        *,
+        uploader_discord_id: str,
+    ) -> IngestResult:
         if isinstance(extraction, GameBasicsExtraction):
             return self._handle_game_basics(
                 extraction,

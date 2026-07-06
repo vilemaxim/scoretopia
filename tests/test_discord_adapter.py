@@ -176,17 +176,19 @@ def test_discord_bot_adapter_implements_bot_port() -> None:
     assert isinstance(adapter, BotPort)
 
 
-def test_screenshot_upload_runs_ingest_off_event_loop(tmp_path: Path) -> None:
+def test_screenshot_upload_runs_ocr_off_event_loop(tmp_path: Path) -> None:
     loop_thread_id = threading.get_ident()
-    ingest_thread_id: int | None = None
+    extract_thread_id: int | None = None
+    stored_path = tmp_path / "shot.png"
 
-    def ingest(_path: Path, *, uploader_discord_id: str) -> UnrecognizedScreenshot:
-        nonlocal ingest_thread_id
-        ingest_thread_id = threading.get_ident()
+    def extract_stored(_path: Path) -> UnrecognizedScreenshot:
+        nonlocal extract_thread_id
+        extract_thread_id = threading.get_ident()
         return UnrecognizedScreenshot(message="Could not recognize this screenshot.")
 
     ingest_service = MagicMock()
-    ingest_service.ingest.side_effect = ingest
+    ingest_service.prepare_stored_path.return_value = stored_path
+    ingest_service.extract_stored_screenshot.side_effect = extract_stored
 
     config = MagicMock()
     config.inbox.path = tmp_path
@@ -210,19 +212,37 @@ def test_screenshot_upload_runs_ingest_off_event_loop(tmp_path: Path) -> None:
 
     asyncio.run(adapter._handle_screenshot_upload(message, attachment))
 
-    assert ingest_thread_id is not None
-    assert ingest_thread_id != loop_thread_id
-    ingest_service.ingest.assert_called_once_with(
-        tmp_path / "shot.png",
-        uploader_discord_id="42",
-    )
+    assert extract_thread_id is not None
+    assert extract_thread_id != loop_thread_id
+    ingest_service.prepare_stored_path.assert_called_once_with(stored_path)
+    ingest_service.extract_stored_screenshot.assert_called_once_with(stored_path)
+    ingest_service.complete_ingest.assert_not_called()
     adapter._deliver_ingest_result.assert_awaited_once()
 
 
-def test_screenshot_upload_delivers_ingest_result(tmp_path: Path) -> None:
+def test_screenshot_upload_completes_ingest_on_event_loop(tmp_path: Path) -> None:
+    loop_thread_id = threading.get_ident()
+    complete_thread_id: int | None = None
+    stored_path = tmp_path / "end.png"
+    extraction = MagicMock()
     expected = UnrecognizedScreenshot(message="Could not recognize this screenshot.")
+
     ingest_service = MagicMock()
-    ingest_service.ingest.return_value = expected
+    ingest_service.prepare_stored_path.return_value = stored_path
+    ingest_service.extract_stored_screenshot.return_value = extraction
+
+    def complete_ingest(
+        _stored_path: Path,
+        _extraction: object,
+        *,
+        uploader_discord_id: str,
+    ) -> UnrecognizedScreenshot:
+        nonlocal complete_thread_id
+        complete_thread_id = threading.get_ident()
+        assert uploader_discord_id == "99"
+        return expected
+
+    ingest_service.complete_ingest.side_effect = complete_ingest
 
     config = MagicMock()
     config.inbox.path = tmp_path
@@ -246,4 +266,10 @@ def test_screenshot_upload_delivers_ingest_result(tmp_path: Path) -> None:
 
     asyncio.run(adapter._handle_screenshot_upload(message, attachment))
 
+    assert complete_thread_id == loop_thread_id
+    ingest_service.complete_ingest.assert_called_once_with(
+        stored_path,
+        extraction,
+        uploader_discord_id="99",
+    )
     adapter._deliver_ingest_result.assert_awaited_once_with(message, expected)
