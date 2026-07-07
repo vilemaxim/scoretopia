@@ -44,6 +44,7 @@ SAMPLES_DIR = PROJECT_ROOT / "samples" / "screenshots"
 MODEL_DIR = PROJECT_ROOT / ".easyocr_models"
 
 GAME_BASICS_SAMPLE = SAMPLES_DIR / "game-basics.png"
+LOBBY_SAMPLE = SAMPLES_DIR / "game start error.png"
 GAME_END_SAMPLE = SAMPLES_DIR / "game_end.png"
 FRIEND_PROFILE_SAMPLE = SAMPLES_DIR / "players_compared.png"
 
@@ -407,6 +408,23 @@ def test_ingest_game_basics_splits_human_and_bot_players_in_report(
 
 
 # --- Integration tests (real OCR on local samples) ---
+
+
+@pytest.mark.skipif(
+    not LOBBY_SAMPLE.is_file(),
+    reason="Local lobby sample screenshot not present",
+)
+def test_ingest_lobby_sample_returns_game_started_not_unrecognized(
+    ingest_service: IngestService,
+) -> None:
+    result = ingest_service.ingest(
+        LOBBY_SAMPLE,
+        uploader_discord_id="integration-lobby-uploader",
+    )
+
+    assert not isinstance(result, UnrecognizedScreenshot)
+    assert isinstance(result, GameStarted)
+    assert result.game.name == "Strait of Uhfixi"
 
 
 @pytest.mark.skipif(

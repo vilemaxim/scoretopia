@@ -62,10 +62,15 @@ def detect_screenshot_type(results: list[OCRLine]) -> str:
 
 
 def _looks_like_game_basics(text: str) -> bool:
-    has_resign = "resign" in text
     has_game_timer = "game timer" in text
     has_score_mode = "glory" in text or "might" in text
-    return has_resign and has_game_timer and has_score_mode
+    has_in_game_controls = "resign" in text or "leave" in text
+    has_lobby_status = (
+        "waiting" in text and "accept" in text and "invitation" in text
+    )
+    return has_game_timer and has_score_mode and (
+        has_in_game_controls or has_lobby_status
+    )
 
 
 def parse_game_end(results: list[OCRLine]) -> GameEndExtraction:
