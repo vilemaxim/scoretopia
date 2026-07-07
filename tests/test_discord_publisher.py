@@ -5,8 +5,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
-from scoretopia.discord.embeds import ReportKind
 
+from scoretopia.discord.embeds import ReportKind
 from scoretopia.discord.publisher import DiscordReportPublisher, report_to_embed
 from scoretopia.reports.dto import ReportDTO, ReportField
 

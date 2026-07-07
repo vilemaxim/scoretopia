@@ -9,9 +9,11 @@ import pytest
 
 from scoretopia.reports.dto import ReportDTO, ReportField
 from scoretopia.reports.format import format_report_text
+from scoretopia.reports.game_settings import active_game_stats_line
+from scoretopia.reports.kinds import ReportKind
 from scoretopia.reports.service import ReportService
 from scoretopia.storage.db import open_database
-from scoretopia.storage.models import GameParticipantInput
+from scoretopia.storage.models import Game, GameParticipantInput
 from scoretopia.storage.repos import (
     GameParticipantRepo,
     GameRepo,
@@ -82,6 +84,7 @@ def test_active_games_lists_open_games_with_player_names(
     game_repo: GameRepo,
     player_repo: PlayerRepo,
     participant_repo: GameParticipantRepo,
+    conn: sqlite3.Connection,
 ) -> None:
     alice = player_repo.create(polytopia_name="Alice")
     bob = player_repo.create(polytopia_name="Bob")
@@ -93,6 +96,11 @@ def test_active_games_lists_open_games_with_player_names(
         target_score=10000,
         game_timer="One Week",
     )
+    conn.execute(
+        "UPDATE games SET created_at = ? WHERE id = ?",
+        ("2026-07-06T00:00:00+00:00", game.id),
+    )
+    conn.commit()
     _add_human_participants(participant_repo, game.id, alice.id, bob.id)
 
     dto = report_service.active_games()
@@ -103,10 +111,11 @@ def test_active_games_lists_open_games_with_player_names(
     field = dto.fields[0]
     assert isinstance(field, ReportField)
     assert field.label == "Friday Night"
-    assert "Alice" in field.value
-    assert "Bob" in field.value
-    assert "Drylands" in field.value
-    assert "12" in field.value
+    stats_line, players_line = field.value.split("\n", maxsplit=1)
+    assert stats_line == (
+        "Started 2026-07-06 · Drylands · 12 · Domination · score 10000 · One Week"
+    )
+    assert players_line == "Alice, Bob"
 
 
 def test_active_games_excludes_completed_games(
@@ -278,10 +287,148 @@ def test_active_games_participants_separate_humans_from_bots(
     dto = report_service.active_games()
     field = dto.fields[0]
 
-    assert "Alice" in field.value
-    assert "Bob" in field.value
+    _stats_line, players_line = field.value.split("\n", maxsplit=1)
+    assert players_line == "Alice, Bob · Bots: 1"
     assert "Crazy Bot" not in field.value
-    assert "Bots: 1" in field.value
+
+
+def test_active_game_stats_line_uses_placeholders_for_missing_metadata() -> None:
+    game = Game(
+        id=1,
+        name="Bare Game",
+        status="active",
+        map_size=None,
+        terrain=None,
+        game_type=None,
+        target_score=None,
+        game_timer=None,
+        winner_player_id=None,
+        created_at=None,
+    )
+
+    assert active_game_stats_line(game) == (
+        "Started unknown · terrain unknown · size unknown · mode unknown · "
+        "score unknown · timer unknown"
+    )
+
+
+def test_active_game_stats_line_orders_segments_with_full_metadata() -> None:
+    game = Game(
+        id=1,
+        name="Ice Warriors",
+        status="active",
+        map_size=324,
+        terrain="Lakes",
+        game_type="Glory",
+        target_score=25000,
+        game_timer="24 hours",
+        winner_player_id=None,
+        created_at=datetime(2026, 7, 6, tzinfo=UTC),
+    )
+
+    assert active_game_stats_line(game) == (
+        "Started 2026-07-06 · Lakes · 324 · Glory · score 25000 · 24 hours"
+    )
+
+
+def test_active_games_bots_only_shows_no_players_recorded(
+    report_service: ReportService,
+    game_repo: GameRepo,
+    player_repo: PlayerRepo,
+    participant_repo: GameParticipantRepo,
+) -> None:
+    bot = player_repo.create(polytopia_name="Hard Bot")
+    game = game_repo.create_active_game(name="Bot Lobby")
+    _add_participants(
+        participant_repo,
+        game.id,
+        GameParticipantInput(player_id=bot.id, is_bot=True),
+    )
+
+    dto = report_service.active_games()
+    _stats_line, players_line = dto.fields[0].value.split("\n", maxsplit=1)
+
+    assert players_line == "no players recorded · Bots: 1"
+
+
+def test_active_games_no_bots_omits_bots_segment(
+    report_service: ReportService,
+    game_repo: GameRepo,
+    player_repo: PlayerRepo,
+    participant_repo: GameParticipantRepo,
+) -> None:
+    alice = player_repo.create(polytopia_name="Alice")
+    game = game_repo.create_active_game(name="Humans Only")
+    _add_human_participants(participant_repo, game.id, alice.id)
+
+    dto = report_service.active_games()
+    _stats_line, players_line = dto.fields[0].value.split("\n", maxsplit=1)
+
+    assert players_line == "Alice"
+    assert "Bots:" not in players_line
+
+
+def test_format_report_text_active_games_uses_three_line_layout() -> None:
+    dto = ReportDTO(
+        title="Active Games",
+        description="2 game(s) currently in progress.",
+        fields=[
+            ReportField(
+                label="Ice Warriors",
+                value=(
+                    "Started 2026-07-06 · Lakes · 324 · Glory · "
+                    "score 25000 · 24 hours\n"
+                    "Diremouse01, Lord Union 409, vilemaxim1 · Bots: 1"
+                ),
+            ),
+            ReportField(
+                label="Bones of Toki",
+                value=(
+                    "Started unknown · terrain unknown · size unknown · mode unknown · "
+                    "score unknown · timer unknown\n"
+                    "no players recorded"
+                ),
+            ),
+        ],
+        footer="Updated just now",
+        kind=ReportKind.active_games,
+    )
+
+    text = format_report_text(dto)
+
+    assert text == (
+        "Active Games\n"
+        "2 game(s) currently in progress.\n"
+        "\n"
+        "Ice Warriors\n"
+        "Started 2026-07-06 · Lakes · 324 · Glory · score 25000 · 24 hours\n"
+        "Diremouse01, Lord Union 409, vilemaxim1 · Bots: 1\n"
+        "\n"
+        "Bones of Toki\n"
+        "Started unknown · terrain unknown · size unknown · mode unknown · "
+        "score unknown · timer unknown\n"
+        "no players recorded\n"
+        "\n"
+        "Updated just now"
+    )
+
+
+def test_format_report_text_recent_completions_keeps_label_colon_value() -> None:
+    dto = ReportDTO(
+        title="Recent Completions",
+        description="1 game(s) completed in the last 7 day(s).",
+        fields=[
+            ReportField(
+                label="Recent Win",
+                value="Winner: Alice · Alice, Bob · Completed 2026-07-01",
+            ),
+        ],
+        kind=ReportKind.recent_completions,
+    )
+
+    text = format_report_text(dto)
+
+    assert "Recent Win: Winner: Alice" in text
 
 
 def test_recent_completions_participants_separate_humans_from_bots(
