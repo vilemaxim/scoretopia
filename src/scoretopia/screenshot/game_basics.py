@@ -11,6 +11,7 @@ from scoretopia.screenshot.parsers import (
     OCRLine,
     _line_texts,
     _match_label_value,
+    _normalize_ocr_name,
     _parse_int,
     _sorted_lines,
 )
@@ -19,7 +20,12 @@ _TIMER_UNITS = frozenset(
     {"hour", "hours", "day", "days", "minute", "minutes"}
 )
 _PLAYER_REGION_Y = (1200, 1750)
-_DIREMOUSE_MARKERS = ("diremou", "seo1", "se01")
+_PLAYER_ROW_TOLERANCE = 25.0
+_PLAYER_STRIP_Y_GAP = 70.0
+_X_ALIGN_TOLERANCE = 80.0
+_UI_LABELS = frozenset({"back", "open", "start game", "add", "start", "game"})
+_CRAZY_BOT_PATTERN = re.compile(r"crazy\s*bot", re.IGNORECASE)
+_YOU_PATTERN = re.compile(r"\byou\b", re.IGNORECASE)
 
 
 def parse_game_basics(
@@ -206,27 +212,326 @@ def _extract_turn_status(results: list[OCRLine]) -> str | None:
     return None
 
 
-def _player_names_from_text(player_text_lower: str) -> list[str]:
-    names: list[str] = []
-    if "lord" in player_text_lower and "union" in player_text_lower:
-        names.append("Lord Union 409")
-    if "vilemaxi" in player_text_lower:
-        names.append("vilemaxim1")
-    if any(marker in player_text_lower for marker in _DIREMOUSE_MARKERS):
-        names.append("Diremouse01")
+def _count_crazy_bots(text: str) -> int:
+    return len(_CRAZY_BOT_PATTERN.findall(text))
 
-    crazy_bot_count = len(re.findall(r"crazy\s*bot", player_text_lower))
-    if (
-        crazy_bot_count == 0
-        and "crazy" in player_text_lower
-        and "bot" in player_text_lower
-    ):
-        crazy_bot_count = max(
-            player_text_lower.count("crazy"),
-            player_text_lower.count("bot"),
-        )
-    names.extend(["Crazy Bot"] * max(crazy_bot_count, 0))
-    return names
+
+def _strip_crazy_bots(text: str) -> str:
+    return _CRAZY_BOT_PATTERN.sub(" ", text)
+
+
+def _is_ui_label(text: str) -> bool:
+    cleaned = text.strip().lower()
+    return cleaned in _UI_LABELS
+
+
+def _is_noise_token(text: str) -> bool:
+    cleaned = text.strip()
+    if not cleaned:
+        return True
+    if cleaned.lower() in {"crazy", "bot", "u", "xy"}:
+        return True
+    if re.fullmatch(r"\d+", cleaned):
+        return True
+    return len(cleaned) < 2
+
+
+def _normalize_player_name(fragment: str) -> str:
+    cleaned = _strip_crazy_bots(fragment)
+    cleaned = re.sub(r"[\[\]]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if cleaned.startswith("Q") and len(cleaned) > 1:
+        cleaned = "Z" + cleaned[1:]
+    cleaned = re.sub(r"^0+(?=[A-Za-z])", "", cleaned)
+    cleaned = re.sub(r"0(?=[a-z])", "o", cleaned)
+    return _normalize_ocr_name(cleaned)
+
+
+def _split_name_blob(text: str) -> list[str]:
+    cleaned = _strip_crazy_bots(text)
+    cleaned = re.sub(r"[\[\]]", " ", cleaned)
+    parts = re.split(r"\s+(?=[A-Z])", cleaned.strip())
+    return [
+        part.strip()
+        for part in parts
+        if part.strip() and not _is_noise_token(part)
+    ]
+
+
+def _should_concat_fragments(left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    left_lower = left.lower()
+    right_lower = right.lower()
+    if left_lower.endswith("maxi") and right_lower in {"ml", "m1"}:
+        return True
+    if "mou" in left_lower and right_lower.startswith("se"):
+        return True
+    if left_lower.endswith("rib") and right_lower.startswith("onucleic"):
+        return True
+    if re.search(r"[A-Za-z]\d$", left) and right[0].isupper() and len(right) <= 3:
+        return True
+    if re.search(r"\d$", left) and right_lower.islower():
+        return False
+    if right.islower():
+        return True
+    if left[-1].isalpha() and right[0].isdigit():
+        return True
+    if left[-1].isdigit() and right[0].isalpha():
+        return True
+    if len(right) <= 3 and right.isalnum() and right[0].islower():
+        return True
+    return False
+
+
+def _fragments_from_row_cluster(
+    cluster: list[OCRLine],
+    *,
+    row_idx: int = 0,
+) -> list[tuple[str, float, bool, tuple[int, float]]]:
+    fragments: list[tuple[str, float, bool, tuple[int, float]]] = []
+    for item in sorted(cluster, key=lambda line: line.x):
+        if _YOU_PATTERN.search(item.text):
+            continue
+        if _is_ui_label(item.text):
+            continue
+        parts = _split_name_blob(item.text)
+        standalone = len(parts) > 1
+        for part in parts:
+            if _is_ui_label(part) or _is_noise_token(part):
+                continue
+            fragments.append((part, item.x, standalone, (row_idx, item.x)))
+    return fragments
+
+
+def _merge_row_fragments(
+    fragments: list[tuple[str, float, bool, tuple[int, float]]],
+) -> list[tuple[str, float, tuple[int, float]]]:
+    if not fragments:
+        return []
+
+    grouped: list[tuple[str, float, tuple[int, float]]] = []
+    current_frag = ""
+    current_x = 0.0
+    current_source = (0, 0.0)
+    for frag, x_pos, standalone, source in fragments:
+        if standalone:
+            if current_frag:
+                grouped.append((current_frag, current_x, current_source))
+                current_frag = ""
+            grouped.append((frag, x_pos, source))
+            continue
+        if not current_frag:
+            current_frag = frag
+            current_x = x_pos
+            current_source = source
+        elif _should_concat_fragments(current_frag, frag):
+            current_frag = current_frag + frag
+        else:
+            grouped.append((current_frag, current_x, current_source))
+            current_frag = frag
+            current_x = x_pos
+            current_source = source
+    if current_frag:
+        grouped.append((current_frag, current_x, current_source))
+    return grouped
+
+
+def _orphan_pair_score(
+    left: tuple[str, float, tuple[int, float]],
+    right: tuple[str, float, tuple[int, float]],
+) -> tuple[float, int]:
+    left_name, left_x, _ = left
+    right_name, right_x, _ = right
+    distance = abs(left_x - right_x)
+    affinity = 0
+    left_lower = left_name.lower()
+    right_lower = right_name.lower()
+    if left_lower.endswith("maxi") and right_lower in {"ml", "m1"}:
+        affinity += 100
+    if "mou" in left_lower and right_lower.startswith("se"):
+        affinity += 100
+    if left_lower.endswith("rib") and right_lower.startswith("onucleic"):
+        affinity += 100
+    if left_lower.endswith("z4") and right_lower.lower() in {"ru", "r8"}:
+        affinity += 100
+    return (distance - affinity, distance)
+
+
+def _can_pair_orphans(
+    left: tuple[str, float, tuple[int, float]],
+    right: tuple[str, float, tuple[int, float]],
+) -> bool:
+    left_source = left[2]
+    right_source = right[2]
+    if left_source[0] == right_source[0] and left_source[1] == right_source[1]:
+        return False
+    return True
+
+
+def _pair_fragments_across_rows(
+    row_fragments: list[list[tuple[str, float, bool, tuple[int, float]]]],
+) -> list[str]:
+    if not row_fragments:
+        return []
+
+    row_groups = [_merge_row_fragments(row) for row in row_fragments]
+    if len(row_groups) == 1:
+        return [
+            _normalize_player_name(name)
+            for name, _, _ in row_groups[0]
+            if not _is_noise_token(name)
+        ]
+
+    paired: list[tuple[str, float]] = []
+    used: set[tuple[int, int]] = set()
+    orphans: list[tuple[str, float, tuple[int, float]]] = []
+    for row_idx, groups in enumerate(row_groups[:-1]):
+        next_groups = row_groups[row_idx + 1]
+        for frag_idx, (frag, x_pos, source) in enumerate(groups):
+            match_idx: int | None = None
+            for next_idx, (_, next_x, _) in enumerate(next_groups):
+                if (row_idx + 1, next_idx) in used:
+                    continue
+                if abs(x_pos - next_x) <= _X_ALIGN_TOLERANCE:
+                    match_idx = next_idx
+                    break
+            if match_idx is not None:
+                next_frag, _, _ = next_groups[match_idx]
+                if _should_concat_fragments(frag, next_frag):
+                    merged = frag + next_frag
+                else:
+                    merged = f"{frag} {next_frag}"
+                paired.append((_normalize_player_name(merged), x_pos))
+                used.add((row_idx + 1, match_idx))
+            else:
+                orphans.append((frag, x_pos, source))
+
+    last_groups = row_groups[-1]
+    for frag_idx, (frag, x_pos, source) in enumerate(last_groups):
+        if (len(row_groups) - 1, frag_idx) not in used:
+            orphans.append((frag, x_pos, source))
+
+    while True:
+        pair_candidates = [
+            (
+                _orphan_pair_score(left, right),
+                left_idx,
+                right_idx,
+            )
+            for left_idx, left in enumerate(orphans)
+            for right_idx, right in enumerate(orphans)
+            if left_idx < right_idx and _can_pair_orphans(left, right)
+        ]
+        if not pair_candidates:
+            break
+        matched: set[int] = set()
+        for (_, _), left_idx, right_idx in sorted(
+            pair_candidates, key=lambda item: item[0]
+        ):
+            if left_idx in matched or right_idx in matched:
+                continue
+            left, left_x, _ = orphans[left_idx]
+            right, _, _ = orphans[right_idx]
+            if _should_concat_fragments(left, right):
+                merged = left + right
+            else:
+                merged = f"{left} {right}"
+            paired.append((_normalize_player_name(merged), left_x))
+            matched.add(left_idx)
+            matched.add(right_idx)
+        if not matched:
+            break
+        orphans = [
+            orphan for idx, orphan in enumerate(orphans) if idx not in matched
+        ]
+
+    for frag, x_pos, _ in orphans:
+        paired.append((_normalize_player_name(frag), x_pos))
+
+    paired.sort(key=lambda item: item[1])
+    return [name for name, _ in paired if name and not _is_noise_token(name)]
+
+
+def _group_row_clusters_into_strips(
+    clusters: list[list[OCRLine]],
+) -> list[list[list[OCRLine]]]:
+    if not clusters:
+        return []
+
+    strips: list[list[list[OCRLine]]] = [[clusters[0]]]
+    for cluster in clusters[1:]:
+        if abs(cluster[0].y - strips[-1][-1][0].y) <= _PLAYER_STRIP_Y_GAP:
+            strips[-1].append(cluster)
+        else:
+            strips.append([cluster])
+    return strips
+
+
+def _row_has_you_marker(cluster: list[OCRLine]) -> bool:
+    return any(_YOU_PATTERN.search(item.text) for item in cluster)
+
+
+def _extract_names_from_strip(
+    strip: list[list[OCRLine]],
+) -> tuple[list[str], int]:
+    bot_count = 0
+    name_rows: list[list[OCRLine]] = []
+
+    for cluster in strip:
+        row_text = " ".join(item.text for item in cluster)
+        bot_count += _count_crazy_bots(row_text)
+        remaining = _strip_crazy_bots(row_text).strip()
+        if remaining and not all(
+            _is_ui_label(token) or _is_noise_token(token) or _YOU_PATTERN.search(token)
+            for token in re.split(r"\s+", remaining)
+        ):
+            name_rows.append(cluster)
+
+    row_fragments = [
+        _fragments_from_row_cluster(cluster, row_idx=row_idx)
+        for row_idx, cluster in enumerate(name_rows)
+    ]
+    names = _pair_fragments_across_rows(row_fragments)
+    return names, bot_count
+
+
+def _player_names_from_rows(
+    player_region: list[OCRLine],
+) -> list[tuple[str, float, bool]]:
+    if not player_region:
+        return []
+
+    fine_rows = _cluster_ocr_rows(player_region, tolerance=_PLAYER_ROW_TOLERANCE)
+    you_marker_y: float | None = None
+    for cluster in fine_rows:
+        if _row_has_you_marker(cluster):
+            you_marker_y = cluster[0].y
+            break
+
+    entries: list[tuple[str, float, bool]] = []
+    for strip in _group_row_clusters_into_strips(fine_rows):
+        names, bot_count = _extract_names_from_strip(strip)
+        strip_y = strip[0][0].y
+        for name in names:
+            entries.append((name, strip_y, False))
+        entries.extend(("Crazy Bot", strip[-1][0].y, False) for _ in range(bot_count))
+
+    if you_marker_y is not None and entries:
+        human_indices = [
+            idx
+            for idx, (name, _, _) in enumerate(entries)
+            if name != "Crazy Bot"
+        ]
+        if human_indices:
+            closest_idx = min(
+                human_indices,
+                key=lambda idx: abs(entries[idx][1] - you_marker_y),
+            )
+            name, row_y, _ = entries[closest_idx]
+            entries[closest_idx] = (name, row_y, True)
+
+    return entries
 
 
 def _extract_players(
@@ -236,38 +541,23 @@ def _extract_players(
     from PIL import Image
 
     y_min, y_max = _PLAYER_REGION_Y
-    has_you_marker = any(
-        y_min <= item.y <= y_max and re.search(r"you", item.text, re.IGNORECASE)
-        for item in results
-    )
-
     player_region = [
         item
         for item in results
         if y_min <= item.y <= y_max
         and item.text.strip().lower() not in {"back", "open"}
     ]
-    player_text_lower = " ".join(
-        item.text.strip() for item in _sorted_lines(player_region)
-    ).lower()
-    final_names = _player_names_from_text(player_text_lower)
-
-    row_clusters = _cluster_ocr_rows(player_region, tolerance=45.0)
-    row_centers = [cluster[0].y for cluster in row_clusters] or [1360.0]
-    you_name = final_names[0] if has_you_marker and final_names else None
+    player_entries = _player_names_from_rows(player_region)
 
     with Image.open(image_path) as image:
         rgb = image.convert("RGB")
         return [
             GameBasicsPlayer(
                 name=name,
-                is_you=name == you_name,
+                is_you=is_you,
                 is_eliminated=is_skull_avatar(
-                    crop_avatar_region(
-                        rgb,
-                        row_y=row_centers[min(idx, len(row_centers) - 1)] + idx * 80,
-                    )
+                    crop_avatar_region(rgb, row_y=row_y),
                 ),
             )
-            for idx, name in enumerate(final_names)
+            for name, row_y, is_you in player_entries
         ]

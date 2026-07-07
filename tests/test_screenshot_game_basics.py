@@ -245,3 +245,154 @@ def test_skull_avatar_rejects_colorful_portrait_patch(tmp_path: Path) -> None:
     path = tmp_path / "portrait_patch.png"
     img.save(path)
     assert is_skull_avatar(path) is False
+
+
+# --- Row-based player extraction (Task 014) ---
+
+
+def _minimal_header_lines() -> list[OCRLine]:
+    return [
+        OCRLine(text="Test Game", confidence=0.99, y=100.0, x=200.0),
+        OCRLine(text="RESIGN", confidence=0.99, y=120.0, x=400.0),
+        OCRLine(text="Game Timer", confidence=0.99, y=240.0, x=400.0),
+    ]
+
+
+def _save_blank_image(tmp_path: Path, name: str = "players.png") -> Path:
+    image_path = tmp_path / name
+    Image.new("RGB", (10, 10)).save(image_path)
+    return image_path
+
+
+def test_parse_game_basics_extracts_multi_row_human_grid(tmp_path: Path) -> None:
+    """Human names on separate OCR rows are each detected as players."""
+    image_path = _save_blank_image(tmp_path)
+    lines = [
+        *_minimal_header_lines(),
+        OCRLine(text="Alice", confidence=0.99, y=1280.0, x=200.0),
+        OCRLine(text="Bob", confidence=0.99, y=1360.0, x=200.0),
+        OCRLine(text="Charlie", confidence=0.99, y=1440.0, x=200.0),
+    ]
+
+    result = parse_game_basics(lines, image_path)
+
+    assert [player.name for player in result.players] == ["Alice", "Bob", "Charlie"]
+
+
+def test_parse_game_basics_extracts_mixed_humans_and_crazy_bots(
+    tmp_path: Path,
+) -> None:
+    """Rows with human names and Crazy Bot labels yield both player types."""
+    image_path = _save_blank_image(tmp_path)
+    lines = [
+        *_minimal_header_lines(),
+        OCRLine(text="Alice", confidence=0.99, y=1280.0, x=200.0),
+        OCRLine(text="Crazy Bot", confidence=0.99, y=1360.0, x=200.0),
+        OCRLine(text="Bob", confidence=0.99, y=1440.0, x=200.0),
+        OCRLine(text="Crazy", confidence=0.99, y=1520.0, x=200.0),
+        OCRLine(text="Bot", confidence=0.99, y=1520.0, x=280.0),
+    ]
+
+    result = parse_game_basics(lines, image_path)
+    names = [player.name for player in result.players]
+
+    assert names.count("Crazy Bot") == 2
+    human_names = [name for name in names if name != "Crazy Bot"]
+    assert human_names == ["Alice", "Bob"]
+
+
+def test_parse_game_basics_merges_split_name_tokens_on_same_row(
+    tmp_path: Path,
+) -> None:
+    """Adjacent OCR tokens on one row merge into a single player name."""
+    image_path = _save_blank_image(tmp_path)
+    lines = [
+        *_minimal_header_lines(),
+        OCRLine(text="Deoxyrib", confidence=0.99, y=1300.0, x=180.0),
+        OCRLine(text="onucleic504", confidence=0.99, y=1300.0, x=320.0),
+        OCRLine(text="QombieZ4", confidence=0.99, y=1380.0, x=180.0),
+        OCRLine(text="Ru", confidence=0.99, y=1380.0, x=340.0),
+    ]
+
+    result = parse_game_basics(lines, image_path)
+    names = [player.name for player in result.players]
+
+    assert len(names) == 2
+    assert any("deoxyribonucleic" in name.lower() for name in names)
+    assert any("zombie" in name.lower() and "4" in name.lower() for name in names)
+
+
+def test_parse_game_basics_filters_ui_labels_from_player_names(
+    tmp_path: Path,
+) -> None:
+    """UI chrome and noise tokens are excluded from extracted player names."""
+    image_path = _save_blank_image(tmp_path)
+    lines = [
+        *_minimal_header_lines(),
+        OCRLine(text="BACK", confidence=0.99, y=1280.0, x=100.0),
+        OCRLine(text="OPEN", confidence=0.99, y=1290.0, x=200.0),
+        OCRLine(text="START GAME", confidence=0.99, y=1300.0, x=300.0),
+        OCRLine(text="Add", confidence=0.99, y=1310.0, x=400.0),
+        OCRLine(text="42", confidence=0.99, y=1320.0, x=500.0),
+        OCRLine(text="xy", confidence=0.99, y=1330.0, x=600.0),
+        OCRLine(text="Zavonics", confidence=0.99, y=1400.0, x=200.0),
+    ]
+
+    result = parse_game_basics(lines, image_path)
+    names = [player.name for player in result.players]
+
+    assert names == ["Zavonics"]
+
+
+def test_parse_game_basics_marks_is_you_on_row_with_you_marker(
+    tmp_path: Path,
+) -> None:
+    """The player row adjacent to a You marker is flagged is_you."""
+    image_path = _save_blank_image(tmp_path)
+    lines = [
+        *_minimal_header_lines(),
+        OCRLine(text="You", confidence=0.99, y=1280.0, x=100.0),
+        OCRLine(text="Alice", confidence=0.99, y=1280.0, x=220.0),
+        OCRLine(text="Bob", confidence=0.99, y=1360.0, x=220.0),
+    ]
+
+    result = parse_game_basics(lines, image_path)
+    players_by_name = {player.name: player for player in result.players}
+
+    assert players_by_name["Alice"].is_you is True
+    assert players_by_name["Bob"].is_you is False
+
+
+_LOBBY_HUMAN_SIGNATURES: tuple[tuple[str, ...], ...] = (
+    ("deoxyrib", "onucleic", "nucleic504"),
+    ("diremou", "diremouse", "seo1"),
+    ("lord", "union"),
+    ("vilemaxi",),
+    ("zavonic", "dzavonic"),
+    ("zombie", "qombie"),
+)
+
+
+def _count_lobby_humans_detected(names: list[str]) -> int:
+    joined = " ".join(names).lower()
+    return sum(
+        1
+        for fragments in _LOBBY_HUMAN_SIGNATURES
+        if any(fragment in joined for fragment in fragments)
+    )
+
+
+@pytest.mark.skipif(
+    not LOBBY_SAMPLE.is_file(),
+    reason="Local lobby sample screenshot not present",
+)
+def test_lobby_sample_extracts_full_human_roster() -> None:
+    """Lobby screenshot yields at least five of six humans plus six Crazy Bots."""
+    result = extract_screenshot(LOBBY_SAMPLE, model_dir=MODEL_DIR)
+    assert isinstance(result, GameBasicsExtraction)
+
+    names = [player.name for player in result.players]
+    assert _count_lobby_humans_detected(names) >= 5
+
+    crazy_bots = [player for player in result.players if player.name == "Crazy Bot"]
+    assert len(crazy_bots) >= 6
