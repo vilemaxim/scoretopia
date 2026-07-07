@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 from unittest.mock import patch
@@ -47,6 +48,20 @@ GAME_BASICS_SAMPLE = SAMPLES_DIR / "game-basics.png"
 LOBBY_SAMPLE = SAMPLES_DIR / "game start error.png"
 GAME_END_SAMPLE = SAMPLES_DIR / "game_end.png"
 FRIEND_PROFILE_SAMPLE = SAMPLES_DIR / "players_compared.png"
+
+INGEST_LOGGER = "scoretopia.ingest"
+
+
+def _ingest_log_text(
+    caplog: pytest.LogCaptureFixture,
+    *,
+    level: int = logging.INFO,
+) -> str:
+    return "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if record.name.startswith(INGEST_LOGGER) and record.levelno >= level
+    )
 
 
 @pytest.fixture
@@ -518,3 +533,117 @@ def test_ingest_friend_profile_sample_returns_win_ratio_needs_confirmation(
     friend = player_repo.get_by_polytopia_name("Lord Union 409")
     assert friend is not None
     assert result.other_player_id == friend.id
+
+
+# --- Structured ingest logging (Task 015) ---
+
+
+def test_ingest_game_basics_logs_screenshot_summary_and_participants(
+    ingest_service: IngestService,
+    inbox_path: Path,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    source = tmp_path / "start_game.png"
+    Image.new("RGB", (10, 10), color=(0, 128, 0)).save(source)
+    extraction = GameBasicsExtraction(
+        game_name="Logged Game",
+        map_size=12,
+        terrain="Drylands",
+        players=(
+            GameBasicsPlayer(name="Alice", is_you=True),
+            GameBasicsPlayer(name="Bob"),
+            GameBasicsPlayer(name="Crazy Bot"),
+            GameBasicsPlayer(name="Hard Bot"),
+        ),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger=INGEST_LOGGER):
+        with patch(
+            "scoretopia.domain.ingest.extract_screenshot",
+            return_value=extraction,
+        ):
+            result = ingest_service.ingest(
+                source,
+                uploader_discord_id="uploader-log-1",
+            )
+
+    assert isinstance(result, GameStarted)
+    info_text = _ingest_log_text(caplog, level=logging.INFO)
+    stored_path = inbox_path / "start_game.png"
+
+    assert "uploader-log-1" in info_text
+    assert "start_game.png" in info_text
+    assert str(stored_path) in info_text
+    assert "game_basics" in info_text
+    assert "Alice" in info_text
+    assert "Bob" in info_text
+    assert "2" in info_text  # bot count
+    assert "Drylands" not in info_text  # full extraction dict stays off INFO
+
+    debug_text = _ingest_log_text(caplog, level=logging.DEBUG)
+    assert "Drylands" in debug_text or "map_size" in debug_text
+
+
+def test_ingest_game_end_no_match_logs_active_games_and_extracted_names(
+    ingest_service: IngestService,
+    game_repo: GameRepo,
+    pending_repo: PendingInteractionRepo,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    assert game_repo.list_active() == []
+
+    image_path = tmp_path / "orphan_game_end.png"
+    Image.new("RGB", (10, 10)).save(image_path)
+    extraction = _game_end_extraction("Alice", "Bob")
+
+    with caplog.at_level(logging.INFO, logger=INGEST_LOGGER):
+        with patch(
+            "scoretopia.domain.ingest.extract_screenshot",
+            return_value=extraction,
+        ):
+            result = ingest_service.ingest(
+                image_path,
+                uploader_discord_id="uploader-log-2",
+            )
+
+    assert isinstance(result, GameEndPendingStart)
+    info_text = _ingest_log_text(caplog)
+
+    assert "0" in info_text  # active game count
+    assert "Alice" in info_text
+    assert "Bob" in info_text
+    assert "NONE" in info_text
+    assert "game_end_pending_start" in info_text
+    assert str(result.interaction_id) in info_text
+
+    pending = pending_repo.get_by_id(result.interaction_id)
+    assert pending is not None
+    assert pending.kind == "game_end_pending_start"
+
+
+def test_ingest_unrecognized_screenshot_logs_reason_at_info(
+    ingest_service: IngestService,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    image_path = tmp_path / "not-polytopia.png"
+    Image.new("RGB", (100, 100), color=(255, 0, 0)).save(image_path)
+
+    with caplog.at_level(logging.INFO, logger=INGEST_LOGGER):
+        with patch(
+            "scoretopia.domain.ingest.extract_screenshot",
+            side_effect=ValueError("Unrecognized screenshot type"),
+        ):
+            result = ingest_service.ingest(
+                image_path,
+                uploader_discord_id="uploader-log-3",
+            )
+
+    assert isinstance(result, UnrecognizedScreenshot)
+    info_text = _ingest_log_text(caplog)
+
+    assert "uploader-log-3" in info_text
+    assert "not-polytopia.png" in info_text
+    assert "unrecognized" in info_text.lower() or "recognize" in info_text.lower()
