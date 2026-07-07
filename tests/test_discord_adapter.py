@@ -222,7 +222,8 @@ def test_screenshot_upload_runs_ocr_off_event_loop(tmp_path: Path) -> None:
     assert extract_thread_id != loop_thread_id
     ingest_service.prepare_stored_path.assert_called_once_with(stored_path)
     ingest_service.extract_stored_screenshot.assert_called_once_with(stored_path)
-    ingest_service.complete_ingest.assert_not_called()
+    ingest_service.process_extracted_screenshot.assert_not_called()
+    ingest_service.report_extraction_failure.assert_called_once()
     adapter._deliver_ingest_result.assert_awaited_once()
 
 
@@ -237,18 +238,22 @@ def test_screenshot_upload_completes_ingest_on_event_loop(tmp_path: Path) -> Non
     ingest_service.prepare_stored_path.return_value = stored_path
     ingest_service.extract_stored_screenshot.return_value = extraction
 
-    def complete_ingest(
+    def process_extracted_screenshot(
         _stored_path: Path,
         _extraction: object,
         *,
         uploader_discord_id: str,
+        filename: str,
     ) -> UnrecognizedScreenshot:
         nonlocal complete_thread_id
         complete_thread_id = threading.get_ident()
         assert uploader_discord_id == "99"
+        assert filename == "end.png"
         return expected
 
-    ingest_service.complete_ingest.side_effect = complete_ingest
+    ingest_service.process_extracted_screenshot.side_effect = (
+        process_extracted_screenshot
+    )
 
     config = MagicMock()
     config.inbox.path = tmp_path
@@ -273,10 +278,11 @@ def test_screenshot_upload_completes_ingest_on_event_loop(tmp_path: Path) -> Non
     asyncio.run(adapter._handle_screenshot_upload(message, attachment))
 
     assert complete_thread_id == loop_thread_id
-    ingest_service.complete_ingest.assert_called_once_with(
+    ingest_service.process_extracted_screenshot.assert_called_once_with(
         stored_path,
         extraction,
         uploader_discord_id="99",
+        filename="end.png",
     )
     adapter._deliver_ingest_result.assert_awaited_once_with(message, expected)
 
@@ -413,7 +419,7 @@ def test_screenshot_upload_reaction_lifecycle_for_recognized_result(
     ingest_service = MagicMock()
     ingest_service.prepare_stored_path.return_value = stored_path
     ingest_service.extract_stored_screenshot.return_value = MagicMock()
-    ingest_service.complete_ingest.return_value = result
+    ingest_service.process_extracted_screenshot.return_value = result
 
     adapter = _screenshot_adapter(tmp_path, ingest_service)
     adapter._deliver_ingest_result = AsyncMock()

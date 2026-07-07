@@ -14,6 +14,7 @@ from scoretopia.domain.results import (
     MatchResult,
     RejectResult,
 )
+from scoretopia.ingest import logger as ingest_logger
 from scoretopia.screenshot.models import GameBasicsExtraction, GameEndExtraction
 from scoretopia.storage.models import Game, GameParticipantInput
 from scoretopia.storage.repos import (
@@ -94,17 +95,29 @@ class GameService:
 
     def match_game_end(self, extraction: GameEndExtraction) -> MatchResult:
         end_names = tuple(player.name for player in extraction.players)
+        human_names = tuple(
+            player.name for player in extraction.players if not is_bot_name(player.name)
+        )
+        active_games = self._game_repo.list_active()
+        active_game_count = len(active_games)
         matches: list[Game] = []
-        for game in self._game_repo.list_active():
+        for game in active_games:
             stored_names = self._participant_repo.get_participant_names(game.id)
             if participant_sets_match(stored_names, end_names):
                 matches.append(game)
 
         if not matches:
-            return MatchResult(outcome=MatchOutcome.NONE)
-        if len(matches) == 1:
-            return MatchResult(outcome=MatchOutcome.ONE, games=(matches[0],))
-        return MatchResult(outcome=MatchOutcome.MANY, games=tuple(matches))
+            result = MatchResult(outcome=MatchOutcome.NONE)
+        elif len(matches) == 1:
+            result = MatchResult(outcome=MatchOutcome.ONE, games=(matches[0],))
+        else:
+            result = MatchResult(outcome=MatchOutcome.MANY, games=tuple(matches))
+        self._log_game_end_match(
+            active_game_count=active_game_count,
+            human_names=human_names,
+            result=result,
+        )
+        return result
 
     def confirm_game_end(
         self,
@@ -210,3 +223,19 @@ class GameService:
                 )
                 return player
         return self._player_service.resolve_or_create_polytopia_name(name)
+
+    def _log_game_end_match(
+        self,
+        *,
+        active_game_count: int,
+        human_names: tuple[str, ...],
+        result: MatchResult,
+    ) -> None:
+        game_ids = tuple(game.id for game in result.games)
+        ingest_logger.info(
+            "game-end match active_game_count=%s human_names=%s outcome=%s game_ids=%s",
+            active_game_count,
+            human_names,
+            result.outcome.name,
+            game_ids,
+        )

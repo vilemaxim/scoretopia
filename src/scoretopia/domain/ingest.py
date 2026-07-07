@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+from dataclasses import asdict
 from pathlib import Path
 
 from scoretopia.domain.actions import (
@@ -21,11 +22,13 @@ from scoretopia.domain.matching import is_bot_name
 from scoretopia.domain.players import PlayerService
 from scoretopia.domain.results import MatchOutcome
 from scoretopia.domain.win_ratios import WinRatioService
+from scoretopia.ingest import logger as ingest_logger
 from scoretopia.screenshot.extract import DEFAULT_MODEL_DIR, extract_screenshot
 from scoretopia.screenshot.models import (
     ExtractionResult,
     FriendProfileExtraction,
     GameBasicsExtraction,
+    GameBasicsPlayer,
     GameEndExtraction,
 )
 from scoretopia.storage.repos import PendingInteractionRepo
@@ -34,6 +37,20 @@ _UNRECOGNIZED_MESSAGE = (
     "Could not recognize this screenshot. Please upload a Polytopia "
     "game basics, game end, or friend profile screenshot."
 )
+
+
+def _human_and_bot_counts(
+    players: tuple[GameBasicsPlayer, ...],
+) -> tuple[tuple[str, ...], int]:
+    human_names = tuple(
+        player.name for player in players if not is_bot_name(player.name)
+    )
+    bot_count = sum(1 for player in players if is_bot_name(player.name))
+    return human_names, bot_count
+
+
+def _human_player_names(names: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(name for name in names if not is_bot_name(name))
 
 
 class IngestService:
@@ -61,14 +78,22 @@ class IngestService:
         *,
         uploader_discord_id: str,
     ) -> IngestResult:
-        stored_path = self.prepare_stored_path(image_path)
+        source = Path(image_path)
+        stored_path = self.prepare_stored_path(source)
         extracted = self.extract_stored_screenshot(stored_path)
         if isinstance(extracted, (UnrecognizedScreenshot, IngestError)):
+            self.report_extraction_failure(
+                uploader_discord_id=uploader_discord_id,
+                filename=source.name,
+                stored_path=stored_path,
+                failure=extracted,
+            )
             return extracted
-        return self.complete_ingest(
+        return self.process_extracted_screenshot(
             stored_path,
             extracted,
             uploader_discord_id=uploader_discord_id,
+            filename=source.name,
         )
 
     def prepare_stored_path(self, image_path: str | Path) -> Path:
@@ -114,6 +139,50 @@ class IngestService:
             )
         return UnrecognizedScreenshot(message=_UNRECOGNIZED_MESSAGE)
 
+    def process_extracted_screenshot(
+        self,
+        stored_path: Path,
+        extraction: ExtractionResult,
+        *,
+        uploader_discord_id: str,
+        filename: str,
+    ) -> IngestResult:
+        self._log_screenshot_processed(
+            uploader_discord_id=uploader_discord_id,
+            filename=filename,
+            stored_path=stored_path,
+            screenshot_type=extraction.screenshot_type,
+        )
+        self._log_extraction(extraction)
+        return self.complete_ingest(
+            stored_path,
+            extraction,
+            uploader_discord_id=uploader_discord_id,
+        )
+
+    def report_extraction_failure(
+        self,
+        *,
+        uploader_discord_id: str,
+        filename: str,
+        stored_path: Path,
+        failure: UnrecognizedScreenshot | IngestError,
+    ) -> None:
+        if isinstance(failure, UnrecognizedScreenshot):
+            self._log_unrecognized_screenshot(
+                uploader_discord_id=uploader_discord_id,
+                filename=filename,
+                stored_path=stored_path,
+                reason=failure.message,
+            )
+            return
+        self._log_ingest_error(
+            uploader_discord_id=uploader_discord_id,
+            filename=filename,
+            stored_path=stored_path,
+            message=failure.message,
+        )
+
     def _store_in_inbox(self, source: Path) -> Path:
         destination = self._inbox_path / source.name
         if source.resolve() != destination.resolve():
@@ -132,12 +201,7 @@ class IngestService:
             extraction=extraction,
             uploader_id=uploader_discord_id,
         )
-        human_player_names = tuple(
-            player.name for player in extraction.players if not is_bot_name(player.name)
-        )
-        bot_count = sum(
-            1 for player in extraction.players if is_bot_name(player.name)
-        )
+        human_player_names, bot_count = _human_and_bot_counts(extraction.players)
         report = ActiveGameReport(
             game_id=game.id,
             game_name=game.name,
@@ -178,6 +242,7 @@ class IngestService:
                 discord_user_id=uploader_discord_id,
                 payload=payload,
             )
+            self._log_pending_interaction(kind=pending.kind, interaction_id=pending.id)
             return GameEndPendingStart(interaction_id=pending.id)
 
         if match.outcome == MatchOutcome.ONE:
@@ -188,6 +253,7 @@ class IngestService:
                 discord_user_id=uploader_discord_id,
                 payload=payload,
             )
+            self._log_pending_interaction(kind=pending.kind, interaction_id=pending.id)
             return GameEndNeedsConfirmation(
                 game_id=game.id,
                 interaction_id=pending.id,
@@ -200,6 +266,7 @@ class IngestService:
             discord_user_id=uploader_discord_id,
             payload=payload,
         )
+        self._log_pending_interaction(kind=pending.kind, interaction_id=pending.id)
         return GameEndNeedsPick(game_ids=game_ids, interaction_id=pending.id)
 
     def _create_pending(
@@ -213,6 +280,85 @@ class IngestService:
             kind=kind,
             discord_user_id=discord_user_id,
             payload=payload,
+        )
+
+    def _log_screenshot_processed(
+        self,
+        *,
+        uploader_discord_id: str,
+        filename: str,
+        stored_path: Path,
+        screenshot_type: str,
+    ) -> None:
+        ingest_logger.info(
+            "screenshot processed uploader=%s filename=%s "
+            "stored_path=%s screenshot_type=%s",
+            uploader_discord_id,
+            filename,
+            stored_path,
+            screenshot_type,
+        )
+
+    def _log_extraction(self, extraction: ExtractionResult) -> None:
+        ingest_logger.debug("extraction payload %s", asdict(extraction))
+        if isinstance(extraction, GameBasicsExtraction):
+            human_names, bot_count = _human_and_bot_counts(extraction.players)
+            ingest_logger.info(
+                "extracted participants human_names=%s bot_count=%s",
+                human_names,
+                bot_count,
+            )
+        elif isinstance(extraction, GameEndExtraction):
+            human_names = _human_player_names(
+                tuple(player.name for player in extraction.players)
+            )
+            ingest_logger.info(
+                "extracted participants human_names=%s",
+                human_names,
+            )
+        elif isinstance(extraction, FriendProfileExtraction):
+            ingest_logger.info(
+                "extracted friend_profile friend_name=%s",
+                extraction.friend_name,
+            )
+
+    def _log_unrecognized_screenshot(
+        self,
+        *,
+        uploader_discord_id: str,
+        filename: str,
+        stored_path: Path,
+        reason: str,
+    ) -> None:
+        ingest_logger.info(
+            "unrecognized screenshot uploader=%s filename=%s stored_path=%s reason=%s",
+            uploader_discord_id,
+            filename,
+            stored_path,
+            reason,
+        )
+
+    def _log_ingest_error(
+        self,
+        *,
+        uploader_discord_id: str,
+        filename: str,
+        stored_path: Path,
+        message: str,
+    ) -> None:
+        ingest_logger.info(
+            "ingest error uploader=%s filename=%s stored_path=%s message=%s",
+            uploader_discord_id,
+            filename,
+            stored_path,
+            message,
+        )
+
+    def _log_pending_interaction(self, *, kind: str, interaction_id: int) -> None:
+        ingest_logger.info(
+            "pending interaction created kind=%s interaction_id=%s",
+            kind,
+            interaction_id,
         )
 
     def _handle_friend_profile(

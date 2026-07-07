@@ -326,12 +326,20 @@ class DiscordBotAdapter(BotPort):
             self._ingest_service.extract_stored_screenshot,
             stored_path,
         )
+        uploader_discord_id = str(message.author.id)
         if isinstance(extracted, _EXTRACT_FAILURE_TYPES):
+            self._ingest_service.report_extraction_failure(
+                uploader_discord_id=uploader_discord_id,
+                filename=attachment.filename,
+                stored_path=stored_path,
+                failure=extracted,
+            )
             return extracted
-        return self._ingest_service.complete_ingest(
+        return self._ingest_service.process_extracted_screenshot(
             stored_path,
             extracted,
-            uploader_discord_id=str(message.author.id),
+            uploader_discord_id=uploader_discord_id,
+            filename=attachment.filename,
         )
 
     async def _begin_screenshot_ack(self, message: discord.Message) -> None:
