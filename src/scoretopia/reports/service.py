@@ -6,7 +6,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 
 from scoretopia.reports.dto import ReportDTO, ReportField
-from scoretopia.reports.game_settings import settings_summary
+from scoretopia.reports.game_settings import active_game_stats_line
 from scoretopia.reports.kinds import ReportKind
 from scoretopia.storage.models import Game
 from scoretopia.storage.repos import (
@@ -124,12 +124,15 @@ class ReportService:
         return f"{player_names[opponent_id]}: {my_wins}-{their_wins}"
 
     def _active_game_field(self, game: Game) -> ReportField:
-        value_parts = [self._participants_text(game.id)]
-        if started := self._format_datetime(game.created_at):
-            value_parts.append(f"Started {started}")
-        if settings := settings_summary(game):
-            value_parts.append(settings)
-        return ReportField(label=game.name, value=_FIELD_SEP.join(value_parts))
+        stats_line = active_game_stats_line(game)
+        players_line = self._active_game_participants_text(game.id)
+        return ReportField(label=game.name, value=f"{stats_line}\n{players_line}")
+
+    def _active_game_participants_text(self, game_id: int) -> str:
+        return self._participants_text(
+            game_id,
+            empty_humans="no players recorded",
+        )
 
     def _completed_game_field(self, game: Game) -> ReportField:
         winner_name = self._winner_name(game)
@@ -138,11 +141,18 @@ class ReportService:
             value_parts.append(f"Completed {completed}")
         return ReportField(label=game.name, value=_FIELD_SEP.join(value_parts))
 
-    def _participants_text(self, game_id: int) -> str:
+    def _participants_text(
+        self,
+        game_id: int,
+        *,
+        empty_humans: str | None = None,
+    ) -> str:
         humans, bot_count = self._participant_repo.get_human_and_bot_count(game_id)
         parts: list[str] = []
         if humans:
             parts.append(", ".join(humans))
+        elif empty_humans is not None:
+            parts.append(empty_humans)
         if bot_count > 0:
             parts.append(f"Bots: {bot_count}")
         return _FIELD_SEP.join(parts)

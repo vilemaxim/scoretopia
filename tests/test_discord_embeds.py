@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from unittest.mock import patch
 
 import pytest
+
 from scoretopia.discord.embeds import (
     ReportKind,
     build_dispute_embed,
@@ -16,7 +17,6 @@ from scoretopia.discord.embeds import (
     embed_from_report_dto,
     participant_fields,
 )
-
 from scoretopia.domain.actions import ActiveGameReport
 from scoretopia.reports.dto import ReportDTO, ReportField
 from scoretopia.storage.models import Game
