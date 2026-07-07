@@ -96,15 +96,15 @@ def _find_line_by_pattern(
 
 
 def _extract_game_name(results: list[OCRLine]) -> str | None:
-    resign = _find_line_by_pattern(results, r"resign", flags=re.IGNORECASE)
-    if resign is None:
+    anchor = _find_line_by_pattern(results, r"resign|leave", flags=re.IGNORECASE)
+    if anchor is None:
         return None
     skip_titles = {"ongoing", "your turn", "multiplayer"}
     candidates = [
         item
         for item in results
-        if abs(item.y - resign.y) <= 60
-        and item.x < resign.x - 100
+        if abs(item.y - anchor.y) <= 60
+        and item.x < anchor.x - 100
         and len(item.text.strip()) >= 3
         and item.text.strip().lower() not in skip_titles
     ]

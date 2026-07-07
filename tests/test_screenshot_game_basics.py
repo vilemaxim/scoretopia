@@ -9,6 +9,7 @@ import pytest
 from PIL import Image
 
 from scoretopia.screenshot.extract import extract_screenshot, format_extraction
+from scoretopia.screenshot.game_basics import parse_game_basics
 from scoretopia.screenshot.icons import is_skull_avatar
 from scoretopia.screenshot.models import GameBasicsExtraction, GameBasicsPlayer
 from scoretopia.screenshot.parsers import OCRLine, detect_screenshot_type
@@ -21,6 +22,7 @@ TODO_PATH = PROJECT_ROOT / "docs" / "tasks" / "TODO.md"
 GAME_BASICS_SAMPLES = (
     sorted(SAMPLES_DIR.glob("game-basics*.png")) if SAMPLES_DIR.is_dir() else []
 )
+LOBBY_SAMPLE = SAMPLES_DIR / "game start error.png"
 
 pytestmark = pytest.mark.skipif(
     not GAME_BASICS_SAMPLES,
@@ -133,6 +135,79 @@ def test_detect_screenshot_type_recognizes_game_basics_modal() -> None:
         OCRLine(text="It is your turn to Play", confidence=0.99, y=330.0, x=200.0),
     ]
     assert detect_screenshot_type(ocr_lines) == "game_basics"
+
+
+def _lobby_ocr_lines() -> list[OCRLine]:
+    """Synthetic OCR for pre-game lobby (LEAVE, no RESIGN)."""
+    return [
+        OCRLine(text="Strait of Uhfixi", confidence=0.99, y=100.0, x=200.0),
+        OCRLine(text="LEAVE", confidence=0.99, y=120.0, x=400.0),
+        OCRLine(text="324", confidence=0.99, y=200.0, x=100.0),
+        OCRLine(text="Pangea", confidence=0.99, y=240.0, x=100.0),
+        OCRLine(text="25k", confidence=0.99, y=200.0, x=250.0),
+        OCRLine(text="Glory", confidence=0.99, y=240.0, x=250.0),
+        OCRLine(text="7", confidence=0.99, y=200.0, x=400.0),
+        OCRLine(text="days", confidence=0.99, y=200.0, x=430.0),
+        OCRLine(text="Game Timer", confidence=0.99, y=240.0, x=400.0),
+        OCRLine(
+            text="Waiting for 3 players to accept the invitation",
+            confidence=0.99,
+            y=300.0,
+            x=200.0,
+        ),
+    ]
+
+
+def test_detect_screenshot_type_recognizes_pre_game_lobby_with_leave() -> None:
+    assert detect_screenshot_type(_lobby_ocr_lines()) == "game_basics"
+
+
+def test_detect_screenshot_type_recognizes_lobby_waiting_for_acceptance_text() -> None:
+    ocr_lines = [
+        OCRLine(text="Strait of Uhfixi", confidence=0.99, y=100.0, x=200.0),
+        OCRLine(text="324", confidence=0.99, y=200.0, x=100.0),
+        OCRLine(text="Pangea", confidence=0.99, y=240.0, x=100.0),
+        OCRLine(text="25k", confidence=0.99, y=200.0, x=250.0),
+        OCRLine(text="Glory", confidence=0.99, y=240.0, x=250.0),
+        OCRLine(text="Game Timer", confidence=0.99, y=240.0, x=400.0),
+        OCRLine(
+            text="Waiting for 2 players to accept the invitation",
+            confidence=0.99,
+            y=300.0,
+            x=200.0,
+        ),
+    ]
+    assert detect_screenshot_type(ocr_lines) == "game_basics"
+
+
+def test_parse_game_basics_extracts_lobby_fields_with_leave_anchor(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "lobby.png"
+    Image.new("RGB", (10, 10)).save(image_path)
+
+    result = parse_game_basics(_lobby_ocr_lines(), image_path)
+
+    assert result.game_name == "Strait of Uhfixi"
+    assert result.map_size == 324
+    assert result.terrain == "Pangea"
+    assert result.game_type == "Glory"
+    assert result.target_score == 25_000
+
+
+@pytest.mark.skipif(
+    not LOBBY_SAMPLE.is_file(),
+    reason="Local lobby sample screenshot not present",
+)
+def test_extract_screenshot_recognizes_lobby_sample() -> None:
+    result = extract_screenshot(LOBBY_SAMPLE, model_dir=MODEL_DIR)
+
+    assert isinstance(result, GameBasicsExtraction)
+    assert result.game_name == "Strait of Uhfixi"
+    assert result.map_size == 324
+    assert result.terrain == "Pangea"
+    assert result.game_type == "Glory"
+    assert result.target_score == 25_000
 
 
 def test_detect_screenshot_type_recognizes_might_without_crashing() -> None:
