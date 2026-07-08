@@ -47,18 +47,53 @@ def _line_texts(results: list[OCRLine]) -> list[str]:
     return [item.text.strip() for item in _sorted_lines(results) if item.text.strip()]
 
 
+_ONGOING_LIST_MESSAGE = (
+    "Ongoing games list is not supported; upload an in-game "
+    "Game Basics screenshot or a pre-game lobby screenshot."
+)
+
+_WINNER_LINE_PATTERN = re.compile(
+    r"^([A-Za-z][\w\s]*?)\s+wins?\b",
+    re.IGNORECASE,
+)
+_WINST_LINE_PATTERN = re.compile(
+    r"^([A-Za-z][\w\s]*?)\s+winst\b",
+    re.IGNORECASE,
+)
+_WAITING_TO_PLAY_PATTERN = re.compile(r"waiting for .+ to play")
+
+
+def _winner_line_match(line: str) -> re.Match[str] | None:
+    return _WINNER_LINE_PATTERN.search(line) or _WINST_LINE_PATTERN.search(line)
+
+
 def detect_screenshot_type(results: list[OCRLine]) -> str:
-    text = "\n".join(_line_texts(results)).lower()
+    lines = _line_texts(results)
+    text = "\n".join(lines).lower()
     if "friend list" in text or "add friend" in text:
         return "friend_profile"
     if _looks_like_game_basics(text):
         return "game_basics"
-    if re.search(r"\bwins?\b|\bwinst\b", text) or "resigned on turn" in text:
+    if _looks_like_ongoing_list(text):
+        raise ValueError(_ONGOING_LIST_MESSAGE)
+    if _looks_like_game_end(lines, text):
         return "game_end"
     raise ValueError(
         "Unrecognized screenshot type; expected game end, "
         "friend profile, or game basics"
     )
+
+
+def _looks_like_ongoing_list(text: str) -> bool:
+    has_header = "multiplayer" in text and "ongoing" in text
+    has_card_actions = "back" in text and "open" in text
+    return has_header and has_card_actions and _WAITING_TO_PLAY_PATTERN.search(text)
+
+
+def _looks_like_game_end(lines: list[str], text: str) -> bool:
+    if "resigned on turn" in text:
+        return True
+    return any(_winner_line_match(line) for line in lines)
 
 
 def _looks_like_game_basics(text: str) -> bool:
@@ -85,10 +120,7 @@ def parse_game_end(results: list[OCRLine]) -> GameEndExtraction:
 
 def _extract_winner(lines: list[str]) -> str | None:
     for line in lines:
-        match = re.search(r"^([A-Za-z][\w\s]*?)\s+wins?\b", line, re.IGNORECASE)
-        if match:
-            return _normalize_ocr_name(match.group(1))
-        match = re.search(r"^([A-Za-z][\w\s]*?)\s+winst\b", line, re.IGNORECASE)
+        match = _winner_line_match(line)
         if match:
             return _normalize_ocr_name(match.group(1))
     return None
