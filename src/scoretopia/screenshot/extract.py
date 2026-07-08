@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
+from difflib import unified_diff
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import easyocr
 
@@ -68,6 +71,50 @@ def format_extraction(result: ExtractionResult) -> str:
     if result.screenshot_type == "game_basics":
         return _format_game_basics(result)
     return _format_friend_profile(result)
+
+
+def serialize_extraction(result: ExtractionResult) -> dict[str, Any]:
+    """Convert an ExtractionResult to a JSON-serializable dict.
+
+    Nested tuples (e.g. players) become lists so the shape matches JSON
+    files produced by ``json.dumps``.
+    """
+    return json.loads(json.dumps(asdict(result)))
+
+
+def _json_normalize(value: Any) -> Any:
+    """Round-trip through JSON so compare ignores non-JSON container types."""
+    return json.loads(json.dumps(value))
+
+
+def compare_extraction_to_expected(
+    result: ExtractionResult,
+    expected: dict[str, Any],
+) -> tuple[bool, str]:
+    """Compare extraction against expected JSON structure.
+
+    Returns (matched, message). Message is a pass note or a readable diff.
+    Comparison is structural (parsed JSON), not raw string equality.
+    """
+    actual = serialize_extraction(result)
+    expected_norm = _json_normalize(expected)
+    if actual == expected_norm:
+        return True, "Extraction matches expected JSON."
+
+    actual_text = json.dumps(actual, indent=2, sort_keys=True) + "\n"
+    expected_text = json.dumps(expected_norm, indent=2, sort_keys=True) + "\n"
+    diff = "".join(
+        unified_diff(
+            expected_text.splitlines(keepends=True),
+            actual_text.splitlines(keepends=True),
+            fromfile="expected",
+            tofile="actual",
+        )
+    )
+    message = "Extraction does not match expected JSON.\n" + (
+        diff if diff else f"actual={actual!r}\nexpected={expected_norm!r}"
+    )
+    return False, message
 
 
 def _format_game_end(result: GameEndExtraction) -> str:

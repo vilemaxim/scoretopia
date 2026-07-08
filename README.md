@@ -220,8 +220,21 @@ bash scripts/test.sh
 Screenshot OCR CLI (no Discord):
 
 ```bash
+# Human-readable text (default)
 scoretopia-extract path/to/screenshot.png
+
+# JSON matching ExtractionResult shape (author goldens from the same pipeline)
+scoretopia-extract path/to/screenshot.png --format json
+scoretopia-extract path/to/screenshot.png --format json -o path/to/expected.json
+
+# Verify OCR output against an expected JSON file (exit 0 on match)
+scoretopia-extract path/to/screenshot.png --expected path/to/expected.json
 ```
+
+Local golden pairs under `samples/screenshots/`: place a same-stem `.json` next
+to a `.png` / `.jpg` / `.jpeg`. Pytest discovers those pairs and compares live
+extraction (via `extract_screenshot`) to the golden. Images without a matching
+`.json` are skipped.
 
 ---
 
