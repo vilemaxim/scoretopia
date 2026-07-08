@@ -6,11 +6,25 @@ from datetime import UTC, datetime
 
 import discord
 
-from scoretopia.domain.actions import ActiveGameReport
+from scoretopia.domain.actions import ActiveGameReport, ExtractionPreview
 from scoretopia.reports.dto import ReportDTO, ReportField
 from scoretopia.reports.game_settings import settings_summary
 from scoretopia.reports.kinds import ReportKind
+from scoretopia.screenshot.extract import format_extraction
+from scoretopia.screenshot.models import (
+    ExtractionResult,
+    FriendProfileExtraction,
+    GameBasicsExtraction,
+    GameEndExtraction,
+)
 from scoretopia.storage.models import Game
+
+_SCREENSHOT_TYPE_TITLES = {
+    "game_basics": "Game Basics",
+    "game_end": "Game End",
+    "friend_profile": "Friend Profile",
+}
+_MAX_EMBED_FIELDS = 25
 
 _COLOUR_GAME_STARTED = 0x57F287
 _COLOUR_GAME_COMPLETED = 0xFEE75C
@@ -98,6 +112,89 @@ def build_dispute_embed(body: str) -> discord.Embed:
         ReportKind.dispute,
         title="Win-ratio dispute",
         description=body,
+    )
+
+
+def _extraction_preview_fields(
+    preview: ExtractionPreview,
+    extraction: ExtractionResult | None,
+) -> list[tuple[str, str]]:
+    fields: list[tuple[str, str]] = []
+    if isinstance(extraction, GameBasicsExtraction):
+        if extraction.game_name:
+            fields.append(("Game", extraction.game_name))
+        elif preview.game_name:
+            fields.append(("Game", preview.game_name))
+        settings = settings_summary(
+            Game(
+                id=0,
+                name=extraction.game_name or "Preview",
+                status="active",
+                map_size=extraction.map_size,
+                terrain=extraction.terrain,
+                game_type=extraction.game_type,
+                target_score=extraction.target_score,
+                game_timer=extraction.game_timer,
+                winner_player_id=None,
+            )
+        )
+        if settings:
+            fields.append(("Settings", settings))
+        player_names = ", ".join(player.name for player in extraction.players)
+        if player_names:
+            fields.append(("Players", player_names))
+        return fields
+
+    if isinstance(extraction, GameEndExtraction):
+        if extraction.winner:
+            fields.append(("Winner", extraction.winner))
+        for player in extraction.players:
+            parts = [player.name]
+            if player.score is not None:
+                parts.append(f"{player.score:,} pts")
+            value = " · ".join(parts[1:]) if len(parts) > 1 else player.name
+            fields.append((player.name, value))
+        return fields
+
+    if isinstance(extraction, FriendProfileExtraction):
+        if extraction.friend_name:
+            fields.append(("Friend", extraction.friend_name))
+        ratio = extraction.win_ratio
+        if ratio.you_name and ratio.friend_name:
+            you_wins = ratio.you_wins if ratio.you_wins is not None else "?"
+            friend_wins = ratio.friend_wins if ratio.friend_wins is not None else "?"
+            fields.append(
+                (
+                    "Win ratio",
+                    f"{ratio.you_name} {you_wins}–{friend_wins} {ratio.friend_name}",
+                )
+            )
+        return fields
+
+    if preview.game_name:
+        fields.append(("Game", preview.game_name))
+    return fields
+
+
+def build_extraction_preview_embed(
+    preview: ExtractionPreview,
+    *,
+    extraction: ExtractionResult | None = None,
+) -> discord.Embed:
+    title = _SCREENSHOT_TYPE_TITLES.get(
+        preview.screenshot_type,
+        preview.screenshot_type.replace("_", " ").title(),
+    )
+    fields = _extraction_preview_fields(preview, extraction)
+    description: str | None = None
+    if extraction is not None and len(fields) >= _MAX_EMBED_FIELDS:
+        description = format_extraction(extraction)
+        fields = fields[: _MAX_EMBED_FIELDS - 1]
+    return build_embed(
+        ReportKind.active_games,
+        title=title,
+        description=description,
+        fields=fields,
     )
 
 

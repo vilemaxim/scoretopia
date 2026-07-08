@@ -157,7 +157,7 @@ class IngestService:
             return pending
 
         stored_path = Path(str(pending.payload["screenshot_path"]))
-        extraction = _deserialize_extraction(pending.payload)
+        extraction = deserialize_staged_extraction(pending.payload)
         identity_result = self._resolve_player_identities(extraction)
         if isinstance(identity_result, StagedIngestNotAuthorized):
             return identity_result
@@ -511,7 +511,7 @@ def _serialize_extraction(extraction: ExtractionResult) -> dict[str, object]:
     return asdict(extraction)
 
 
-def _deserialize_extraction(payload: dict[str, object]) -> ExtractionResult:
+def deserialize_staged_extraction(payload: dict[str, object]) -> ExtractionResult:
     screenshot_type = payload.get("screenshot_type")
     extraction_data = payload.get("extraction")
     if not isinstance(extraction_data, dict):
