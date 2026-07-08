@@ -345,3 +345,216 @@ def test_remote_confirm_blocked_when_name_owned_by_another_discord_user(
     owner = player_repo.get_by_polytopia_name("TakenName")
     assert owner is not None
     assert owner.discord_user_id == "owner-discord"
+
+
+# --- Wrong OCR spelling — pick known player (Task 019) ---
+
+
+def _parent_with_staged_extraction(
+    pending_repo: PendingInteractionRepo,
+    *,
+    uploader_discord_id: str,
+    extraction: GameBasicsExtraction,
+    inbox_path: Path,
+) -> int:
+    pending = pending_repo.create(
+        kind="confirm_extraction",
+        discord_user_id=uploader_discord_id,
+        payload={
+            "screenshot_type": "game_basics",
+            "screenshot_path": str(inbox_path / "wrong_ocr.png"),
+            "uploader_discord_id": uploader_discord_id,
+            "extraction": {
+                "screenshot_type": "game_basics",
+                "game_name": extraction.game_name,
+                "players": [
+                    {
+                        "name": player.name,
+                        "is_you": player.is_you,
+                        "is_eliminated": player.is_eliminated,
+                    }
+                    for player in extraction.players
+                ],
+            },
+        },
+    )
+    return pending.id
+
+
+def _slot_for_index(
+    pending_repo: PendingInteractionRepo,
+    interaction_id: int,
+    slot_index: int,
+) -> dict[str, object]:
+    pending = pending_repo.get_by_id(interaction_id)
+    assert pending is not None
+    slots = pending.payload.get("slots")
+    assert isinstance(slots, list)
+    for slot in slots:
+        if isinstance(slot, dict) and slot.get("slot_index") == slot_index:
+            return slot
+    msg = f"Missing slot payload for index {slot_index}"
+    raise AssertionError(msg)
+
+
+def test_reject_spelling_pick_canonical_updates_staged_payload_before_commit(
+    player_repo: PlayerRepo,
+    pending_repo: PendingInteractionRepo,
+    inbox_path: Path,
+) -> None:
+    player_identity_service = _player_identity_service(player_repo, pending_repo)
+    player_repo.create(polytopia_name="Uploader", discord_user_id="uploader-1")
+    canonical = player_repo.create(polytopia_name="RealBob")
+    extraction = _game_basics("Uploader", "WrngBob", is_you_index=0)
+    unresolved = player_identity_service.list_unresolved_humans(extraction)
+    parent_id = _parent_with_staged_extraction(
+        pending_repo,
+        uploader_discord_id="uploader-1",
+        extraction=extraction,
+        inbox_path=inbox_path,
+    )
+    identity = player_identity_service.begin_identity_check(
+        parent_interaction_id=parent_id,
+        uploader_discord_id="uploader-1",
+        extraction=extraction,
+        unresolved=unresolved,
+    )
+
+    player_identity_service.reject_spelling(
+        identity.interaction_id,
+        slot_index=1,
+        confirmer_discord_id="uploader-1",
+    )
+    player_identity_service.pick_canonical_player(
+        identity.interaction_id,
+        slot_index=1,
+        player_id=canonical.id,
+        picker_discord_id="uploader-1",
+    )
+
+    slot = _slot_for_index(pending_repo, identity.interaction_id, slot_index=1)
+    assert slot["polytopia_name"] == "RealBob"
+    assert slot["player_id"] == canonical.id
+
+    parent = pending_repo.get_by_id(parent_id)
+    assert parent is not None
+    from scoretopia.domain.ingest import deserialize_staged_extraction
+
+    staged = deserialize_staged_extraction(parent.payload)
+    assert staged.players[1].name == "RealBob"
+
+
+def test_pick_linked_player_requires_remote_confirm(
+    player_repo: PlayerRepo,
+    pending_repo: PendingInteractionRepo,
+    inbox_path: Path,
+) -> None:
+    player_identity_service = _player_identity_service(player_repo, pending_repo)
+    module = _require_player_identity_module()
+    player_repo.create(polytopia_name="Uploader", discord_user_id="uploader-1")
+    linked = player_repo.create(
+        polytopia_name="Alice",
+        discord_user_id="alice-discord",
+    )
+    extraction = _game_basics("Uploader", "Alce", is_you_index=0)
+    unresolved = player_identity_service.list_unresolved_humans(extraction)
+    parent_id = _parent_with_staged_extraction(
+        pending_repo,
+        uploader_discord_id="uploader-1",
+        extraction=extraction,
+        inbox_path=inbox_path,
+    )
+    identity = player_identity_service.begin_identity_check(
+        parent_interaction_id=parent_id,
+        uploader_discord_id="uploader-1",
+        extraction=extraction,
+        unresolved=unresolved,
+    )
+
+    player_identity_service.reject_spelling(
+        identity.interaction_id,
+        slot_index=1,
+        confirmer_discord_id="uploader-1",
+    )
+    player_identity_service.pick_canonical_player(
+        identity.interaction_id,
+        slot_index=1,
+        player_id=linked.id,
+        picker_discord_id="uploader-1",
+    )
+
+    slot = _slot_for_index(pending_repo, identity.interaction_id, slot_index=1)
+    assert slot["selected_discord_user_id"] == "alice-discord"
+    assert not slot["resolved"]
+
+    result = player_identity_service.confirm_remote_link(
+        identity.interaction_id,
+        slot_index=1,
+        confirmer_discord_id="alice-discord",
+    )
+
+    assert result.outcome == module.ConfirmPlayerLinkOutcome.SUCCESS
+    slot_after = _slot_for_index(
+        pending_repo,
+        identity.interaction_id,
+        slot_index=1,
+    )
+    assert slot_after["resolved"] is True
+
+
+def test_pick_unlinked_player_requires_uploader_discord_then_remote_confirm(
+    player_repo: PlayerRepo,
+    pending_repo: PendingInteractionRepo,
+    inbox_path: Path,
+) -> None:
+    player_identity_service = _player_identity_service(player_repo, pending_repo)
+    module = _require_player_identity_module()
+    player_repo.create(polytopia_name="Uploader", discord_user_id="uploader-1")
+    unlinked = player_repo.create(polytopia_name="Carol")
+    extraction = _game_basics("Uploader", "Crol", is_you_index=0)
+    unresolved = player_identity_service.list_unresolved_humans(extraction)
+    parent_id = _parent_with_staged_extraction(
+        pending_repo,
+        uploader_discord_id="uploader-1",
+        extraction=extraction,
+        inbox_path=inbox_path,
+    )
+    identity = player_identity_service.begin_identity_check(
+        parent_interaction_id=parent_id,
+        uploader_discord_id="uploader-1",
+        extraction=extraction,
+        unresolved=unresolved,
+    )
+
+    player_identity_service.reject_spelling(
+        identity.interaction_id,
+        slot_index=1,
+        confirmer_discord_id="uploader-1",
+    )
+    player_identity_service.pick_canonical_player(
+        identity.interaction_id,
+        slot_index=1,
+        player_id=unlinked.id,
+        picker_discord_id="uploader-1",
+    )
+
+    slot = _slot_for_index(pending_repo, identity.interaction_id, slot_index=1)
+    assert slot["selected_discord_user_id"] is None
+    assert not slot["resolved"]
+
+    player_identity_service.select_discord_user(
+        identity.interaction_id,
+        slot_index=1,
+        selected_discord_user_id="carol-discord",
+        confirmer_discord_id="uploader-1",
+    )
+    result = player_identity_service.confirm_remote_link(
+        identity.interaction_id,
+        slot_index=1,
+        confirmer_discord_id="carol-discord",
+    )
+
+    assert result.outcome == module.ConfirmPlayerLinkOutcome.SUCCESS
+    linked = player_repo.get_by_polytopia_name("Carol")
+    assert linked is not None
+    assert linked.discord_user_id == "carol-discord"

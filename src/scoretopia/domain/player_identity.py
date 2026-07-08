@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import Enum
 
@@ -12,6 +13,8 @@ from scoretopia.domain.actions import (
 from scoretopia.domain.matching import is_bot_name
 from scoretopia.screenshot.models import ExtractionResult, GameBasicsExtraction
 from scoretopia.storage.repos import PendingInteractionRepo, PlayerRepo
+
+logger = logging.getLogger(__name__)
 
 _CONFIRM_PLAYER_LINK_KIND = "confirm_player_link"
 
@@ -144,6 +147,56 @@ class PlayerIdentityService:
         slot["spelling_confirmed"] = True
         self._save_slots(interaction_id, pending.payload)
 
+    def reject_spelling(
+        self,
+        interaction_id: int,
+        *,
+        slot_index: int,
+        confirmer_discord_id: str,
+    ) -> None:
+        pending = self._require_open_pending(interaction_id)
+        if pending.discord_user_id != confirmer_discord_id:
+            return
+        slot = self._slot_for_index(pending.payload, slot_index)
+        slot["spelling_confirmed"] = False
+        self._save_slots(interaction_id, pending.payload)
+
+    def pick_canonical_player(
+        self,
+        interaction_id: int,
+        *,
+        slot_index: int,
+        player_id: int,
+        picker_discord_id: str,
+    ) -> None:
+        pending = self._require_open_pending(interaction_id)
+        if pending.discord_user_id != picker_discord_id:
+            return
+        player = self._player_repo.get_by_id(player_id)
+        if player is None or is_bot_name(player.polytopia_name):
+            msg = f"Unknown human player: {player_id}"
+            raise ValueError(msg)
+
+        slot = self._slot_for_index(pending.payload, slot_index)
+        old_name = str(slot["polytopia_name"])
+        slot["polytopia_name"] = player.polytopia_name
+        slot["player_id"] = player.id
+        slot["spelling_confirmed"] = True
+        if player.discord_user_id is not None:
+            slot["selected_discord_user_id"] = player.discord_user_id
+        self._save_slots(interaction_id, pending.payload)
+        self._update_parent_extraction_player_name(
+            pending.payload,
+            slot_index=slot_index,
+            canonical_name=player.polytopia_name,
+        )
+        logger.info(
+            "player correction picked: %s -> %s by %s",
+            old_name,
+            player.polytopia_name,
+            picker_discord_id,
+        )
+
     def select_discord_user(
         self,
         interaction_id: int,
@@ -252,6 +305,33 @@ class PlayerIdentityService:
 
     def _save_slots(self, interaction_id: int, payload: dict[str, object]) -> None:
         self._pending_repo.update_payload(interaction_id, payload)
+
+    def _update_parent_extraction_player_name(
+        self,
+        payload: dict[str, object],
+        *,
+        slot_index: int,
+        canonical_name: str,
+    ) -> None:
+        parent_id = payload.get("parent_extraction_interaction_id")
+        if not isinstance(parent_id, int):
+            return
+        parent = self._pending_repo.get_by_id(parent_id)
+        if parent is None:
+            return
+        extraction = parent.payload.get("extraction")
+        if not isinstance(extraction, dict):
+            return
+        players = extraction.get("players")
+        if not isinstance(players, list):
+            return
+        if slot_index >= len(players):
+            return
+        entry = players[slot_index]
+        if not isinstance(entry, dict):
+            return
+        entry["name"] = canonical_name
+        self._pending_repo.update_payload(parent_id, parent.payload)
 
     def _polytopia_claimed_by_other(
         self,

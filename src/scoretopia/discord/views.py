@@ -11,10 +11,12 @@ from dataclasses import dataclass
 
 import discord
 
-from scoretopia.storage.models import Game
+from scoretopia.domain.matching import is_bot_name
+from scoretopia.storage.models import Game, Player
 
 _CUSTOM_ID_PREFIX = "st"
 _MAX_GAME_PICK_OPTIONS = 25
+_MAX_PLAYER_PICK_OPTIONS = 25
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,7 @@ _PLAYER_LINK_ACTIONS = frozenset(
     {
         "confirm_player_spelling",
         "reject_player_spelling",
+        "pick_player_correction",
         "confirm_player_link",
         "reject_player_link",
     }
@@ -100,6 +103,19 @@ def build_game_pick_options(games: list[Game]) -> list[discord.SelectOption]:
     return [
         discord.SelectOption(label=game.name, value=str(game.id))
         for game in limited
+    ]
+
+
+def build_player_pick_options(players: list[Player]) -> list[discord.SelectOption]:
+    humans = [
+        player
+        for player in players
+        if not is_bot_name(player.polytopia_name)
+    ]
+    limited = humans[:_MAX_PLAYER_PICK_OPTIONS]
+    return [
+        discord.SelectOption(label=player.polytopia_name, value=str(player.id))
+        for player in limited
     ]
 
 
@@ -256,6 +272,31 @@ class PlayerSpellingConfirmView(discord.ui.View):
                 ),
             )
         )
+
+
+class PlayerCorrectionPickView(discord.ui.View):
+    def __init__(
+        self,
+        *,
+        interaction_id: int,
+        player_slot: int,
+        players: list[Player],
+        uploader_discord_id: str,
+    ) -> None:
+        super().__init__(timeout=None)
+        del uploader_discord_id
+        self.interaction_id = interaction_id
+        self.player_slot = player_slot
+        select = discord.ui.Select(
+            placeholder="Pick the correct Polytopia name",
+            options=build_player_pick_options(players),
+            custom_id=encode_custom_id(
+                "pick_player_correction",
+                interaction_id=interaction_id,
+                player_slot=player_slot,
+            ),
+        )
+        self.add_item(select)
 
 
 class PlayerLinkRemoteConfirmView(discord.ui.View):

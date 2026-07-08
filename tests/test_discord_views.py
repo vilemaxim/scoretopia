@@ -263,3 +263,89 @@ def test_can_confirm_player_link_allows_selected_user_only() -> None:
         selected_discord_user_id="222",
         actor_discord_id="111",
     )
+
+
+# --- Wrong OCR spelling — player correction pick (Task 019) ---
+
+
+def _sample_player(*, player_id: int = 1, polytopia_name: str = "Alice") -> object:
+    from scoretopia.storage.models import Player
+
+    return Player(
+        id=player_id,
+        polytopia_name=polytopia_name,
+        discord_user_id=None,
+        discord_display_name=None,
+    )
+
+
+def _require_player_correction_views():
+    try:
+        from scoretopia.discord.views import (
+            PlayerCorrectionPickView,
+            build_player_pick_options,
+        )
+
+        return PlayerCorrectionPickView, build_player_pick_options
+    except ImportError as exc:
+        pytest.fail(f"Player correction pick views not implemented: {exc}")
+
+
+def test_build_player_pick_options_use_player_ids_and_cap_at_twenty_five() -> None:
+    _view_cls, build_player_pick_options = _require_player_correction_views()
+    del _view_cls
+    players = [
+        _sample_player(player_id=index, polytopia_name=f"Player {index}")
+        for index in range(1, 30)
+    ]
+
+    options = build_player_pick_options(players)
+
+    assert len(options) == 25
+    assert options[0].label == "Player 1"
+    assert options[0].value == "1"
+    assert options[-1].label == "Player 25"
+    assert options[-1].value == "25"
+
+
+def test_build_player_pick_options_exclude_bot_names() -> None:
+    _view_cls, build_player_pick_options = _require_player_correction_views()
+    del _view_cls
+    players = [
+        _sample_player(player_id=1, polytopia_name="Alice"),
+        _sample_player(player_id=2, polytopia_name="Crazy Bot"),
+        _sample_player(player_id=3, polytopia_name="Bob"),
+    ]
+
+    options = build_player_pick_options(players)
+
+    assert [option.label for option in options] == ["Alice", "Bob"]
+    assert [option.value for option in options] == ["1", "3"]
+
+
+def test_player_correction_pick_view_select_custom_id_and_option_values() -> None:
+    PlayerCorrectionPickView, _build_options = _require_player_correction_views()
+    del _build_options
+    from scoretopia.discord.views import encode_custom_id
+
+    players = [
+        _sample_player(player_id=10, polytopia_name="Alice"),
+        _sample_player(player_id=20, polytopia_name="Bob"),
+    ]
+    view = PlayerCorrectionPickView(
+        interaction_id=4,
+        player_slot=2,
+        players=players,
+        uploader_discord_id="111",
+    )
+
+    assert len(view.children) == 1
+    select = view.children[0]
+    assert select.placeholder == "Pick the correct Polytopia name"
+    assert select.custom_id == encode_custom_id(
+        "pick_player_correction",
+        interaction_id=4,
+        player_slot=2,
+    )
+    assert [option.label for option in select.options] == ["Alice", "Bob"]
+    assert [option.value for option in select.options] == ["10", "20"]
