@@ -12,6 +12,10 @@ class PlayerService:
     def __init__(self, player_repo: PlayerRepo) -> None:
         self._player_repo = player_repo
 
+    @property
+    def player_repo(self) -> PlayerRepo:
+        return self._player_repo
+
     def register(
         self,
         *,

@@ -16,12 +16,14 @@ from scoretopia.domain.actions import (
     GameStarted,
     IngestError,
     IngestResult,
+    PlayerLinkNeedsConfirmation,
     StagedIngestNotAuthorized,
     UnrecognizedScreenshot,
     WinRatioNeedsConfirmation,
 )
 from scoretopia.domain.games import GameService
 from scoretopia.domain.matching import is_bot_name
+from scoretopia.domain.player_identity import PlayerIdentityService
 from scoretopia.domain.players import PlayerService
 from scoretopia.domain.results import MatchOutcome, RejectResult
 from scoretopia.domain.win_ratios import WinRatioService
@@ -70,11 +72,19 @@ class IngestService:
         pending_repo: PendingInteractionRepo,
         inbox_path: Path,
         model_dir: str | Path = DEFAULT_MODEL_DIR,
+        player_identity_service: PlayerIdentityService | None = None,
     ) -> None:
         self._player_service = player_service
         self._game_service = game_service
         self._win_ratio_service = win_ratio_service
         self._pending_repo = pending_repo
+        self._player_identity_service = (
+            player_identity_service
+            or PlayerIdentityService(
+                player_service.player_repo,
+                pending_repo,
+            )
+        )
         self._inbox_path = inbox_path
         self._model_dir = model_dir
         self._inbox_path.mkdir(parents=True, exist_ok=True)
@@ -158,8 +168,12 @@ class IngestService:
 
         stored_path = Path(str(pending.payload["screenshot_path"]))
         extraction = deserialize_staged_extraction(pending.payload)
-        identity_result = self._resolve_player_identities(extraction)
-        if isinstance(identity_result, StagedIngestNotAuthorized):
+        identity_result = self._resolve_player_identities(
+            extraction,
+            parent_interaction_id=interaction_id,
+            uploader_discord_id=confirmer_discord_id,
+        )
+        if isinstance(identity_result, PlayerLinkNeedsConfirmation):
             return identity_result
         committed = self.complete_ingest(
             stored_path,
@@ -203,9 +217,26 @@ class IngestService:
     def _resolve_player_identities(
         self,
         extraction: ExtractionResult,
-    ) -> None | StagedIngestNotAuthorized:
-        del extraction
-        return None
+        *,
+        parent_interaction_id: int,
+        uploader_discord_id: str,
+    ) -> PlayerLinkNeedsConfirmation | None:
+        unresolved = self._player_identity_service.list_unresolved_humans(extraction)
+        if not unresolved:
+            return None
+
+        existing = self._player_identity_service.find_pending_for_parent(
+            parent_interaction_id
+        )
+        if existing is not None:
+            return existing
+
+        return self._player_identity_service.begin_identity_check(
+            parent_interaction_id=parent_interaction_id,
+            uploader_discord_id=uploader_discord_id,
+            extraction=extraction,
+            unresolved=unresolved,
+        )
 
     def prepare_stored_path(self, image_path: str | Path) -> Path:
         return self._store_in_inbox(Path(image_path))

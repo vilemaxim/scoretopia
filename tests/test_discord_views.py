@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from scoretopia.discord.views import (
     GameEndConfirmView,
     GameEndPickView,
@@ -138,3 +140,126 @@ def test_extraction_confirm_view_exposes_confirm_and_reject_buttons() -> None:
     assert view.timeout is None
     assert encode_custom_id("confirm_extraction", interaction_id=5) in custom_ids
     assert encode_custom_id("reject_extraction", interaction_id=5) in custom_ids
+
+
+def _require_player_link_views():
+    try:
+        from scoretopia.discord.views import (
+            PlayerLinkRemoteConfirmView,
+            PlayerSpellingConfirmView,
+            can_confirm_player_link,
+        )
+        from scoretopia.discord.views import (
+            encode_custom_id as encode_player_link_custom_id,
+        )
+        from scoretopia.discord.views import (
+            parse_custom_id as parse_player_link_custom_id,
+        )
+
+        return (
+            PlayerSpellingConfirmView,
+            PlayerLinkRemoteConfirmView,
+            can_confirm_player_link,
+            encode_player_link_custom_id,
+            parse_player_link_custom_id,
+        )
+    except ImportError as exc:
+        pytest.fail(f"Player link views not implemented: {exc}")
+
+
+def test_encode_and_parse_custom_id_includes_player_slot() -> None:
+    (
+        _spelling_view,
+        _remote_view,
+        _can_confirm,
+        encode_player_link_custom_id,
+        parse_player_link_custom_id,
+    ) = _require_player_link_views()
+
+    custom_id = encode_player_link_custom_id(
+        "confirm_player_spelling",
+        interaction_id=42,
+        player_slot=2,
+    )
+
+    parsed = parse_player_link_custom_id(custom_id)
+
+    assert parsed.action == "confirm_player_spelling"
+    assert parsed.interaction_id == 42
+    assert parsed.player_slot == 2
+
+
+def test_player_spelling_confirm_view_custom_ids_encode_interaction_and_slot() -> None:
+    (
+        PlayerSpellingConfirmView,
+        _remote_view,
+        _can_confirm,
+        encode_player_link_custom_id,
+        _parse,
+    ) = _require_player_link_views()
+
+    view = PlayerSpellingConfirmView(
+        interaction_id=7,
+        player_slot=1,
+        polytopia_name="NewBob",
+        uploader_discord_id="111",
+    )
+
+    custom_ids = {child.custom_id for child in view.children}
+    assert encode_player_link_custom_id(
+        "confirm_player_spelling",
+        interaction_id=7,
+        player_slot=1,
+    ) in custom_ids
+    assert encode_player_link_custom_id(
+        "reject_player_spelling",
+        interaction_id=7,
+        player_slot=1,
+    ) in custom_ids
+
+
+def test_player_link_remote_confirm_view_encodes_interaction_and_slot() -> None:
+    (
+        _spelling_view,
+        PlayerLinkRemoteConfirmView,
+        _can_confirm,
+        encode_player_link_custom_id,
+        _parse,
+    ) = _require_player_link_views()
+
+    view = PlayerLinkRemoteConfirmView(
+        interaction_id=9,
+        player_slot=0,
+        selected_discord_user_id="222",
+    )
+
+    custom_ids = {child.custom_id for child in view.children}
+    assert encode_player_link_custom_id(
+        "confirm_player_link",
+        interaction_id=9,
+        player_slot=0,
+    ) in custom_ids
+    assert encode_player_link_custom_id(
+        "reject_player_link",
+        interaction_id=9,
+        player_slot=0,
+    ) in custom_ids
+
+
+def test_can_confirm_player_link_allows_selected_user_only() -> None:
+    (
+        _spelling_view,
+        _remote_view,
+        can_confirm_player_link,
+        _encode,
+        _parse,
+    ) = _require_player_link_views()
+
+    assert can_confirm_player_link(
+        selected_discord_user_id="222",
+        actor_discord_id="222",
+    )
+    assert not can_confirm_player_link(
+        selected_discord_user_id="222",
+        actor_discord_id="111",
+    )

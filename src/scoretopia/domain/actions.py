@@ -72,6 +72,21 @@ class WinRatioNeedsConfirmation:
 
 
 @dataclass(frozen=True)
+class UnresolvedPlayerPreview:
+    slot_index: int
+    polytopia_name: str
+    player_id: int | None = None
+
+
+@dataclass(frozen=True)
+class PlayerLinkNeedsConfirmation:
+    interaction_id: int
+    parent_extraction_interaction_id: int
+    unresolved: tuple[UnresolvedPlayerPreview, ...]
+    action: str = "player_link_needs_confirmation"
+
+
+@dataclass(frozen=True)
 class UnrecognizedScreenshot:
     message: str
     action: str = "unrecognized_screenshot"
@@ -90,6 +105,7 @@ IngestResult = (
     | GameEndNeedsPick
     | GameEndPendingStart
     | WinRatioNeedsConfirmation
+    | PlayerLinkNeedsConfirmation
     | UnrecognizedScreenshot
     | IngestError
 )

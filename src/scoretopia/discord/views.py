@@ -22,6 +22,7 @@ class ParsedCustomId:
     action: str
     interaction_id: int
     game_id: int | None = None
+    player_slot: int | None = None
 
 
 def unauthorized_confirmation_message() -> str:
@@ -44,14 +45,33 @@ def can_confirm_extraction(
     return uploader_discord_id == actor_discord_id
 
 
+def can_confirm_player_link(
+    *, selected_discord_user_id: str, actor_discord_id: str
+) -> bool:
+    return selected_discord_user_id == actor_discord_id
+
+
+_PLAYER_LINK_ACTIONS = frozenset(
+    {
+        "confirm_player_spelling",
+        "reject_player_spelling",
+        "confirm_player_link",
+        "reject_player_link",
+    }
+)
+
+
 def encode_custom_id(
     action: str,
     *,
     interaction_id: int,
     game_id: int | None = None,
+    player_slot: int | None = None,
 ) -> str:
     if game_id is not None:
         return f"{_CUSTOM_ID_PREFIX}:{action}:{interaction_id}:{game_id}"
+    if player_slot is not None:
+        return f"{_CUSTOM_ID_PREFIX}:{action}:{interaction_id}:{player_slot}"
     return f"{_CUSTOM_ID_PREFIX}:{action}:{interaction_id}"
 
 
@@ -61,11 +81,17 @@ def parse_custom_id(custom_id: str) -> ParsedCustomId:
         raise ValueError(f"Invalid custom_id: {custom_id}")
     action = parts[1]
     interaction_id = int(parts[2])
-    game_id = int(parts[3]) if len(parts) > 3 else None
+    qualifier = int(parts[3]) if len(parts) > 3 else None
+    if action in _PLAYER_LINK_ACTIONS:
+        return ParsedCustomId(
+            action=action,
+            interaction_id=interaction_id,
+            player_slot=qualifier,
+        )
     return ParsedCustomId(
         action=action,
         interaction_id=interaction_id,
-        game_id=game_id,
+        game_id=qualifier,
     )
 
 
@@ -190,6 +216,79 @@ class ExtractionConfirmView(discord.ui.View):
                 custom_id=encode_custom_id(
                     "reject_extraction",
                     interaction_id=interaction_id,
+                ),
+            )
+        )
+
+
+class PlayerSpellingConfirmView(discord.ui.View):
+    def __init__(
+        self,
+        *,
+        interaction_id: int,
+        player_slot: int,
+        polytopia_name: str,
+        uploader_discord_id: str,
+    ) -> None:
+        super().__init__(timeout=None)
+        del polytopia_name, uploader_discord_id
+        self.interaction_id = interaction_id
+        self.player_slot = player_slot
+        self.add_item(
+            discord.ui.Button(
+                label="Yes",
+                style=discord.ButtonStyle.success,
+                custom_id=encode_custom_id(
+                    "confirm_player_spelling",
+                    interaction_id=interaction_id,
+                    player_slot=player_slot,
+                ),
+            )
+        )
+        self.add_item(
+            discord.ui.Button(
+                label="No, pick different name",
+                style=discord.ButtonStyle.secondary,
+                custom_id=encode_custom_id(
+                    "reject_player_spelling",
+                    interaction_id=interaction_id,
+                    player_slot=player_slot,
+                ),
+            )
+        )
+
+
+class PlayerLinkRemoteConfirmView(discord.ui.View):
+    def __init__(
+        self,
+        *,
+        interaction_id: int,
+        player_slot: int,
+        selected_discord_user_id: str,
+    ) -> None:
+        super().__init__(timeout=None)
+        del selected_discord_user_id
+        self.interaction_id = interaction_id
+        self.player_slot = player_slot
+        self.add_item(
+            discord.ui.Button(
+                label="Confirm",
+                style=discord.ButtonStyle.success,
+                custom_id=encode_custom_id(
+                    "confirm_player_link",
+                    interaction_id=interaction_id,
+                    player_slot=player_slot,
+                ),
+            )
+        )
+        self.add_item(
+            discord.ui.Button(
+                label="Not me",
+                style=discord.ButtonStyle.danger,
+                custom_id=encode_custom_id(
+                    "reject_player_link",
+                    interaction_id=interaction_id,
+                    player_slot=player_slot,
                 ),
             )
         )
