@@ -21,32 +21,37 @@ from discord.ext import commands
 from scoretopia.config import ChannelsConfig, ScoretopiaConfig
 from scoretopia.discord.embeds import (
     build_dispute_embed,
+    build_extraction_preview_embed,
     build_game_completed_embed,
     build_game_started_embed,
 )
 from scoretopia.discord.publisher import DiscordReportPublisher, report_to_embed
 from scoretopia.discord.views import (
+    ExtractionConfirmView,
     GameEndConfirmView,
     GameEndPickView,
     ParsedCustomId,
     WinRatioConfirmView,
+    can_confirm_extraction,
     can_confirm_game_end,
     can_confirm_win_ratio,
     parse_custom_id,
     unauthorized_confirmation_message,
 )
 from scoretopia.domain.actions import (
+    ExtractionNeedsConfirmation,
     GameEndNeedsConfirmation,
     GameEndNeedsPick,
     GameEndPendingStart,
     GameStarted,
     IngestError,
     IngestResult,
+    StagedIngestNotAuthorized,
     UnrecognizedScreenshot,
     WinRatioNeedsConfirmation,
 )
 from scoretopia.domain.games import GameService
-from scoretopia.domain.ingest import IngestService
+from scoretopia.domain.ingest import IngestService, deserialize_staged_extraction
 from scoretopia.domain.players import PlayerService
 from scoretopia.domain.results import RegisterOutcome
 from scoretopia.domain.win_ratios import ConfirmOutcome, DisputeResult, WinRatioService
@@ -60,6 +65,10 @@ _EXTRACT_FAILURE_TYPES = (UnrecognizedScreenshot, IngestError)
 _PROCESSING_REACTION = "👀"
 _SUCCESS_REACTION = "👍"
 _FAILURE_REACTION = "❌"
+
+ScreenshotUploadResult = IngestResult | ExtractionNeedsConfirmation
+
+_REJECT_EXTRACTION_MESSAGE = "Discarded — upload again if needed."
 
 logger = logging.getLogger(__name__)
 
@@ -107,9 +116,13 @@ def resolve_guild_channels(
     return resolved
 
 
-def plan_ingest_response(result: IngestResult) -> ResponsePlan:
+def plan_ingest_response(
+    result: IngestResult | ExtractionNeedsConfirmation,
+) -> ResponsePlan:
     if isinstance(result, GameStarted):
         return ResponsePlan(channel="reports", kind="embed")
+    if isinstance(result, ExtractionNeedsConfirmation):
+        return ResponsePlan(channel="input", kind="extraction_confirm_view")
     if isinstance(result, GameEndNeedsConfirmation):
         return ResponsePlan(channel="input", kind="game_end_confirm_view")
     if isinstance(result, GameEndNeedsPick):
@@ -131,7 +144,9 @@ def plan_ingest_response(result: IngestResult) -> ResponsePlan:
     raise TypeError(f"Unsupported ingest result: {type(result)!r}")
 
 
-def plan_ingest_ack_reaction(result: IngestResult) -> Literal["👍", "❌"]:
+def plan_ingest_ack_reaction(
+    result: IngestResult | ExtractionNeedsConfirmation,
+) -> Literal["👍", "❌"]:
     if isinstance(result, (UnrecognizedScreenshot, IngestError)):
         return _FAILURE_REACTION
     return _SUCCESS_REACTION
@@ -298,7 +313,7 @@ class DiscordBotAdapter(BotPort):
         attachment: discord.Attachment,
     ) -> None:
         await self._begin_screenshot_ack(message)
-        result: IngestResult | None = None
+        result: ScreenshotUploadResult | None = None
         try:
             result = await self._ingest_screenshot_attachment(message, attachment)
             await self._deliver_ingest_result(message, result)
@@ -316,7 +331,7 @@ class DiscordBotAdapter(BotPort):
         self,
         message: discord.Message,
         attachment: discord.Attachment,
-    ) -> IngestResult:
+    ) -> ScreenshotUploadResult:
         inbox_path = self._config.inbox.path
         inbox_path.mkdir(parents=True, exist_ok=True)
         destination = inbox_path / attachment.filename
@@ -335,9 +350,8 @@ class DiscordBotAdapter(BotPort):
                 failure=extracted,
             )
             return extracted
-        return self._ingest_service.process_extracted_screenshot(
+        return self._ingest_service.stage_screenshot(
             stored_path,
-            extracted,
             uploader_discord_id=uploader_discord_id,
             filename=attachment.filename,
         )
@@ -352,7 +366,7 @@ class DiscordBotAdapter(BotPort):
     async def _finish_screenshot_ack(
         self,
         message: discord.Message,
-        result: IngestResult,
+        result: IngestResult | ExtractionNeedsConfirmation,
     ) -> None:
         message_id = message.id
         in_flight = self._screenshot_ack_in_flight.get(message_id, 0)
@@ -369,7 +383,7 @@ class DiscordBotAdapter(BotPort):
     async def _apply_final_ack_reaction(
         self,
         message: discord.Message,
-        result: IngestResult,
+        result: IngestResult | ExtractionNeedsConfirmation,
     ) -> None:
         emoji = plan_ingest_ack_reaction(result)
         if not self._message_has_reaction(message, emoji):
@@ -401,15 +415,27 @@ class DiscordBotAdapter(BotPort):
     async def _deliver_ingest_result(
         self,
         message: discord.Message,
-        result: IngestResult,
+        result: IngestResult | ExtractionNeedsConfirmation,
     ) -> None:
         try:
             plan = plan_ingest_response(result)
             if plan.kind == "embed" and isinstance(result, GameStarted):
-                reports_channel = self._channel("reports")
-                if reports_channel is not None:
-                    embed = build_game_started_embed(result.game, result.report)
-                    await reports_channel.send(embed=embed)
+                await self._post_game_started_to_reports(result)
+                return
+
+            if plan.kind == "extraction_confirm_view" and isinstance(
+                result, ExtractionNeedsConfirmation
+            ):
+                extraction = self._staged_extraction(result.interaction_id)
+                embed = build_extraction_preview_embed(
+                    result.preview,
+                    extraction=extraction,
+                )
+                view = ExtractionConfirmView(
+                    interaction_id=result.interaction_id,
+                    uploader_discord_id=str(message.author.id),
+                )
+                await message.reply(embed=embed, view=view)
                 return
 
             if plan.kind == "game_end_confirm_view" and isinstance(
@@ -478,6 +504,10 @@ class DiscordBotAdapter(BotPort):
             await self._handle_confirm_win_ratio(interaction, parsed)
         elif parsed.action == "reject_win_ratio":
             await self._handle_reject_win_ratio(interaction, parsed)
+        elif parsed.action == "confirm_extraction":
+            await self._handle_confirm_extraction(interaction, parsed)
+        elif parsed.action == "reject_extraction":
+            await self._handle_reject_extraction(interaction, parsed)
 
     async def _handle_confirm_game_end(
         self,
@@ -619,6 +649,73 @@ class DiscordBotAdapter(BotPort):
             ephemeral=True,
         )
 
+    async def _handle_confirm_extraction(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        pending = self._staged_uploader_id(parsed.interaction_id)
+        if pending is None or not can_confirm_extraction(
+            uploader_discord_id=pending,
+            actor_discord_id=str(interaction.user.id),
+        ):
+            await self._reply_unauthorized(interaction)
+            return
+        result = self._ingest_service.commit_staged(
+            parsed.interaction_id,
+            confirmer_discord_id=str(interaction.user.id),
+        )
+        if isinstance(result, StagedIngestNotAuthorized):
+            await self._reply_unauthorized(interaction)
+            return
+        await self._deliver_committed_ingest_result(interaction, result)
+
+    async def _handle_reject_extraction(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        pending = self._staged_uploader_id(parsed.interaction_id)
+        if pending is None or not can_confirm_extraction(
+            uploader_discord_id=pending,
+            actor_discord_id=str(interaction.user.id),
+        ):
+            await self._reply_unauthorized(interaction)
+            return
+        reject_result = self._ingest_service.reject_staged(
+            parsed.interaction_id,
+            confirmer_discord_id=str(interaction.user.id),
+        )
+        if isinstance(reject_result, StagedIngestNotAuthorized):
+            await self._reply_unauthorized(interaction)
+            return
+        await interaction.response.send_message(
+            _REJECT_EXTRACTION_MESSAGE,
+            ephemeral=True,
+        )
+
+    async def _deliver_committed_ingest_result(
+        self,
+        interaction: discord.Interaction,
+        result: IngestResult,
+    ) -> None:
+        plan = plan_ingest_response(result)
+        if plan.kind == "embed" and isinstance(result, GameStarted):
+            await self._post_game_started_to_reports(result)
+            await interaction.response.send_message(
+                f"Game started: **{result.report.game_name}**.",
+                ephemeral=True,
+            )
+            return
+
+        message = interaction.message
+        if message is not None:
+            await self._deliver_ingest_result(message, result)
+        await interaction.response.send_message(
+            "Extraction confirmed.",
+            ephemeral=True,
+        )
+
     def _channel(self, key: str) -> discord.TextChannel | None:
         channel_id = self._channel_ids.get(key)
         if channel_id is None:
@@ -628,6 +725,13 @@ class DiscordBotAdapter(BotPort):
     def _is_input_channel(self, channel: discord.abc.Messageable) -> bool:
         input_id = self._channel_ids.get("input")
         return isinstance(channel, discord.TextChannel) and channel.id == input_id
+
+    async def _post_game_started_to_reports(self, result: GameStarted) -> None:
+        reports_channel = self._channel("reports")
+        if reports_channel is None:
+            return
+        embed = build_game_started_embed(result.game, result.report)
+        await reports_channel.send(embed=embed)
 
     async def _post_game_completed(
         self,
@@ -682,6 +786,27 @@ class DiscordBotAdapter(BotPort):
             return None
         pending = repo.get_by_id(interaction_id)
         return pending.discord_user_id if pending is not None else None
+
+    def _staged_uploader_id(self, interaction_id: int) -> str | None:
+        repo = getattr(self._ingest_service, "_pending_repo", None)
+        if repo is None:
+            return None
+        pending = repo.get_by_id(interaction_id)
+        if pending is None or pending.kind != "confirm_extraction":
+            return None
+        return pending.discord_user_id
+
+    def _staged_extraction(self, interaction_id: int):
+        repo = getattr(self._ingest_service, "_pending_repo", None)
+        if repo is None:
+            return None
+        pending = repo.get_by_id(interaction_id)
+        if pending is None:
+            return None
+        try:
+            return deserialize_staged_extraction(pending.payload)
+        except ValueError:
+            return None
 
     def _other_player_discord_id(self, other_player_id: int) -> str | None:
         if self._player_repo is None:

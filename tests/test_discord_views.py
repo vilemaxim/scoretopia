@@ -111,3 +111,30 @@ def test_win_ratio_confirm_view_exposes_confirm_and_reject() -> None:
 
     labels = {child.label for child in view.children}
     assert labels == {"Confirm", "Reject"}
+
+
+def test_can_confirm_extraction_allows_uploader_only() -> None:
+    from scoretopia.discord.views import can_confirm_extraction
+
+    assert can_confirm_extraction(uploader_discord_id="111", actor_discord_id="111")
+    assert not can_confirm_extraction(
+        uploader_discord_id="111",
+        actor_discord_id="222",
+    )
+
+
+def test_extraction_confirm_view_exposes_confirm_and_reject_buttons() -> None:
+    from scoretopia.discord.views import ExtractionConfirmView
+
+    view = ExtractionConfirmView(
+        interaction_id=5,
+        uploader_discord_id="111",
+    )
+
+    labels = {child.label for child in view.children}
+    custom_ids = {child.custom_id for child in view.children}
+
+    assert labels == {"Confirm", "Reject"}
+    assert view.timeout is None
+    assert encode_custom_id("confirm_extraction", interaction_id=5) in custom_ids
+    assert encode_custom_id("reject_extraction", interaction_id=5) in custom_ids

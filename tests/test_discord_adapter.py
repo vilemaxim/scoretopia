@@ -21,8 +21,11 @@ from scoretopia.discord.adapter import (
     plan_ingest_response,
     resolve_guild_channels,
 )
+from scoretopia.discord.views import ParsedCustomId
 from scoretopia.domain.actions import (
     ActiveGameReport,
+    ExtractionNeedsConfirmation,
+    ExtractionPreview,
     GameEndNeedsConfirmation,
     GameEndNeedsPick,
     GameEndPendingStart,
@@ -33,6 +36,7 @@ from scoretopia.domain.actions import (
 )
 from scoretopia.domain.win_ratios import DisputeResult
 from scoretopia.ports.bot import BotPort
+from scoretopia.screenshot.models import GameBasicsExtraction, GameBasicsPlayer
 from scoretopia.storage.models import Game
 
 
@@ -227,33 +231,30 @@ def test_screenshot_upload_runs_ocr_off_event_loop(tmp_path: Path) -> None:
     adapter._deliver_ingest_result.assert_awaited_once()
 
 
-def test_screenshot_upload_completes_ingest_on_event_loop(tmp_path: Path) -> None:
+def test_screenshot_upload_stages_ingest_on_event_loop(tmp_path: Path) -> None:
     loop_thread_id = threading.get_ident()
-    complete_thread_id: int | None = None
+    stage_thread_id: int | None = None
     stored_path = tmp_path / "end.png"
     extraction = MagicMock()
-    expected = UnrecognizedScreenshot(message="Could not recognize this screenshot.")
+    expected = _extraction_needs_confirmation()
 
     ingest_service = MagicMock()
     ingest_service.prepare_stored_path.return_value = stored_path
     ingest_service.extract_stored_screenshot.return_value = extraction
 
-    def process_extracted_screenshot(
+    def stage_screenshot(
         _stored_path: Path,
-        _extraction: object,
         *,
         uploader_discord_id: str,
         filename: str,
-    ) -> UnrecognizedScreenshot:
-        nonlocal complete_thread_id
-        complete_thread_id = threading.get_ident()
+    ) -> ExtractionNeedsConfirmation:
+        nonlocal stage_thread_id
+        stage_thread_id = threading.get_ident()
         assert uploader_discord_id == "99"
         assert filename == "end.png"
         return expected
 
-    ingest_service.process_extracted_screenshot.side_effect = (
-        process_extracted_screenshot
-    )
+    ingest_service.stage_screenshot.side_effect = stage_screenshot
 
     config = MagicMock()
     config.inbox.path = tmp_path
@@ -277,10 +278,9 @@ def test_screenshot_upload_completes_ingest_on_event_loop(tmp_path: Path) -> Non
 
     asyncio.run(adapter._handle_screenshot_upload(message, attachment))
 
-    assert complete_thread_id == loop_thread_id
-    ingest_service.process_extracted_screenshot.assert_called_once_with(
+    assert stage_thread_id == loop_thread_id
+    ingest_service.stage_screenshot.assert_called_once_with(
         stored_path,
-        extraction,
         uploader_discord_id="99",
         filename="end.png",
     )
@@ -411,15 +411,15 @@ def test_finish_screenshot_ack_adds_failure_reaction_for_unrecognized() -> None:
     message.add_reaction.assert_awaited_once_with(_FAILURE_REACTION)
 
 
-def test_screenshot_upload_reaction_lifecycle_for_recognized_result(
+def test_screenshot_upload_reaction_lifecycle_for_staged_result(
     tmp_path: Path,
 ) -> None:
     stored_path = tmp_path / "start.png"
-    result = GameEndNeedsConfirmation(game_id=1, interaction_id=10)
+    result = _extraction_needs_confirmation()
     ingest_service = MagicMock()
     ingest_service.prepare_stored_path.return_value = stored_path
     ingest_service.extract_stored_screenshot.return_value = MagicMock()
-    ingest_service.process_extracted_screenshot.return_value = result
+    ingest_service.stage_screenshot.return_value = result
 
     adapter = _screenshot_adapter(tmp_path, ingest_service)
     adapter._deliver_ingest_result = AsyncMock()
@@ -681,3 +681,185 @@ def test_reject_win_ratio_posts_dispute_embed_to_input_channel() -> None:
     assert embed.colour.value == 0xED4245
     assert embed.timestamp is not None
     assert "Alice claimed 9–11 vs Bob" in (embed.description or "")
+
+
+def _extraction_needs_confirmation(
+    *,
+    interaction_id: int = 10,
+    screenshot_type: str = "game_basics",
+    game_name: str | None = "Friday Night",
+) -> ExtractionNeedsConfirmation:
+    return ExtractionNeedsConfirmation(
+        interaction_id=interaction_id,
+        preview=ExtractionPreview(
+            screenshot_type=screenshot_type,
+            game_name=game_name,
+        ),
+    )
+
+
+def test_plan_ingest_response_routes_extraction_needs_confirmation_to_input() -> None:
+    result = _extraction_needs_confirmation()
+
+    plan = plan_ingest_response(result)
+
+    assert plan.channel == "input"
+    assert plan.kind == "extraction_confirm_view"
+
+
+def test_deliver_extraction_preview_replies_on_input_not_reports() -> None:
+    input_channel = MagicMock()
+    input_channel.send = AsyncMock()
+    reports_channel = MagicMock()
+    reports_channel.send = AsyncMock()
+    adapter = _adapter_with_channels(
+        input_channel=input_channel,
+        reports_channel=reports_channel,
+    )
+    message = _upload_message()
+    result = _extraction_needs_confirmation()
+
+    asyncio.run(adapter._deliver_ingest_result(message, result))
+
+    message.reply.assert_awaited_once()
+    reply_kwargs = message.reply.await_args.kwargs
+    assert "embed" in reply_kwargs
+    assert "view" in reply_kwargs
+    assert reply_kwargs["embed"].title == "Game Basics"
+    reports_channel.send.assert_not_awaited()
+
+
+def test_handle_confirm_extraction_routes_to_commit_staged() -> None:
+    reports_channel = MagicMock()
+    reports_channel.send = AsyncMock()
+    adapter = _adapter_with_channels(reports_channel=reports_channel)
+    adapter._staged_uploader_id = MagicMock(return_value="42")
+    committed = GameStarted(
+        game=_sample_game(),
+        report=ActiveGameReport(
+            game_id=1,
+            game_name="Friday Night",
+            human_player_names=("Alice", "Bob"),
+            bot_count=0,
+        ),
+    )
+    adapter._ingest_service.commit_staged.return_value = committed
+
+    interaction = MagicMock()
+    interaction.user.id = 42
+    interaction.response.send_message = AsyncMock()
+    parsed = ParsedCustomId(action="confirm_extraction", interaction_id=10)
+
+    asyncio.run(adapter._handle_confirm_extraction(interaction, parsed))
+
+    adapter._ingest_service.commit_staged.assert_called_once_with(
+        10,
+        confirmer_discord_id="42",
+    )
+    reports_channel.send.assert_awaited_once()
+
+
+def test_handle_reject_extraction_resolves_without_reports_channel_send() -> None:
+    reports_channel = MagicMock()
+    reports_channel.send = AsyncMock()
+    adapter = _adapter_with_channels(reports_channel=reports_channel)
+    adapter._staged_uploader_id = MagicMock(return_value="42")
+    adapter._ingest_service.reject_staged.return_value = MagicMock()
+
+    interaction = MagicMock()
+    interaction.user.id = 42
+    interaction.response.send_message = AsyncMock()
+    parsed = ParsedCustomId(action="reject_extraction", interaction_id=10)
+
+    asyncio.run(adapter._handle_reject_extraction(interaction, parsed))
+
+    adapter._ingest_service.reject_staged.assert_called_once_with(
+        10,
+        confirmer_discord_id="42",
+    )
+    reports_channel.send.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once_with(
+        "Discarded — upload again if needed.",
+        ephemeral=True,
+    )
+
+
+def test_confirm_extraction_unauthorized_user_gets_ephemeral_message() -> None:
+    adapter = _adapter_with_channels()
+    adapter._staged_uploader_id = MagicMock(return_value="111")
+
+    interaction = MagicMock()
+    interaction.user.id = 222
+    interaction.response.send_message = AsyncMock()
+    parsed = ParsedCustomId(action="confirm_extraction", interaction_id=10)
+
+    asyncio.run(adapter._handle_confirm_extraction(interaction, parsed))
+
+    interaction.response.send_message.assert_awaited_once_with(
+        "not your confirmation",
+        ephemeral=True,
+    )
+    adapter._ingest_service.commit_staged.assert_not_called()
+
+
+def test_game_basics_upload_preview_confirm_posts_to_reports_channel(
+    tmp_path: Path,
+) -> None:
+    stored_path = tmp_path / "start.png"
+    extraction = GameBasicsExtraction(
+        game_name="Friday Night",
+        players=(
+            GameBasicsPlayer(name="Alice", is_you=True),
+            GameBasicsPlayer(name="Bob"),
+        ),
+    )
+    staged = _extraction_needs_confirmation(interaction_id=10)
+    committed = GameStarted(
+        game=_sample_game(),
+        report=ActiveGameReport(
+            game_id=1,
+            game_name="Friday Night",
+            human_player_names=("Alice", "Bob"),
+            bot_count=0,
+        ),
+    )
+
+    ingest_service = MagicMock()
+    ingest_service.prepare_stored_path.return_value = stored_path
+    ingest_service.extract_stored_screenshot.return_value = extraction
+    ingest_service.stage_screenshot.return_value = staged
+    ingest_service.commit_staged.return_value = committed
+
+    reports_channel = MagicMock()
+    reports_channel.send = AsyncMock()
+    adapter = _screenshot_adapter(tmp_path, ingest_service)
+    adapter._channel_ids = {"input": 100, "reports": 200}
+    adapter._channels_by_id = {200: reports_channel}
+    adapter._staged_uploader_id = MagicMock(return_value="42")
+
+    message = _upload_message(message_id=1001)
+    attachment = _upload_attachment("start.png")
+
+    asyncio.run(adapter._handle_screenshot_upload(message, attachment))
+
+    ingest_service.stage_screenshot.assert_called_once()
+    ingest_service.process_extracted_screenshot.assert_not_called()
+    reports_channel.send.assert_not_awaited()
+    message.reply.assert_awaited_once()
+    assert "embed" in message.reply.await_args.kwargs
+    assert "view" in message.reply.await_args.kwargs
+
+    confirm_interaction = MagicMock()
+    confirm_interaction.user.id = 42
+    confirm_interaction.response.send_message = AsyncMock()
+    parsed = ParsedCustomId(action="confirm_extraction", interaction_id=10)
+
+    asyncio.run(adapter._handle_confirm_extraction(confirm_interaction, parsed))
+
+    ingest_service.commit_staged.assert_called_once_with(
+        10,
+        confirmer_discord_id="42",
+    )
+    reports_channel.send.assert_awaited_once()
+    embed = reports_channel.send.await_args.kwargs["embed"]
+    assert embed.title == "Game started: Friday Night"

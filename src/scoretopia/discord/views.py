@@ -38,6 +38,12 @@ def can_confirm_win_ratio(
     return other_player_discord_id == actor_discord_id
 
 
+def can_confirm_extraction(
+    *, uploader_discord_id: str, actor_discord_id: str
+) -> bool:
+    return uploader_discord_id == actor_discord_id
+
+
 def encode_custom_id(
     action: str,
     *,
@@ -151,6 +157,38 @@ class WinRatioConfirmView(discord.ui.View):
                 style=discord.ButtonStyle.danger,
                 custom_id=encode_custom_id(
                     "reject_win_ratio",
+                    interaction_id=interaction_id,
+                ),
+            )
+        )
+
+
+class ExtractionConfirmView(discord.ui.View):
+    def __init__(
+        self,
+        *,
+        interaction_id: int,
+        uploader_discord_id: str,
+    ) -> None:
+        super().__init__(timeout=None)
+        del uploader_discord_id
+        self.interaction_id = interaction_id
+        self.add_item(
+            discord.ui.Button(
+                label="Confirm",
+                style=discord.ButtonStyle.success,
+                custom_id=encode_custom_id(
+                    "confirm_extraction",
+                    interaction_id=interaction_id,
+                ),
+            )
+        )
+        self.add_item(
+            discord.ui.Button(
+                label="Reject",
+                style=discord.ButtonStyle.secondary,
+                custom_id=encode_custom_id(
+                    "reject_extraction",
                     interaction_id=interaction_id,
                 ),
             )
