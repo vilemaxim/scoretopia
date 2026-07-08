@@ -48,6 +48,13 @@ _UNRECOGNIZED_MESSAGE = (
 _CONFIRM_EXTRACTION_KIND = "confirm_extraction"
 
 
+def _unrecognized_message_from_value_error(exc: ValueError) -> str:
+    message = str(exc).strip()
+    if not message or message.startswith("Unrecognized screenshot type"):
+        return _UNRECOGNIZED_MESSAGE
+    return message
+
+
 def _human_and_bot_counts(
     players: tuple[GameBasicsPlayer, ...],
 ) -> tuple[tuple[str, ...], int]:
@@ -248,8 +255,10 @@ class IngestService:
         path = Path(stored_path)
         try:
             return extract_screenshot(path, model_dir=self._model_dir)
-        except ValueError:
-            return UnrecognizedScreenshot(message=_UNRECOGNIZED_MESSAGE)
+        except ValueError as exc:
+            return UnrecognizedScreenshot(
+                message=_unrecognized_message_from_value_error(exc)
+            )
         except FileNotFoundError as exc:
             return IngestError(message="Screenshot file not found", detail=str(exc))
         except OSError as exc:
