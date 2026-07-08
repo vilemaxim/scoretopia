@@ -8,6 +8,24 @@ from scoretopia.storage.models import Game
 
 
 @dataclass(frozen=True)
+class ExtractionPreview:
+    screenshot_type: str
+    game_name: str | None = None
+
+
+@dataclass(frozen=True)
+class ExtractionNeedsConfirmation:
+    interaction_id: int
+    preview: ExtractionPreview
+    action: str = "extraction_needs_confirmation"
+
+
+@dataclass(frozen=True)
+class StagedIngestNotAuthorized:
+    action: str = "not_authorized"
+
+
+@dataclass(frozen=True)
 class ActiveGameReport:
     """Platform-agnostic payload for the active_games report channel."""
 
@@ -41,6 +59,8 @@ class GameEndNeedsPick:
 @dataclass(frozen=True)
 class GameEndPendingStart:
     interaction_id: int
+    extracted_human_names: tuple[str, ...] = ()
+    active_game_rosters: tuple[str, ...] = ()
     action: str = "game_end_pending_start"
 
 

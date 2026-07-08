@@ -224,6 +224,14 @@ class GameService:
                 return player
         return self._player_service.resolve_or_create_polytopia_name(name)
 
+    def active_game_roster_summaries(self) -> tuple[str, ...]:
+        summaries: list[str] = []
+        for game in self._game_repo.list_active():
+            names = self._participant_repo.get_participant_names(game.id)
+            human_names = [name for name in names if not is_bot_name(name)]
+            summaries.append(f"{game.name}: {', '.join(human_names)}")
+        return tuple(summaries)
+
     def _log_game_end_match(
         self,
         *,

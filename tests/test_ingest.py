@@ -11,18 +11,22 @@ import pytest
 from PIL import Image
 
 from scoretopia.domain.actions import (
+    ExtractionNeedsConfirmation,
     GameEndNeedsConfirmation,
     GameEndNeedsPick,
     GameEndPendingStart,
     GameStarted,
+    StagedIngestNotAuthorized,
     UnrecognizedScreenshot,
     WinRatioNeedsConfirmation,
 )
 from scoretopia.domain.games import GameService
 from scoretopia.domain.ingest import IngestService
 from scoretopia.domain.players import PlayerService
+from scoretopia.domain.results import RejectResult
 from scoretopia.domain.win_ratios import WinRatioService
 from scoretopia.screenshot.models import (
+    ExtractionResult,
     FriendProfileExtraction,
     GameBasicsExtraction,
     GameBasicsPlayer,
@@ -185,6 +189,60 @@ def _create_active_game_with_players(
     return game.id
 
 
+def _stage_screenshot(
+    ingest_service: IngestService,
+    image_path: Path,
+    *,
+    uploader_discord_id: str,
+) -> ExtractionNeedsConfirmation | UnrecognizedScreenshot:
+    stored_path = ingest_service.prepare_stored_path(image_path)
+    return ingest_service.stage_screenshot(
+        stored_path,
+        uploader_discord_id=uploader_discord_id,
+    )
+
+
+def _commit_staged(
+    ingest_service: IngestService,
+    staged: ExtractionNeedsConfirmation,
+    *,
+    confirmer_discord_id: str,
+):
+    return ingest_service.commit_staged(
+        staged.interaction_id,
+        confirmer_discord_id=confirmer_discord_id,
+    )
+
+
+def _ingest_via_stage_commit(
+    ingest_service: IngestService,
+    image_path: Path,
+    *,
+    uploader_discord_id: str,
+    extraction: ExtractionResult | None = None,
+    side_effect: BaseException | None = None,
+):
+    patch_kwargs: dict[str, object] = {}
+    if side_effect is not None:
+        patch_kwargs["side_effect"] = side_effect
+    elif extraction is not None:
+        patch_kwargs["return_value"] = extraction
+
+    with patch("scoretopia.domain.ingest.extract_screenshot", **patch_kwargs):
+        staged = _stage_screenshot(
+            ingest_service,
+            image_path,
+            uploader_discord_id=uploader_discord_id,
+        )
+    if not isinstance(staged, ExtractionNeedsConfirmation):
+        return staged
+    return _commit_staged(
+        ingest_service,
+        staged,
+        confirmer_discord_id=uploader_discord_id,
+    )
+
+
 # --- Unit tests (mocked extraction) ---
 
 
@@ -195,11 +253,12 @@ def test_ingest_unrecognized_screenshot_returns_helpful_message(
     image_path = tmp_path / "not-polytopia.png"
     Image.new("RGB", (100, 100), color=(255, 0, 0)).save(image_path)
 
-    with patch(
-        "scoretopia.domain.ingest.extract_screenshot",
+    result = _ingest_via_stage_commit(
+        ingest_service,
+        image_path,
+        uploader_discord_id="uploader-1",
         side_effect=ValueError("Unrecognized screenshot type"),
-    ):
-        result = ingest_service.ingest(image_path, uploader_discord_id="uploader-1")
+    )
 
     assert isinstance(result, UnrecognizedScreenshot)
     assert result.message
@@ -226,11 +285,12 @@ def test_ingest_game_end_one_match_returns_needs_confirmation(
     Image.new("RGB", (10, 10)).save(image_path)
     extraction = _game_end_extraction(*player_names)
 
-    with patch(
-        "scoretopia.domain.ingest.extract_screenshot",
-        return_value=extraction,
-    ):
-        result = ingest_service.ingest(image_path, uploader_discord_id="uploader-2")
+    result = _ingest_via_stage_commit(
+        ingest_service,
+        image_path,
+        uploader_discord_id="uploader-2",
+        extraction=extraction,
+    )
 
     assert isinstance(result, GameEndNeedsConfirmation)
     assert result.game_id == game_id
@@ -254,11 +314,12 @@ def test_ingest_game_end_zero_matches_returns_pending_start(
     Image.new("RGB", (10, 10)).save(image_path)
     extraction = _game_end_extraction("Alice", "Bob")
 
-    with patch(
-        "scoretopia.domain.ingest.extract_screenshot",
-        return_value=extraction,
-    ):
-        result = ingest_service.ingest(image_path, uploader_discord_id="uploader-3")
+    result = _ingest_via_stage_commit(
+        ingest_service,
+        image_path,
+        uploader_discord_id="uploader-3",
+        extraction=extraction,
+    )
 
     assert isinstance(result, GameEndPendingStart)
     assert result.interaction_id > 0
@@ -291,11 +352,12 @@ def test_ingest_game_end_multiple_matches_returns_needs_pick(
     Image.new("RGB", (10, 10)).save(image_path)
     extraction = _game_end_extraction(*player_names)
 
-    with patch(
-        "scoretopia.domain.ingest.extract_screenshot",
-        return_value=extraction,
-    ):
-        result = ingest_service.ingest(image_path, uploader_discord_id="uploader-4")
+    result = _ingest_via_stage_commit(
+        ingest_service,
+        image_path,
+        uploader_discord_id="uploader-4",
+        extraction=extraction,
+    )
 
     assert isinstance(result, GameEndNeedsPick)
     assert set(result.game_ids) == {game_id_a, game_id_b}
@@ -327,11 +389,12 @@ def test_ingest_friend_profile_returns_win_ratio_needs_confirmation(
         ),
     )
 
-    with patch(
-        "scoretopia.domain.ingest.extract_screenshot",
-        return_value=extraction,
-    ):
-        result = ingest_service.ingest(image_path, uploader_discord_id="uploader-5")
+    result = _ingest_via_stage_commit(
+        ingest_service,
+        image_path,
+        uploader_discord_id="uploader-5",
+        extraction=extraction,
+    )
 
     assert isinstance(result, WinRatioNeedsConfirmation)
     assert result.other_player_id == friend.id
@@ -356,11 +419,12 @@ def test_ingest_succeeds_when_image_already_in_inbox(
         ),
     )
 
-    with patch(
-        "scoretopia.domain.ingest.extract_screenshot",
-        return_value=extraction,
-    ):
-        result = ingest_service.ingest(source, uploader_discord_id="uploader-6b")
+    result = _ingest_via_stage_commit(
+        ingest_service,
+        source,
+        uploader_discord_id="uploader-6b",
+        extraction=extraction,
+    )
 
     assert isinstance(result, GameStarted)
     stored = list(inbox_path.iterdir())
@@ -383,11 +447,12 @@ def test_ingest_copies_screenshot_into_inbox(
         ),
     )
 
-    with patch(
-        "scoretopia.domain.ingest.extract_screenshot",
-        return_value=extraction,
-    ):
-        ingest_service.ingest(source, uploader_discord_id="uploader-6")
+    _ingest_via_stage_commit(
+        ingest_service,
+        source,
+        uploader_discord_id="uploader-6",
+        extraction=extraction,
+    )
 
     stored = list(inbox_path.iterdir())
     assert len(stored) == 1
@@ -411,11 +476,12 @@ def test_ingest_game_basics_splits_human_and_bot_players_in_report(
         ),
     )
 
-    with patch(
-        "scoretopia.domain.ingest.extract_screenshot",
-        return_value=extraction,
-    ):
-        result = ingest_service.ingest(source, uploader_discord_id="uploader-bots")
+    result = _ingest_via_stage_commit(
+        ingest_service,
+        source,
+        uploader_discord_id="uploader-bots",
+        extraction=extraction,
+    )
 
     assert isinstance(result, GameStarted)
     assert result.report.human_player_names == ("Alice", "Bob")
@@ -425,6 +491,24 @@ def test_ingest_game_basics_splits_human_and_bot_players_in_report(
 # --- Integration tests (real OCR on local samples) ---
 
 
+def _integration_stage_commit(
+    ingest_service: IngestService,
+    image_path: Path,
+    *,
+    uploader_discord_id: str,
+):
+    stored_path = ingest_service.prepare_stored_path(image_path)
+    staged = ingest_service.stage_screenshot(
+        stored_path,
+        uploader_discord_id=uploader_discord_id,
+    )
+    assert isinstance(staged, ExtractionNeedsConfirmation)
+    return ingest_service.commit_staged(
+        staged.interaction_id,
+        confirmer_discord_id=uploader_discord_id,
+    )
+
+
 @pytest.mark.skipif(
     not LOBBY_SAMPLE.is_file(),
     reason="Local lobby sample screenshot not present",
@@ -432,7 +516,8 @@ def test_ingest_game_basics_splits_human_and_bot_players_in_report(
 def test_ingest_lobby_sample_returns_game_started_not_unrecognized(
     ingest_service: IngestService,
 ) -> None:
-    result = ingest_service.ingest(
+    result = _integration_stage_commit(
+        ingest_service,
         LOBBY_SAMPLE,
         uploader_discord_id="integration-lobby-uploader",
     )
@@ -450,7 +535,8 @@ def test_ingest_game_basics_sample_creates_active_game_and_returns_game_started(
     ingest_service: IngestService,
     game_repo: GameRepo,
 ) -> None:
-    result = ingest_service.ingest(
+    result = _integration_stage_commit(
+        ingest_service,
         GAME_BASICS_SAMPLE,
         uploader_discord_id="integration-uploader",
     )
@@ -476,13 +562,15 @@ def test_ingest_game_end_sample_with_matching_active_game_returns_needs_confirma
     player_repo: PlayerRepo,
     participant_repo: GameParticipantRepo,
 ) -> None:
-    basics = ingest_service.ingest(
+    basics = _integration_stage_commit(
+        ingest_service,
         GAME_BASICS_SAMPLE,
         uploader_discord_id="integration-uploader-2",
     )
     assert isinstance(basics, GameStarted)
 
-    result = ingest_service.ingest(
+    result = _integration_stage_commit(
+        ingest_service,
         GAME_END_SAMPLE,
         uploader_discord_id="integration-uploader-2",
     )
@@ -501,7 +589,8 @@ def test_ingest_game_end_sample_without_active_game_returns_pending_start(
 ) -> None:
     assert game_repo.list_active() == []
 
-    result = ingest_service.ingest(
+    result = _integration_stage_commit(
+        ingest_service,
         GAME_END_SAMPLE,
         uploader_discord_id="integration-uploader-3",
     )
@@ -524,7 +613,8 @@ def test_ingest_friend_profile_sample_returns_win_ratio_needs_confirmation(
     )
     player_repo.create(polytopia_name="Lord Union 409")
 
-    result = ingest_service.ingest(
+    result = _integration_stage_commit(
+        ingest_service,
         FRIEND_PROFILE_SAMPLE,
         uploader_discord_id="integration-uploader-4",
     )
@@ -563,9 +653,16 @@ def test_ingest_game_basics_logs_screenshot_summary_and_participants(
             "scoretopia.domain.ingest.extract_screenshot",
             return_value=extraction,
         ):
-            result = ingest_service.ingest(
+            staged = _stage_screenshot(
+                ingest_service,
                 source,
                 uploader_discord_id="uploader-log-1",
+            )
+            assert isinstance(staged, ExtractionNeedsConfirmation)
+            result = _commit_staged(
+                ingest_service,
+                staged,
+                confirmer_discord_id="uploader-log-1",
             )
 
     assert isinstance(result, GameStarted)
@@ -603,12 +700,20 @@ def test_ingest_game_end_no_match_logs_active_games_and_extracted_names(
             "scoretopia.domain.ingest.extract_screenshot",
             return_value=extraction,
         ):
-            result = ingest_service.ingest(
+            staged = _stage_screenshot(
+                ingest_service,
                 image_path,
                 uploader_discord_id="uploader-log-2",
             )
+            assert isinstance(staged, ExtractionNeedsConfirmation)
+            result = _commit_staged(
+                ingest_service,
+                staged,
+                confirmer_discord_id="uploader-log-2",
+            )
 
     assert isinstance(result, GameEndPendingStart)
+    assert result.extracted_human_names == ("Alice", "Bob")
     info_text = _ingest_log_text(caplog)
 
     assert "0" in info_text  # active game count
@@ -632,14 +737,12 @@ def test_ingest_unrecognized_screenshot_logs_reason_at_info(
     Image.new("RGB", (100, 100), color=(255, 0, 0)).save(image_path)
 
     with caplog.at_level(logging.INFO, logger=INGEST_LOGGER):
-        with patch(
-            "scoretopia.domain.ingest.extract_screenshot",
+        result = _ingest_via_stage_commit(
+            ingest_service,
+            image_path,
+            uploader_discord_id="uploader-log-3",
             side_effect=ValueError("Unrecognized screenshot type"),
-        ):
-            result = ingest_service.ingest(
-                image_path,
-                uploader_discord_id="uploader-log-3",
-            )
+        )
 
     assert isinstance(result, UnrecognizedScreenshot)
     info_text = _ingest_log_text(caplog)
@@ -647,3 +750,258 @@ def test_ingest_unrecognized_screenshot_logs_reason_at_info(
     assert "uploader-log-3" in info_text
     assert "not-polytopia.png" in info_text
     assert "unrecognized" in info_text.lower() or "recognize" in info_text.lower()
+
+
+# --- Staged ingest (Task 016) ---
+
+
+def test_stage_game_basics_creates_pending_without_active_game(
+    ingest_service: IngestService,
+    game_repo: GameRepo,
+    pending_repo: PendingInteractionRepo,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "staged_start.png"
+    Image.new("RGB", (10, 10), color=(128, 128, 0)).save(source)
+    extraction = GameBasicsExtraction(
+        game_name="Staged Game",
+        players=(
+            GameBasicsPlayer(name="Alice", is_you=True),
+            GameBasicsPlayer(name="Bob"),
+        ),
+    )
+
+    with patch(
+        "scoretopia.domain.ingest.extract_screenshot",
+        return_value=extraction,
+    ):
+        result = _stage_screenshot(
+            ingest_service,
+            source,
+            uploader_discord_id="stager-1",
+        )
+
+    assert isinstance(result, ExtractionNeedsConfirmation)
+    assert result.interaction_id > 0
+    assert result.preview.screenshot_type == "game_basics"
+    assert game_repo.list_active() == []
+
+    pending = pending_repo.get_by_id(result.interaction_id)
+    assert pending is not None
+    assert pending.kind == "confirm_extraction"
+    assert pending.discord_user_id == "stager-1"
+    assert pending.status == "open"
+    assert pending.payload["screenshot_type"] == "game_basics"
+    assert pending.payload["uploader_discord_id"] == "stager-1"
+    assert "screenshot_path" in pending.payload
+
+
+def test_commit_staged_game_basics_starts_active_game(
+    ingest_service: IngestService,
+    game_repo: GameRepo,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "commit_start.png"
+    Image.new("RGB", (10, 10), color=(0, 128, 128)).save(source)
+    extraction = GameBasicsExtraction(
+        game_name="Committed Game",
+        players=(
+            GameBasicsPlayer(name="Alice", is_you=True),
+            GameBasicsPlayer(name="Bob"),
+        ),
+    )
+
+    with patch(
+        "scoretopia.domain.ingest.extract_screenshot",
+        return_value=extraction,
+    ):
+        staged = _stage_screenshot(
+            ingest_service,
+            source,
+            uploader_discord_id="committer-1",
+        )
+    assert isinstance(staged, ExtractionNeedsConfirmation)
+
+    result = _commit_staged(
+        ingest_service,
+        staged,
+        confirmer_discord_id="committer-1",
+    )
+
+    assert isinstance(result, GameStarted)
+    assert result.game.status == "active"
+    assert result.game.name == "Committed Game"
+    active = game_repo.list_active()
+    assert len(active) == 1
+    assert active[0].id == result.game.id
+
+
+def test_reject_staged_resolves_pending_without_active_game(
+    ingest_service: IngestService,
+    game_repo: GameRepo,
+    pending_repo: PendingInteractionRepo,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "reject_start.png"
+    Image.new("RGB", (10, 10), color=(128, 0, 128)).save(source)
+    extraction = GameBasicsExtraction(
+        game_name="Rejected Game",
+        players=(
+            GameBasicsPlayer(name="Alice"),
+            GameBasicsPlayer(name="Bob"),
+        ),
+    )
+
+    with patch(
+        "scoretopia.domain.ingest.extract_screenshot",
+        return_value=extraction,
+    ):
+        staged = _stage_screenshot(
+            ingest_service,
+            source,
+            uploader_discord_id="rejecter-1",
+        )
+    assert isinstance(staged, ExtractionNeedsConfirmation)
+
+    reject_result = ingest_service.reject_staged(
+        staged.interaction_id,
+        confirmer_discord_id="rejecter-1",
+    )
+    assert isinstance(reject_result, RejectResult)
+    assert reject_result.interaction_id == staged.interaction_id
+
+    assert game_repo.list_active() == []
+    resolved = pending_repo.get_by_id(staged.interaction_id)
+    assert resolved is not None
+    assert resolved.status == "resolved"
+
+
+def test_commit_staged_game_end_no_match_includes_roster_diagnostics(
+    ingest_service: IngestService,
+    game_service: GameService,
+    game_repo: GameRepo,
+    pending_repo: PendingInteractionRepo,
+    tmp_path: Path,
+) -> None:
+    _create_active_game_with_players(
+        game_service,
+        game_name="Other Game",
+        player_names=("Charlie", "Dave"),
+    )
+    assert len(game_repo.list_active()) == 1
+
+    image_path = tmp_path / "staged_orphan_end.png"
+    Image.new("RGB", (10, 10)).save(image_path)
+    extraction = _game_end_extraction("Alice", "Bob")
+
+    with patch(
+        "scoretopia.domain.ingest.extract_screenshot",
+        return_value=extraction,
+    ):
+        staged = _stage_screenshot(
+            ingest_service,
+            image_path,
+            uploader_discord_id="end-stager-1",
+        )
+    assert isinstance(staged, ExtractionNeedsConfirmation)
+    assert len(game_repo.list_active()) == 1
+
+    result = _commit_staged(
+        ingest_service,
+        staged,
+        confirmer_discord_id="end-stager-1",
+    )
+
+    assert isinstance(result, GameEndPendingStart)
+    assert result.extracted_human_names == ("Alice", "Bob")
+    assert len(result.active_game_rosters) == 1
+    assert "Other Game" in result.active_game_rosters[0]
+    assert "Charlie" in result.active_game_rosters[0]
+    assert "Dave" in result.active_game_rosters[0]
+
+    pending = pending_repo.get_by_id(result.interaction_id)
+    assert pending is not None
+    assert pending.kind == "game_end_pending_start"
+
+
+def test_commit_staged_by_other_user_returns_not_authorized(
+    ingest_service: IngestService,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "unauthorized_commit.png"
+    Image.new("RGB", (10, 10)).save(source)
+    extraction = GameBasicsExtraction(
+        game_name="Protected Game",
+        players=(GameBasicsPlayer(name="Alice"), GameBasicsPlayer(name="Bob")),
+    )
+
+    with patch(
+        "scoretopia.domain.ingest.extract_screenshot",
+        return_value=extraction,
+    ):
+        staged = _stage_screenshot(
+            ingest_service,
+            source,
+            uploader_discord_id="owner-1",
+        )
+    assert isinstance(staged, ExtractionNeedsConfirmation)
+
+    result = _commit_staged(
+        ingest_service,
+        staged,
+        confirmer_discord_id="intruder-1",
+    )
+
+    assert isinstance(result, StagedIngestNotAuthorized)
+
+
+def test_reject_staged_by_other_user_returns_not_authorized(
+    ingest_service: IngestService,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "unauthorized_reject.png"
+    Image.new("RGB", (10, 10)).save(source)
+    extraction = GameBasicsExtraction(
+        game_name="Protected Game 2",
+        players=(GameBasicsPlayer(name="Alice"), GameBasicsPlayer(name="Bob")),
+    )
+
+    with patch(
+        "scoretopia.domain.ingest.extract_screenshot",
+        return_value=extraction,
+    ):
+        staged = _stage_screenshot(
+            ingest_service,
+            source,
+            uploader_discord_id="owner-2",
+        )
+    assert isinstance(staged, ExtractionNeedsConfirmation)
+
+    result = ingest_service.reject_staged(
+        staged.interaction_id,
+        confirmer_discord_id="intruder-2",
+    )
+
+    assert isinstance(result, StagedIngestNotAuthorized)
+
+
+def test_stage_unrecognized_screenshot_creates_no_pending_row(
+    ingest_service: IngestService,
+    pending_repo: PendingInteractionRepo,
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "bad_stage.png"
+    Image.new("RGB", (10, 10)).save(image_path)
+
+    with patch(
+        "scoretopia.domain.ingest.extract_screenshot",
+        side_effect=ValueError("Unrecognized screenshot type"),
+    ):
+        stored_path = ingest_service.prepare_stored_path(image_path)
+        result = ingest_service.stage_screenshot(
+            stored_path,
+            uploader_discord_id="stager-bad",
+        )
+
+    assert isinstance(result, UnrecognizedScreenshot)
+    assert pending_repo.list_open_by_kind("confirm_extraction") == []

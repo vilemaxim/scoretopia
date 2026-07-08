@@ -8,19 +8,22 @@ from pathlib import Path
 
 from scoretopia.domain.actions import (
     ActiveGameReport,
+    ExtractionNeedsConfirmation,
+    ExtractionPreview,
     GameEndNeedsConfirmation,
     GameEndNeedsPick,
     GameEndPendingStart,
     GameStarted,
     IngestError,
     IngestResult,
+    StagedIngestNotAuthorized,
     UnrecognizedScreenshot,
     WinRatioNeedsConfirmation,
 )
 from scoretopia.domain.games import GameService
 from scoretopia.domain.matching import is_bot_name
 from scoretopia.domain.players import PlayerService
-from scoretopia.domain.results import MatchOutcome
+from scoretopia.domain.results import MatchOutcome, RejectResult
 from scoretopia.domain.win_ratios import WinRatioService
 from scoretopia.ingest import logger as ingest_logger
 from scoretopia.screenshot.extract import DEFAULT_MODEL_DIR, extract_screenshot
@@ -30,6 +33,9 @@ from scoretopia.screenshot.models import (
     GameBasicsExtraction,
     GameBasicsPlayer,
     GameEndExtraction,
+    GameEndHeader,
+    GameEndPlayer,
+    WinRatio,
 )
 from scoretopia.storage.repos import PendingInteractionRepo
 
@@ -37,6 +43,7 @@ _UNRECOGNIZED_MESSAGE = (
     "Could not recognize this screenshot. Please upload a Polytopia "
     "game basics, game end, or friend profile screenshot."
 )
+_CONFIRM_EXTRACTION_KIND = "confirm_extraction"
 
 
 def _human_and_bot_counts(
@@ -77,24 +84,128 @@ class IngestService:
         image_path: str | Path,
         *,
         uploader_discord_id: str,
-    ) -> IngestResult:
+    ) -> IngestResult | StagedIngestNotAuthorized:
         source = Path(image_path)
         stored_path = self.prepare_stored_path(source)
-        extracted = self.extract_stored_screenshot(stored_path)
-        if isinstance(extracted, (UnrecognizedScreenshot, IngestError)):
-            self.report_extraction_failure(
-                uploader_discord_id=uploader_discord_id,
-                filename=source.name,
-                stored_path=stored_path,
-                failure=extracted,
-            )
-            return extracted
-        return self.process_extracted_screenshot(
+        staged = self.stage_screenshot(
             stored_path,
-            extracted,
             uploader_discord_id=uploader_discord_id,
             filename=source.name,
         )
+        if isinstance(staged, (UnrecognizedScreenshot, IngestError)):
+            return staged
+        return self.commit_staged(
+            staged.interaction_id,
+            confirmer_discord_id=uploader_discord_id,
+        )
+
+    def stage_screenshot(
+        self,
+        stored_path: str | Path,
+        *,
+        uploader_discord_id: str,
+        filename: str | None = None,
+    ) -> ExtractionNeedsConfirmation | UnrecognizedScreenshot | IngestError:
+        path = Path(stored_path)
+        extracted = self.extract_stored_screenshot(path)
+        if isinstance(extracted, (UnrecognizedScreenshot, IngestError)):
+            self.report_extraction_failure(
+                uploader_discord_id=uploader_discord_id,
+                filename=filename or path.name,
+                stored_path=path,
+                failure=extracted,
+            )
+            return extracted
+
+        self._log_screenshot_processed(
+            uploader_discord_id=uploader_discord_id,
+            filename=filename or path.name,
+            stored_path=path,
+            screenshot_type=extracted.screenshot_type,
+        )
+        self._log_extraction(extracted)
+
+        payload: dict[str, object] = {
+            "screenshot_path": str(path),
+            "screenshot_type": extracted.screenshot_type,
+            "uploader_discord_id": uploader_discord_id,
+            "extraction": _serialize_extraction(extracted),
+        }
+        pending = self._create_pending(
+            kind=_CONFIRM_EXTRACTION_KIND,
+            discord_user_id=uploader_discord_id,
+            payload=payload,
+        )
+        self._log_pending_interaction(kind=pending.kind, interaction_id=pending.id)
+        preview = _extraction_preview(extracted)
+        return ExtractionNeedsConfirmation(
+            interaction_id=pending.id,
+            preview=preview,
+        )
+
+    def commit_staged(
+        self,
+        interaction_id: int,
+        *,
+        confirmer_discord_id: str,
+    ) -> IngestResult | StagedIngestNotAuthorized:
+        pending = self._require_open_staged_pending(
+            interaction_id,
+            confirmer_discord_id=confirmer_discord_id,
+        )
+        if isinstance(pending, StagedIngestNotAuthorized):
+            return pending
+
+        stored_path = Path(str(pending.payload["screenshot_path"]))
+        extraction = _deserialize_extraction(pending.payload)
+        identity_result = self._resolve_player_identities(extraction)
+        if isinstance(identity_result, StagedIngestNotAuthorized):
+            return identity_result
+        committed = self.complete_ingest(
+            stored_path,
+            extraction,
+            uploader_discord_id=confirmer_discord_id,
+        )
+        self._pending_repo.resolve(interaction_id)
+        return committed
+
+    def reject_staged(
+        self,
+        interaction_id: int,
+        *,
+        confirmer_discord_id: str,
+    ) -> RejectResult | StagedIngestNotAuthorized:
+        pending = self._require_open_staged_pending(
+            interaction_id,
+            confirmer_discord_id=confirmer_discord_id,
+        )
+        if isinstance(pending, StagedIngestNotAuthorized):
+            return pending
+
+        self._pending_repo.resolve(interaction_id)
+        return RejectResult(interaction_id=interaction_id)
+
+    def _require_open_staged_pending(
+        self,
+        interaction_id: int,
+        *,
+        confirmer_discord_id: str,
+    ):
+        pending = self._pending_repo.get_by_id(interaction_id)
+        if pending is None or pending.kind != _CONFIRM_EXTRACTION_KIND:
+            return StagedIngestNotAuthorized()
+        if pending.status != "open":
+            return StagedIngestNotAuthorized()
+        if pending.discord_user_id != confirmer_discord_id:
+            return StagedIngestNotAuthorized()
+        return pending
+
+    def _resolve_player_identities(
+        self,
+        extraction: ExtractionResult,
+    ) -> None | StagedIngestNotAuthorized:
+        del extraction
+        return None
 
     def prepare_stored_path(self, image_path: str | Path) -> Path:
         return self._store_in_inbox(Path(image_path))
@@ -237,13 +348,21 @@ class IngestService:
         }
 
         if match.outcome == MatchOutcome.NONE:
+            human_names = _human_player_names(
+                tuple(player.name for player in extraction.players)
+            )
+            active_rosters = self._game_service.active_game_roster_summaries()
             pending = self._create_pending(
                 kind="game_end_pending_start",
                 discord_user_id=uploader_discord_id,
                 payload=payload,
             )
             self._log_pending_interaction(kind=pending.kind, interaction_id=pending.id)
-            return GameEndPendingStart(interaction_id=pending.id)
+            return GameEndPendingStart(
+                interaction_id=pending.id,
+                extracted_human_names=human_names,
+                active_game_rosters=active_rosters,
+            )
 
         if match.outcome == MatchOutcome.ONE:
             game = match.games[0]
@@ -377,3 +496,126 @@ class IngestService:
             other_player_id=pending.other_player_id,
             interaction_id=pending.interaction_id,
         )
+
+
+def _extraction_preview(extraction: ExtractionResult) -> ExtractionPreview:
+    if isinstance(extraction, GameBasicsExtraction):
+        return ExtractionPreview(
+            screenshot_type=extraction.screenshot_type,
+            game_name=extraction.game_name,
+        )
+    return ExtractionPreview(screenshot_type=extraction.screenshot_type)
+
+
+def _serialize_extraction(extraction: ExtractionResult) -> dict[str, object]:
+    return asdict(extraction)
+
+
+def _deserialize_extraction(payload: dict[str, object]) -> ExtractionResult:
+    screenshot_type = payload.get("screenshot_type")
+    extraction_data = payload.get("extraction")
+    if not isinstance(extraction_data, dict):
+        msg = "Missing extraction payload"
+        raise ValueError(msg)
+    if screenshot_type == "game_basics":
+        return _game_basics_from_dict(extraction_data)
+    if screenshot_type == "game_end":
+        return _game_end_from_dict(extraction_data)
+    if screenshot_type == "friend_profile":
+        return _friend_profile_from_dict(extraction_data)
+    msg = f"Unknown screenshot type: {screenshot_type!r}"
+    raise ValueError(msg)
+
+
+def _optional_str(data: dict[str, object], key: str) -> str | None:
+    value = data.get(key)
+    return value if isinstance(value, str) else None
+
+
+def _optional_int(data: dict[str, object], key: str) -> int | None:
+    value = data.get(key)
+    return value if isinstance(value, int) else None
+
+
+def _game_basics_from_dict(data: dict[str, object]) -> GameBasicsExtraction:
+    players_data = data.get("players", [])
+    players: list[GameBasicsPlayer] = []
+    if isinstance(players_data, list):
+        for entry in players_data:
+            if isinstance(entry, dict):
+                players.append(
+                    GameBasicsPlayer(
+                        name=str(entry["name"]),
+                        is_you=bool(entry.get("is_you", False)),
+                        is_eliminated=bool(entry.get("is_eliminated", False)),
+                    )
+                )
+    return GameBasicsExtraction(
+        screenshot_type="game_basics",
+        game_name=_optional_str(data, "game_name"),
+        map_size=_optional_int(data, "map_size"),
+        terrain=_optional_str(data, "terrain"),
+        target_score=_optional_int(data, "target_score"),
+        game_type=_optional_str(data, "game_type"),
+        game_timer=_optional_str(data, "game_timer"),
+        win_condition_text=_optional_str(data, "win_condition_text"),
+        turn_status=_optional_str(data, "turn_status"),
+        players=tuple(players),
+    )
+
+
+def _game_end_from_dict(data: dict[str, object]) -> GameEndExtraction:
+    header_data = data.get("header", {})
+    header = GameEndHeader()
+    if isinstance(header_data, dict):
+        header = GameEndHeader(
+            score=_optional_int(header_data, "score"),
+            stars=_optional_int(header_data, "stars"),
+            stars_gained=_optional_int(header_data, "stars_gained"),
+            turn=_optional_int(header_data, "turn"),
+        )
+    players_data = data.get("players", [])
+    players: list[GameEndPlayer] = []
+    if isinstance(players_data, list):
+        for entry in players_data:
+            if isinstance(entry, dict):
+                players.append(
+                    GameEndPlayer(
+                        name=str(entry["name"]),
+                        tribe=_optional_str(entry, "tribe"),
+                        status=_optional_str(entry, "status"),
+                        score=_optional_int(entry, "score"),
+                        elo_change=_optional_int(entry, "elo_change"),
+                        elo=_optional_int(entry, "elo"),
+                        is_winner=bool(entry.get("is_winner", False)),
+                    )
+                )
+    winner = _optional_str(data, "winner")
+    return GameEndExtraction(
+        screenshot_type="game_end",
+        winner=winner,
+        header=header,
+        players=tuple(players),
+    )
+
+
+def _friend_profile_from_dict(data: dict[str, object]) -> FriendProfileExtraction:
+    ratio_data = data.get("win_ratio", {})
+    win_ratio = WinRatio()
+    if isinstance(ratio_data, dict):
+        win_ratio = WinRatio(
+            you_name=_optional_str(ratio_data, "you_name"),
+            you_wins=_optional_int(ratio_data, "you_wins"),
+            friend_name=_optional_str(ratio_data, "friend_name"),
+            friend_wins=_optional_int(ratio_data, "friend_wins"),
+        )
+    return FriendProfileExtraction(
+        screenshot_type="friend_profile",
+        friend_name=_optional_str(data, "friend_name"),
+        alias=_optional_str(data, "alias"),
+        num_friends=_optional_int(data, "num_friends"),
+        games_played=_optional_int(data, "games_played"),
+        game_version=_optional_int(data, "game_version"),
+        elo=_optional_int(data, "elo"),
+        win_ratio=win_ratio,
+    )
