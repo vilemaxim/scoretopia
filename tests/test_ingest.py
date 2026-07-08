@@ -21,7 +21,8 @@ from scoretopia.domain.actions import (
     WinRatioNeedsConfirmation,
 )
 from scoretopia.domain.games import GameService
-from scoretopia.domain.ingest import IngestService
+from scoretopia.domain.ingest import IngestService, deserialize_staged_extraction
+from scoretopia.domain.matching import is_bot_name
 from scoretopia.domain.players import PlayerService
 from scoretopia.domain.results import RejectResult
 from scoretopia.domain.win_ratios import WinRatioService
@@ -214,6 +215,53 @@ def _commit_staged(
     )
 
 
+def _link_game_basics_humans(
+    player_repo: PlayerRepo,
+    extraction: GameBasicsExtraction,
+    *,
+    uploader_discord_id: str,
+) -> None:
+    for player in extraction.players:
+        if is_bot_name(player.name):
+            continue
+        discord_id = (
+            uploader_discord_id
+            if player.is_you
+            else f"linked-{player.name.lower().replace(' ', '-')}"
+        )
+        existing = player_repo.get_by_polytopia_name(player.name)
+        if existing is None:
+            player_repo.create(
+                polytopia_name=player.name,
+                discord_user_id=discord_id,
+            )
+            continue
+        if existing.discord_user_id is None:
+            player_repo.update_discord_link(
+                existing.id,
+                discord_user_id=discord_id,
+                discord_display_name=None,
+            )
+
+
+def _link_staged_game_basics_humans(
+    player_repo: PlayerRepo,
+    pending_repo: PendingInteractionRepo,
+    staged: ExtractionNeedsConfirmation,
+    *,
+    uploader_discord_id: str,
+) -> None:
+    pending = pending_repo.get_by_id(staged.interaction_id)
+    assert pending is not None
+    extraction = deserialize_staged_extraction(pending.payload)
+    if isinstance(extraction, GameBasicsExtraction):
+        _link_game_basics_humans(
+            player_repo,
+            extraction,
+            uploader_discord_id=uploader_discord_id,
+        )
+
+
 def _ingest_via_stage_commit(
     ingest_service: IngestService,
     image_path: Path,
@@ -236,6 +284,12 @@ def _ingest_via_stage_commit(
         )
     if not isinstance(staged, ExtractionNeedsConfirmation):
         return staged
+    if extraction is not None and isinstance(extraction, GameBasicsExtraction):
+        _link_game_basics_humans(
+            ingest_service._player_service.player_repo,
+            extraction,
+            uploader_discord_id=uploader_discord_id,
+        )
     return _commit_staged(
         ingest_service,
         staged,
@@ -496,6 +550,8 @@ def _integration_stage_commit(
     image_path: Path,
     *,
     uploader_discord_id: str,
+    player_repo: PlayerRepo | None = None,
+    pending_repo: PendingInteractionRepo | None = None,
 ):
     stored_path = ingest_service.prepare_stored_path(image_path)
     staged = ingest_service.stage_screenshot(
@@ -503,6 +559,13 @@ def _integration_stage_commit(
         uploader_discord_id=uploader_discord_id,
     )
     assert isinstance(staged, ExtractionNeedsConfirmation)
+    if player_repo is not None and pending_repo is not None:
+        _link_staged_game_basics_humans(
+            player_repo,
+            pending_repo,
+            staged,
+            uploader_discord_id=uploader_discord_id,
+        )
     return ingest_service.commit_staged(
         staged.interaction_id,
         confirmer_discord_id=uploader_discord_id,
@@ -515,11 +578,15 @@ def _integration_stage_commit(
 )
 def test_ingest_lobby_sample_returns_game_started_not_unrecognized(
     ingest_service: IngestService,
+    player_repo: PlayerRepo,
+    pending_repo: PendingInteractionRepo,
 ) -> None:
     result = _integration_stage_commit(
         ingest_service,
         LOBBY_SAMPLE,
         uploader_discord_id="integration-lobby-uploader",
+        player_repo=player_repo,
+        pending_repo=pending_repo,
     )
 
     assert not isinstance(result, UnrecognizedScreenshot)
@@ -534,11 +601,15 @@ def test_ingest_lobby_sample_returns_game_started_not_unrecognized(
 def test_ingest_game_basics_sample_creates_active_game_and_returns_game_started(
     ingest_service: IngestService,
     game_repo: GameRepo,
+    player_repo: PlayerRepo,
+    pending_repo: PendingInteractionRepo,
 ) -> None:
     result = _integration_stage_commit(
         ingest_service,
         GAME_BASICS_SAMPLE,
         uploader_discord_id="integration-uploader",
+        player_repo=player_repo,
+        pending_repo=pending_repo,
     )
 
     assert isinstance(result, GameStarted)
@@ -561,11 +632,14 @@ def test_ingest_game_end_sample_with_matching_active_game_returns_needs_confirma
     game_service: GameService,
     player_repo: PlayerRepo,
     participant_repo: GameParticipantRepo,
+    pending_repo: PendingInteractionRepo,
 ) -> None:
     basics = _integration_stage_commit(
         ingest_service,
         GAME_BASICS_SAMPLE,
         uploader_discord_id="integration-uploader-2",
+        player_repo=player_repo,
+        pending_repo=pending_repo,
     )
     assert isinstance(basics, GameStarted)
 
@@ -633,6 +707,7 @@ def test_ingest_game_basics_logs_screenshot_summary_and_participants(
     inbox_path: Path,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
+    player_repo: PlayerRepo,
 ) -> None:
     source = tmp_path / "start_game.png"
     Image.new("RGB", (10, 10), color=(0, 128, 0)).save(source)
@@ -646,6 +721,11 @@ def test_ingest_game_basics_logs_screenshot_summary_and_participants(
             GameBasicsPlayer(name="Crazy Bot"),
             GameBasicsPlayer(name="Hard Bot"),
         ),
+    )
+    _link_game_basics_humans(
+        player_repo,
+        extraction,
+        uploader_discord_id="uploader-log-1",
     )
 
     with caplog.at_level(logging.DEBUG, logger=INGEST_LOGGER):
@@ -799,6 +879,7 @@ def test_stage_game_basics_creates_pending_without_active_game(
 def test_commit_staged_game_basics_starts_active_game(
     ingest_service: IngestService,
     game_repo: GameRepo,
+    player_repo: PlayerRepo,
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "commit_start.png"
@@ -809,6 +890,11 @@ def test_commit_staged_game_basics_starts_active_game(
             GameBasicsPlayer(name="Alice", is_you=True),
             GameBasicsPlayer(name="Bob"),
         ),
+    )
+    _link_game_basics_humans(
+        player_repo,
+        extraction,
+        uploader_discord_id="committer-1",
     )
 
     with patch(
@@ -1005,3 +1091,141 @@ def test_stage_unrecognized_screenshot_creates_no_pending_row(
 
     assert isinstance(result, UnrecognizedScreenshot)
     assert pending_repo.list_open_by_kind("confirm_extraction") == []
+
+
+# --- Player identity verification (Task 018) ---
+
+
+def _require_player_link_needs_confirmation():
+    try:
+        from scoretopia.domain.actions import PlayerLinkNeedsConfirmation
+
+        return PlayerLinkNeedsConfirmation
+    except ImportError as exc:
+        pytest.fail(f"PlayerLinkNeedsConfirmation not implemented: {exc}")
+
+
+def test_commit_staged_new_human_returns_player_link_needs_confirmation(
+    ingest_service: IngestService,
+    player_repo: PlayerRepo,
+    pending_repo: PendingInteractionRepo,
+    tmp_path: Path,
+) -> None:
+    PlayerLinkNeedsConfirmation = _require_player_link_needs_confirmation()
+    player_repo.create(
+        polytopia_name="LinkedAlice",
+        discord_user_id="uploader-identity",
+    )
+    source = tmp_path / "identity_new_human.png"
+    Image.new("RGB", (10, 10), color=(64, 64, 64)).save(source)
+    extraction = GameBasicsExtraction(
+        game_name="Identity Flow Game",
+        players=(
+            GameBasicsPlayer(name="LinkedAlice", is_you=True),
+            GameBasicsPlayer(name="NewBob"),
+        ),
+    )
+
+    with patch(
+        "scoretopia.domain.ingest.extract_screenshot",
+        return_value=extraction,
+    ):
+        staged = _stage_screenshot(
+            ingest_service,
+            source,
+            uploader_discord_id="uploader-identity",
+        )
+    assert isinstance(staged, ExtractionNeedsConfirmation)
+
+    result = _commit_staged(
+        ingest_service,
+        staged,
+        confirmer_discord_id="uploader-identity",
+    )
+
+    assert isinstance(result, PlayerLinkNeedsConfirmation)
+    assert result.parent_extraction_interaction_id == staged.interaction_id
+    assert len(result.unresolved) == 1
+    assert result.unresolved[0].polytopia_name == "NewBob"
+
+    pending = pending_repo.get_by_id(result.interaction_id)
+    assert pending is not None
+    assert pending.kind == "confirm_player_link"
+    assert pending.payload["parent_extraction_interaction_id"] == staged.interaction_id
+
+
+def test_identity_confirm_flow_starts_game_with_linked_player(
+    ingest_service: IngestService,
+    player_repo: PlayerRepo,
+    pending_repo: PendingInteractionRepo,
+    game_repo: GameRepo,
+    tmp_path: Path,
+) -> None:
+    try:
+        from scoretopia.domain.player_identity import PlayerIdentityService
+    except ImportError as exc:
+        pytest.fail(f"PlayerIdentityService not implemented: {exc}")
+
+    PlayerLinkNeedsConfirmation = _require_player_link_needs_confirmation()
+    player_repo.create(
+        polytopia_name="LinkedAlice",
+        discord_user_id="uploader-flow",
+    )
+    source = tmp_path / "identity_flow.png"
+    Image.new("RGB", (10, 10), color=(32, 32, 32)).save(source)
+    extraction = GameBasicsExtraction(
+        game_name="Linked After Confirm",
+        players=(
+            GameBasicsPlayer(name="LinkedAlice", is_you=True),
+            GameBasicsPlayer(name="FlowBob"),
+        ),
+    )
+    identity_service = PlayerIdentityService(player_repo, pending_repo)
+
+    with patch(
+        "scoretopia.domain.ingest.extract_screenshot",
+        return_value=extraction,
+    ):
+        staged = _stage_screenshot(
+            ingest_service,
+            source,
+            uploader_discord_id="uploader-flow",
+        )
+    assert isinstance(staged, ExtractionNeedsConfirmation)
+
+    paused = _commit_staged(
+        ingest_service,
+        staged,
+        confirmer_discord_id="uploader-flow",
+    )
+    assert isinstance(paused, PlayerLinkNeedsConfirmation)
+
+    identity_service.confirm_spelling(
+        paused.interaction_id,
+        slot_index=1,
+        confirmer_discord_id="uploader-flow",
+    )
+    identity_service.select_discord_user(
+        paused.interaction_id,
+        slot_index=1,
+        selected_discord_user_id="flow-bob-discord",
+        confirmer_discord_id="uploader-flow",
+    )
+    identity_service.confirm_remote_link(
+        paused.interaction_id,
+        slot_index=1,
+        confirmer_discord_id="flow-bob-discord",
+    )
+
+    result = _commit_staged(
+        ingest_service,
+        staged,
+        confirmer_discord_id="uploader-flow",
+    )
+
+    assert isinstance(result, GameStarted)
+    assert result.game.name == "Linked After Confirm"
+    linked = player_repo.get_by_polytopia_name("FlowBob")
+    assert linked is not None
+    assert linked.discord_user_id == "flow-bob-discord"
+    assert len(game_repo.list_active()) == 1

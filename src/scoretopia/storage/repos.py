@@ -436,6 +436,24 @@ class PendingInteractionRepo:
         ).fetchall()
         return [_pending_from_row(row) for row in rows]
 
+    def update_payload(
+        self,
+        interaction_id: int,
+        payload: dict[str, object],
+    ) -> PendingInteraction:
+        self._conn.execute(
+            """
+            UPDATE pending_interactions
+            SET payload = ?
+            WHERE id = ?
+            """,
+            (json.dumps(payload), interaction_id),
+        )
+        self._conn.commit()
+        interaction = self.get_by_id(interaction_id)
+        assert interaction is not None
+        return interaction
+
     def mark_disputed(self, interaction_id: int) -> PendingInteraction:
         self._conn.execute(
             """
