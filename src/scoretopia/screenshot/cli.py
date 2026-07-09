@@ -63,6 +63,14 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--expected-names-only",
+        action="store_true",
+        help=(
+            "With --expected, compare only players[].name lists "
+            "(ignore score, tribe, elo, and other fields)"
+        ),
+    )
+    parser.add_argument(
         "--model-dir",
         type=Path,
         default=Path(".easyocr_models"),
@@ -83,9 +91,14 @@ def main() -> None:
 
     if args.expected is not None:
         expected = _load_expected_json(args.expected)
-        match, message = extract_mod.compare_extraction_to_expected(
-            result, expected
-        )
+        if args.expected_names_only:
+            match, message = extract_mod.compare_extraction_player_names(
+                result, expected
+            )
+        else:
+            match, message = extract_mod.compare_extraction_to_expected(
+                result, expected
+            )
         print(message)
         if not match:
             raise SystemExit(1)

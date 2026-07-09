@@ -233,8 +233,18 @@ scoretopia-extract path/to/screenshot.png --expected path/to/expected.json
 
 Local golden pairs under `samples/screenshots/`: place a same-stem `.json` next
 to a `.png` / `.jpg` / `.jpeg`. Pytest discovers those pairs and compares live
-extraction (via `extract_screenshot`) to the golden. Images without a matching
-`.json` are skipped.
+OCR **player names only** (via `compare_extraction_player_names`) — scores,
+tribes, and other fields are not part of the golden gate. Images without a
+matching `.json` are skipped.
+
+Production code under `src/scoretopia/` must **not** hardcode human player
+names from your local sample JSON; a pytest guard enforces this so parsers stay
+generic. Use `--expected-names-only` with `scoretopia-extract` for the same
+name-only check from the CLI:
+
+```bash
+scoretopia-extract path/to/screenshot.png --expected path/to/expected.json --expected-names-only
+```
 
 ---
 

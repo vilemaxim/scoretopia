@@ -345,9 +345,154 @@ def test_cli_expected_exits_nonzero_when_expected_missing(
     )
 
 
+def test_compare_extraction_player_names_matches_on_names_only() -> None:
+    from scoretopia.screenshot.extract import (
+        compare_extraction_player_names,
+        serialize_extraction,
+    )
+
+    result = _sample_game_basics()
+    expected = serialize_extraction(result)
+    expected = {**expected, "game_name": "Wrong Title", "map_size": 999}
+
+    match, message = compare_extraction_player_names(result, expected)
+
+    assert match is True
+    assert "player" in message.lower() or "name" in message.lower()
+
+
+def test_compare_extraction_player_names_reports_name_mismatch() -> None:
+    from scoretopia.screenshot.extract import (
+        compare_extraction_player_names,
+        serialize_extraction,
+    )
+
+    result = _sample_game_basics()
+    expected = serialize_extraction(result)
+    expected["players"][0]["name"] = "NotAlice"
+
+    match, message = compare_extraction_player_names(result, expected)
+
+    assert match is False
+    assert "NotAlice" in message or "Alice" in message
+    assert "index" in message.lower() or "0" in message
+
+
+def test_compare_extraction_player_names_ignores_score_fields() -> None:
+    from scoretopia.screenshot.extract import (
+        compare_extraction_player_names,
+        serialize_extraction,
+    )
+
+    result = _sample_game_end()
+    expected = serialize_extraction(result)
+    expected["players"][0]["score"] = 0
+    expected["header"]["score"] = 0
+
+    match, _message = compare_extraction_player_names(result, expected)
+
+    assert match is True
+
+
+def test_cli_expected_names_only_exits_zero_when_names_match(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scoretopia.screenshot.cli import main
+    from scoretopia.screenshot.extract import serialize_extraction
+
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"fake-image")
+    result = _sample_game_basics()
+    expected = serialize_extraction(result)
+    expected = {**expected, "game_name": "Different Name"}
+    expected_path = tmp_path / "shot.json"
+    expected_path.write_text(json.dumps(expected), encoding="utf-8")
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "scoretopia-extract",
+            str(image),
+            "--expected",
+            str(expected_path),
+            "--expected-names-only",
+        ],
+    )
+    with patch(
+        "scoretopia.screenshot.extract.extract_screenshot",
+        return_value=result,
+    ):
+        main()
+
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "name" in combined.lower() or "match" in combined.lower()
+
+
+def test_cli_expected_names_only_exits_nonzero_on_name_mismatch(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scoretopia.screenshot.cli import main
+    from scoretopia.screenshot.extract import serialize_extraction
+
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"fake-image")
+    result = _sample_game_basics()
+    expected = serialize_extraction(result)
+    expected["players"][0]["name"] = "WrongPlayer"
+    expected_path = tmp_path / "shot.json"
+    expected_path.write_text(json.dumps(expected), encoding="utf-8")
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "scoretopia-extract",
+            str(image),
+            "--expected",
+            str(expected_path),
+            "--expected-names-only",
+        ],
+    )
+    with (
+        patch(
+            "scoretopia.screenshot.extract.extract_screenshot",
+            return_value=result,
+        ),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        main()
+
+    assert exc_info.value.code not in (0, None)
+
+
+def test_cli_accepts_expected_names_only_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scoretopia.screenshot.cli import main
+
+    monkeypatch.setattr("sys.argv", ["scoretopia-extract", "--help"])
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+    assert exc_info.value.code == 0
+    help_text = (capsys.readouterr().out + capsys.readouterr().err).lower()
+    assert "--expected-names-only" in help_text
+
+
 def test_readme_documents_extract_json_and_expected() -> None:
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
 
     assert "scoretopia-extract" in readme
     assert "--format" in readme or "format json" in readme
     assert "--expected" in readme
+
+
+def test_readme_documents_player_name_goldens_and_no_embed_policy() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8").lower()
+
+    assert "player" in readme and "name" in readme
+    assert "no-embed" in readme or "must not" in readme or "hardcode" in readme

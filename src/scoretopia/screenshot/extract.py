@@ -88,6 +88,64 @@ def _json_normalize(value: Any) -> Any:
     return json.loads(json.dumps(value))
 
 
+def compare_extraction_player_names(
+    result: ExtractionResult,
+    expected: dict[str, Any],
+) -> tuple[bool, str]:
+    """Compare only ``players[].name`` lists between extraction and expected JSON.
+
+    Ignores score, tribe, elo, header, and other non-name fields.
+    Uses ``player_names_match`` with the screenshot type from the extraction.
+    """
+    actual = serialize_extraction(result)
+    screenshot_type = actual.get("screenshot_type")
+    expected_type = expected.get("screenshot_type")
+    if screenshot_type != expected_type:
+        return (
+            False,
+            f"screenshot_type mismatch: actual={screenshot_type!r} "
+            f"expected={expected_type!r}",
+        )
+
+    actual_players = actual.get("players")
+    expected_players = expected.get("players")
+    if not isinstance(actual_players, list) or not isinstance(expected_players, list):
+        return False, "players field missing or not a list in actual or expected JSON"
+
+    if len(actual_players) != len(expected_players):
+        return (
+            False,
+            f"player count mismatch: actual={len(actual_players)} "
+            f"expected={len(expected_players)}",
+        )
+
+    mode = (
+        "exact normalized"
+        if screenshot_type == "game_basics"
+        else "fuzzy + prefix"
+    )
+    for index, (actual_player, expected_player) in enumerate(
+        zip(actual_players, expected_players, strict=True)
+    ):
+        if not isinstance(actual_player, dict) or not isinstance(expected_player, dict):
+            return False, f"player record at index {index} is not an object"
+        actual_name = str(actual_player.get("name") or "")
+        expected_name = str(expected_player.get("name") or "")
+        if not player_names_match(
+            actual_name,
+            expected_name,
+            screenshot_type=str(screenshot_type),
+        ):
+            return (
+                False,
+                f"player name mismatch at index {index}: "
+                f"actual={actual_name!r} expected={expected_name!r} "
+                f"(match mode: {mode})",
+            )
+
+    return True, "Player names match expected."
+
+
 def compare_extraction_to_expected(
     result: ExtractionResult,
     expected: dict[str, Any],
@@ -309,6 +367,7 @@ def write_extraction(
 
 
 __all__ = [
+    "compare_extraction_player_names",
     "compare_extraction_to_expected",
     "extract_screenshot",
     "format_extraction",
