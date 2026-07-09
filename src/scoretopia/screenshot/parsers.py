@@ -12,6 +12,12 @@ from scoretopia.screenshot.models import (
     GameEndPlayer,
     WinRatio,
 )
+from scoretopia.screenshot.name_matching import (
+    normalize_ocr_name as _normalize_ocr_name,
+)
+from scoretopia.screenshot.name_matching import (
+    player_names_match,
+)
 from scoretopia.screenshot.tribes import resolve_ocr_tribe
 
 
@@ -21,15 +27,6 @@ class OCRLine:
     confidence: float
     y: float
     x: float
-
-
-def _normalize_ocr_name(name: str) -> str:
-    """Fix common OCR misreads in Polytopia player names."""
-    cleaned = name.strip()
-    cleaned = cleaned.replace("O]", "01").replace("O1", "01")
-    cleaned = cleaned.rstrip("]")
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    return cleaned
 
 
 def _parse_int(value: str) -> int | None:
@@ -275,7 +272,7 @@ def _pick_elo_fields(texts: list[str]) -> tuple[int | None, int | None]:
 def _names_match(left: str | None, right: str | None) -> bool:
     if not left or not right:
         return False
-    return _normalize_ocr_name(left).lower() == _normalize_ocr_name(right).lower()
+    return player_names_match(left, right, screenshot_type="game_end")
 
 
 def parse_friend_profile(results: list[OCRLine]) -> FriendProfileExtraction:
@@ -321,6 +318,14 @@ def _match_label_int(joined: str, pattern: str) -> int | None:
     return None
 
 
+def _is_win_ratio_name_line(line: str) -> bool:
+    return (
+        not re.fullmatch(r"\d{1,3}", line)
+        and line.lower() not in {"you", "youl", "back", "new game", "elo"}
+        and len(line) > 2
+    )
+
+
 def _parse_win_ratio(lines: list[str], friend_name: str | None) -> WinRatio:
     you_name: str | None = None
     friend_wins: int | None = None
@@ -335,22 +340,26 @@ def _parse_win_ratio(lines: list[str], friend_name: str | None) -> WinRatio:
 
     segment = lines[win_ratio_idx + 1 : win_ratio_idx + 8]
     numbers = [int(line) for line in segment if re.fullmatch(r"\d{1,3}", line)]
-    names = [
-        _normalize_ocr_name(line)
-        for line in segment
-        if not re.fullmatch(r"\d{1,3}", line)
-        and line.lower() not in {"you", "youl", "back", "new game", "elo"}
-        and len(line) > 2
-    ]
 
     if len(numbers) >= 2:
         you_wins, friend_wins = numbers[0], numbers[1]
     elif len(numbers) == 1:
         friend_wins = numbers[0]
 
-    for name in names:
-        if "vilemaxim" in name.lower():
-            you_name = name
+    you_token_idx = next(
+        (
+            idx
+            for idx, line in enumerate(segment)
+            if line.lower() in {"you", "youl"}
+        ),
+        None,
+    )
+    if you_token_idx is not None:
+        for idx in range(you_token_idx - 1, -1, -1):
+            line = segment[idx]
+            if _is_win_ratio_name_line(line):
+                you_name = _normalize_ocr_name(line)
+                break
 
     return WinRatio(
         you_name=you_name,

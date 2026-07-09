@@ -12,6 +12,7 @@ import easyocr
 
 from scoretopia.screenshot.game_basics import parse_game_basics
 from scoretopia.screenshot.models import ExtractionResult
+from scoretopia.screenshot.name_matching import player_names_match
 from scoretopia.screenshot.parsers import (
     OCRLine,
     detect_screenshot_type,
@@ -95,11 +96,14 @@ def compare_extraction_to_expected(
 
     Returns (matched, message). Message is a pass note or a readable diff.
     Comparison is structural (parsed JSON), not raw string equality.
+    Player ``name`` fields (and game-end ``winner``) use ``player_names_match``.
     """
     actual = serialize_extraction(result)
     expected_norm = _json_normalize(expected)
     if actual == expected_norm:
         return True, "Extraction matches expected JSON."
+    if _extractions_match_with_fuzzy_names(actual, expected_norm):
+        return True, "Extraction matches expected JSON (player names fuzzy-matched)."
 
     actual_text = json.dumps(actual, indent=2, sort_keys=True) + "\n"
     expected_text = json.dumps(expected_norm, indent=2, sort_keys=True) + "\n"
@@ -115,6 +119,72 @@ def compare_extraction_to_expected(
         diff if diff else f"actual={actual!r}\nexpected={expected_norm!r}"
     )
     return False, message
+
+
+def _extractions_match_with_fuzzy_names(
+    actual: dict[str, Any],
+    expected: dict[str, Any],
+) -> bool:
+    screenshot_type = actual.get("screenshot_type")
+    if screenshot_type != expected.get("screenshot_type"):
+        return False
+    if set(actual) != set(expected):
+        return False
+
+    for key, expected_val in expected.items():
+        actual_val = actual[key]
+        if key == "players":
+            if not isinstance(actual_val, list) or not isinstance(expected_val, list):
+                return False
+            if len(actual_val) != len(expected_val):
+                return False
+            if not all(
+                _player_record_matches(
+                    actual_player,
+                    expected_player,
+                    screenshot_type=str(screenshot_type),
+                )
+                for actual_player, expected_player in zip(
+                    actual_val, expected_val, strict=True
+                )
+            ):
+                return False
+        elif key == "winner" and screenshot_type == "game_end":
+            if not _winner_names_match(actual_val, expected_val):
+                return False
+        elif actual_val != expected_val:
+            return False
+    return True
+
+
+def _winner_names_match(actual: Any, expected: Any) -> bool:
+    if actual is None and expected is None:
+        return True
+    if actual is None or expected is None:
+        return actual == expected
+    return player_names_match(str(actual), str(expected), screenshot_type="game_end")
+
+
+def _player_record_matches(
+    actual: dict[str, Any],
+    expected: dict[str, Any],
+    *,
+    screenshot_type: str,
+) -> bool:
+    if set(actual) != set(expected):
+        return False
+    for key, expected_val in expected.items():
+        actual_val = actual[key]
+        if key == "name":
+            if not player_names_match(
+                str(actual_val or ""),
+                str(expected_val or ""),
+                screenshot_type=screenshot_type,
+            ):
+                return False
+        elif actual_val != expected_val:
+            return False
+    return True
 
 
 def _format_game_end(result: GameEndExtraction) -> str:
@@ -236,3 +306,13 @@ def write_extraction(
     out = Path(output_path)
     out.write_text(text, encoding="utf-8")
     return result
+
+
+__all__ = [
+    "compare_extraction_to_expected",
+    "extract_screenshot",
+    "format_extraction",
+    "player_names_match",
+    "serialize_extraction",
+    "write_extraction",
+]
