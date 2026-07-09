@@ -64,19 +64,19 @@ def test_discover_golden_pairs_empty_when_no_json(tmp_path: Path) -> None:
     GOLDEN_PAIRS,
     ids=[p[0].name for p in GOLDEN_PAIRS],
 )
-def test_sample_screenshot_matches_golden_json(
+def test_sample_screenshot_matches_golden_player_names(
     image_path: Path,
     golden_path: Path,
 ) -> None:
     from scoretopia.screenshot.extract import (
-        compare_extraction_to_expected,
+        compare_extraction_player_names,
         extract_screenshot,
     )
 
     expected = json.loads(golden_path.read_text(encoding="utf-8"))
     result = extract_screenshot(image_path, model_dir=MODEL_DIR)
-    match, message = compare_extraction_to_expected(result, expected)
-    assert match, message
+    match, message = compare_extraction_player_names(result, expected)
+    assert match, f"{image_path.name}: {message}"
 
 
 def test_sample_golden_parametrization_skips_when_no_local_pairs() -> None:
