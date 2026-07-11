@@ -24,6 +24,23 @@ _PLAYER_ROW_TOLERANCE = 25.0
 _PLAYER_STRIP_Y_GAP = 70.0
 _X_ALIGN_TOLERANCE = 80.0
 _UI_LABELS = frozenset({"back", "open", "start game", "add", "start", "game"})
+_SKIP_GAME_NAME_TITLES = frozenset(
+    {
+        "ongoing",
+        "your turn",
+        "their turn",
+        "multiplayer",
+        "replays",
+        "back",
+        "open",
+        "resign",
+        "leave",
+        "share",
+    }
+)
+_SKIP_TERRAIN_LABELS = frozenset(
+    {"game", "timer", "more", "info", "back", "open", "share"}
+)
 _CRAZY_BOT_PATTERN = re.compile(r"crazy\s*bot", re.IGNORECASE)
 _YOU_PATTERN = re.compile(r"\byou\b", re.IGNORECASE)
 
@@ -101,35 +118,71 @@ def _find_line_by_pattern(
     return None
 
 
-def _extract_game_name(results: list[OCRLine]) -> str | None:
-    anchor = _find_line_by_pattern(results, r"resign|leave", flags=re.IGNORECASE)
-    if anchor is None:
-        return None
-    skip_titles = {"ongoing", "your turn", "multiplayer"}
-    candidates = [
-        item
-        for item in results
-        if abs(item.y - anchor.y) <= 60
-        and item.x < anchor.x - 100
-        and len(item.text.strip()) >= 3
-        and item.text.strip().lower() not in skip_titles
-    ]
+def _longest_title_candidate(candidates: list[OCRLine]) -> str | None:
     if not candidates:
         return None
     return max(candidates, key=lambda item: len(item.text.strip())).text.strip()
+
+
+def _extract_game_name(results: list[OCRLine]) -> str | None:
+    anchor = _find_line_by_pattern(results, r"resign|leave", flags=re.IGNORECASE)
+    if anchor is not None:
+        return _longest_title_candidate(
+            [
+                item
+                for item in results
+                if abs(item.y - anchor.y) <= 60
+                and item.x < anchor.x - 100
+                and len(item.text.strip()) >= 3
+                and item.text.strip().lower() not in _SKIP_GAME_NAME_TITLES
+            ]
+        )
+
+    lower_boundary = _modal_content_lower_y(results)
+    if lower_boundary is None:
+        return None
+
+    return _longest_title_candidate(
+        [
+            item
+            for item in results
+            if item.y < lower_boundary - 40
+            and len(item.text.strip()) >= 3
+            and item.text.strip().lower() not in _SKIP_GAME_NAME_TITLES
+        ]
+    )
+
+
+def _modal_content_lower_y(results: list[OCRLine]) -> float | None:
+    boundaries: list[float] = []
+    for item in results:
+        text = item.text.strip().lower()
+        if "points" in text and "win" in text:
+            boundaries.append(item.y)
+        if re.fullmatch(r"(glory|might)", text, re.IGNORECASE):
+            boundaries.append(item.y)
+        if re.fullmatch(r"\d{1,3}k", text, re.IGNORECASE):
+            boundaries.append(item.y)
+    if not boundaries:
+        return None
+    return min(boundaries)
 
 
 def _extract_circle_settings(
     results: list[OCRLine],
 ) -> tuple[int | None, str | None, int | None, str | None, str | None]:
     timer_label = _find_line_by_pattern(results, r"game timer", flags=re.IGNORECASE)
-    if timer_label is None:
+    settings_anchor = timer_label or _find_line_by_pattern(
+        results, r"^(glory|might)$", flags=re.IGNORECASE
+    )
+    if settings_anchor is None:
         return None, None, None, None, None
 
+    anchor_y = settings_anchor.y
     circle_band = [
         item
         for item in results
-        if (timer_label.y - 140) <= item.y <= (timer_label.y + 20)
+        if (anchor_y - 140) <= item.y <= (anchor_y + 20)
         and item.text.strip()
     ]
     circle_band.sort(key=lambda item: item.x)
@@ -148,24 +201,35 @@ def _extract_circle_settings(
                 map_size = value
             elif item.x < 550:
                 target_score = _normalize_score_token(text)
-            else:
+            elif timer_label is not None:
                 game_timer = text
+        elif (
+            timer_label is not None
+            and re.fullmatch(r"\d+", text)
+            and item.x >= 350
+        ):
+            game_timer = text
         elif text.lower() in {"glory", "might"}:
             game_type = text.capitalize()
         elif re.fullmatch(r"\d{1,3}k", text, re.IGNORECASE):
             target_score = _normalize_score_token(text)
         elif text.lower() in _TIMER_UNITS:
-            game_timer = f"{game_timer} {text}" if game_timer else text
-        elif re.fullmatch(r"[A-Za-z]+", text) and item.x < 350 and terrain is None:
+            if timer_label is not None:
+                game_timer = f"{game_timer} {text}" if game_timer else text
+        elif (
+            re.fullmatch(r"[A-Za-z]+", text)
+            and item.x < 350
+            and terrain is None
+            and text.lower() not in _SKIP_TERRAIN_LABELS
+        ):
             terrain = text
 
     label_band = [
         item
         for item in results
-        if (timer_label.y - 20) <= item.y <= (timer_label.y + 40)
+        if (anchor_y - 20) <= item.y <= (anchor_y + 40)
         and item.text.strip()
     ]
-    skip_terrain = {"game", "timer", "more", "info"}
     for item in label_band:
         text = item.text.strip()
         if text.lower() in {"glory", "might"} and game_type is None:
@@ -174,11 +238,11 @@ def _extract_circle_settings(
             re.fullmatch(r"[A-Za-z]+", text)
             and item.x < 350
             and terrain is None
-            and text.lower() not in skip_terrain
+            and text.lower() not in _SKIP_TERRAIN_LABELS
         ):
             terrain = text
 
-    if game_timer:
+    if game_timer and timer_label is not None:
         timer_parts = [game_timer]
         for item in circle_band:
             text = item.text.strip().lower()
@@ -199,6 +263,9 @@ def _extract_turn_status(results: list[OCRLine]) -> str | None:
         for item in _sorted_lines(results)
         if item.y > 1000 and item.text.strip()
     ]
+    for line in modal_lines:
+        if "game is over" in line.lower():
+            return None
     for idx, line in enumerate(modal_lines):
         compact = line.lower().replace(" ", "")
         if "yourturn" in compact or "itisyourturn" in compact:
@@ -208,6 +275,9 @@ def _extract_turn_status(results: list[OCRLine]) -> str | None:
             return " ".join(parts)
     for line in modal_lines:
         if re.search(r"your turn", line, re.IGNORECASE):
+            return line
+    for line in modal_lines:
+        if re.search(r"waiting for .+ to play", line, re.IGNORECASE):
             return line
     return None
 
