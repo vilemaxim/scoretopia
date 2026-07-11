@@ -53,6 +53,7 @@ GAME_BASICS_SAMPLE = SAMPLES_DIR / "game-basics.png"
 LOBBY_SAMPLE = SAMPLES_DIR / "game start error.png"
 GAME_END_SAMPLE = SAMPLES_DIR / "game_end.png"
 FRIEND_PROFILE_SAMPLE = SAMPLES_DIR / "players_compared.png"
+FIXIOOOIAN_SAMPLE = SAMPLES_DIR / "fixioooian_butte-start.png"
 
 INGEST_LOGGER = "scoretopia.ingest"
 
@@ -697,6 +698,56 @@ def test_ingest_friend_profile_sample_returns_win_ratio_needs_confirmation(
     friend = player_repo.get_by_polytopia_name("Lord Union 409")
     assert friend is not None
     assert result.other_player_id == friend.id
+
+
+@pytest.mark.skipif(
+    not FIXIOOOIAN_SAMPLE.is_file(),
+    reason="Local fixioooian_butte-start sample not present",
+)
+def test_ingest_replay_menu_card_stages_game_basics_not_unrecognized(
+    ingest_service: IngestService,
+    pending_repo: PendingInteractionRepo,
+) -> None:
+    """Task 026: multiplayer Replays menu modal stages as game_basics preview."""
+    stored_path = ingest_service.prepare_stored_path(FIXIOOOIAN_SAMPLE)
+    result = ingest_service.stage_screenshot(
+        stored_path,
+        uploader_discord_id="integration-replay-menu",
+    )
+
+    assert not isinstance(result, UnrecognizedScreenshot)
+    assert isinstance(result, ExtractionNeedsConfirmation)
+    assert result.preview.screenshot_type == "game_basics"
+    assert result.preview.game_name
+
+    pending = pending_repo.get_by_id(result.interaction_id)
+    assert pending is not None
+    assert pending.kind == "confirm_extraction"
+    assert pending.payload["screenshot_type"] == "game_basics"
+
+
+_FORBIDDEN_USER_FACING_PHRASES = (
+    "Ongoing games list is not supported",
+    "ongoing list is not supported",
+    "ongoing games list is unsupported",
+)
+
+
+def test_no_user_facing_ongoing_list_unsupported_message() -> None:
+    """Task 026: ingest/bot copy must not reject Ongoing menu cards."""
+    src_root = PROJECT_ROOT / "src" / "scoretopia"
+    hits: list[str] = []
+    for path in sorted(src_root.rglob("*.py")):
+        try:
+            source = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for phrase in _FORBIDDEN_USER_FACING_PHRASES:
+            if phrase.lower() in source.lower():
+                rel = path.relative_to(PROJECT_ROOT)
+                hits.append(f"{rel}: {phrase!r}")
+
+    assert not hits, "Forbidden Ongoing rejection copy found:\n" + "\n".join(hits)
 
 
 # --- Structured ingest logging (Task 015) ---

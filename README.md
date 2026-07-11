@@ -231,6 +231,16 @@ scoretopia-extract path/to/screenshot.png --format json -o path/to/expected.json
 scoretopia-extract path/to/screenshot.png --expected path/to/expected.json
 ```
 
+If you missed the in-game **Game Basics** screenshot, you can still register a
+game from the multiplayer menu modal:
+
+- **Multiplayer → Ongoing** — active game card (RESIGN, Game Timer, waiting text)
+- **Multiplayer → Replays** — finished replay card (Share instead of timer)
+
+These menu cards produce the same `game_basics` extraction as the in-game modal.
+On finished replay cards, `game_timer` and `turn_status` may be null; player names
+are still required for registration.
+
 Local golden pairs under `samples/screenshots/`: place a same-stem `.json` next
 to a `.png` / `.jpg` / `.jpeg`. Pytest discovers those pairs and compares live
 OCR **player names only** (via `compare_extraction_player_names`) — scores,

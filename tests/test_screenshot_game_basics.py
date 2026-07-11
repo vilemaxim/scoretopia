@@ -112,6 +112,17 @@ def test_todo_lists_might_and_bot_type_backlog() -> None:
     assert "bot type" in content.lower() or "Bot type" in content
 
 
+def test_todo_reflects_menu_modal_support_not_rejection() -> None:
+    """Task 026: backlog must not claim Ongoing menu cards are unsupported."""
+    content = TODO_PATH.read_text()
+    lowered = content.lower()
+
+    assert "ongoing-menu misclassification" not in lowered
+    assert "ongoing list is not supported" not in lowered
+    assert "adr 003" in lowered or "003-multiplayer-menu-modal" in lowered
+    assert "024" in content and "026" in content
+
+
 # --- Unit tests (no sample screenshot required) ---
 
 
