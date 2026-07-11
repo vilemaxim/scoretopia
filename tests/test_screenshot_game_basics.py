@@ -396,3 +396,110 @@ def test_lobby_sample_extracts_full_human_roster() -> None:
 
     crazy_bots = [player for player in result.players if player.name == "Crazy Bot"]
     assert len(crazy_bots) >= 6
+
+
+# --- Menu modal parsing (Task 025) ---
+
+
+def _finished_replay_menu_ocr_lines() -> list[OCRLine]:
+    """Finished replay card: Share icon, no RESIGN/Game Timer, game is over."""
+    return [
+        OCRLine(text="MULTIPLAYER", confidence=0.99, y=50.0, x=200.0),
+        OCRLine(text="Replays", confidence=0.99, y=80.0, x=200.0),
+        OCRLine(text="Epic Wasteland", confidence=0.99, y=120.0, x=200.0),
+        OCRLine(text="BACK", confidence=0.99, y=120.0, x=50.0),
+        OCRLine(text="OPEN", confidence=0.99, y=130.0, x=350.0),
+        OCRLine(text="400", confidence=0.99, y=200.0, x=100.0),
+        OCRLine(text="Continents", confidence=0.99, y=240.0, x=100.0),
+        OCRLine(text="15k", confidence=0.99, y=200.0, x=250.0),
+        OCRLine(text="Glory", confidence=0.99, y=240.0, x=250.0),
+        OCRLine(text="Share", confidence=0.99, y=240.0, x=400.0),
+        OCRLine(
+            text="First to reach 15,000 points win.",
+            confidence=0.99,
+            y=300.0,
+            x=200.0,
+        ),
+        OCRLine(
+            text="This game is over.",
+            confidence=0.99,
+            y=330.0,
+            x=200.0,
+        ),
+        OCRLine(text="Alice", confidence=0.99, y=1280.0, x=200.0),
+        OCRLine(text="Bob", confidence=0.99, y=1360.0, x=200.0),
+    ]
+
+
+def _ongoing_menu_ocr_lines() -> list[OCRLine]:
+    """Ongoing menu card: RESIGN + Game Timer + waiting-for-player status."""
+    return [
+        OCRLine(text="MULTIPLAYER", confidence=0.99, y=50.0, x=200.0),
+        OCRLine(text="Ongoing", confidence=0.99, y=80.0, x=200.0),
+        OCRLine(text="Epic Wasteland", confidence=0.99, y=120.0, x=200.0),
+        OCRLine(text="RESIGN", confidence=0.99, y=120.0, x=400.0),
+        OCRLine(text="BACK", confidence=0.99, y=120.0, x=50.0),
+        OCRLine(text="OPEN", confidence=0.99, y=130.0, x=350.0),
+        OCRLine(text="400", confidence=0.99, y=200.0, x=100.0),
+        OCRLine(text="Pangea", confidence=0.99, y=240.0, x=100.0),
+        OCRLine(text="15k", confidence=0.99, y=200.0, x=250.0),
+        OCRLine(text="Glory", confidence=0.99, y=240.0, x=250.0),
+        OCRLine(text="7", confidence=0.99, y=200.0, x=400.0),
+        OCRLine(text="days", confidence=0.99, y=200.0, x=430.0),
+        OCRLine(text="Game Timer", confidence=0.99, y=240.0, x=400.0),
+        OCRLine(
+            text="First to reach 15,000 points win.",
+            confidence=0.99,
+            y=300.0,
+            x=200.0,
+        ),
+        OCRLine(
+            text="Waiting for vilemaxim to Play",
+            confidence=0.99,
+            y=1100.0,
+            x=200.0,
+        ),
+        OCRLine(text="Alice", confidence=0.99, y=1280.0, x=200.0),
+        OCRLine(text="Bob", confidence=0.99, y=1360.0, x=200.0),
+    ]
+
+
+def test_parse_game_basics_finished_replay_menu_card(tmp_path: Path) -> None:
+    """Replay modal without RESIGN/timer still yields core settings and players."""
+    image_path = _save_blank_image(tmp_path, "finished_replay.png")
+
+    result = parse_game_basics(_finished_replay_menu_ocr_lines(), image_path)
+
+    assert result.game_name == "Epic Wasteland"
+    assert result.map_size == 400
+    assert result.terrain == "Continents"
+    assert result.target_score == 15_000
+    assert result.game_type == "Glory"
+    assert result.game_timer is None
+    assert result.turn_status is None
+    assert [player.name for player in result.players] == ["Alice", "Bob"]
+
+
+def test_parse_game_basics_ongoing_menu_card_matches_in_game_shape(
+    tmp_path: Path,
+) -> None:
+    """Ongoing menu modal parses like in-game basics (timer + waiting status)."""
+    image_path = _save_blank_image(tmp_path, "ongoing_menu.png")
+
+    result = parse_game_basics(_ongoing_menu_ocr_lines(), image_path)
+
+    assert result.game_name == "Epic Wasteland"
+    assert result.map_size == 400
+    assert result.terrain == "Pangea"
+    assert result.target_score == 15_000
+    assert result.game_type == "Glory"
+
+    timer = (result.game_timer or "").lower()
+    assert "7" in timer
+    assert "day" in timer
+
+    turn = (result.turn_status or "").lower()
+    assert "waiting" in turn
+    assert "play" in turn
+
+    assert [player.name for player in result.players] == ["Alice", "Bob"]
