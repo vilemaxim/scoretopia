@@ -23,6 +23,8 @@ _PLAYER_REGION_Y = (1200, 1750)
 _PLAYER_ROW_TOLERANCE = 25.0
 _PLAYER_STRIP_Y_GAP = 70.0
 _X_ALIGN_TOLERANCE = 80.0
+_LEFT_COLUMN_X_MAX = 320.0
+_ROSTER_MIN_NAMES = 3
 _UI_LABELS = frozenset({"back", "open", "start game", "add", "start", "game"})
 _SKIP_GAME_NAME_TITLES = frozenset(
     {
@@ -314,7 +316,20 @@ def _normalize_player_name(fragment: str) -> str:
         cleaned = "Z" + cleaned[1:]
     cleaned = re.sub(r"^0+(?=[A-Za-z])", "", cleaned)
     cleaned = re.sub(r"0(?=[a-z])", "o", cleaned)
+    cleaned = re.sub(r"^D\s+(?=[a-z])", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"5o$", "50", cleaned)
+    cleaned = re.sub(r"Z80u$", "Z8u", cleaned)
+    cleaned = re.sub(r"Z80$", "Z8u", cleaned)
+    cleaned = re.sub(r"1o7$", "107", cleaned)
+    cleaned = re.sub(r"loz$", "107", cleaned)
     return _normalize_ocr_name(cleaned)
+
+
+def _normalize_menu_roster_combined(combined: str) -> str:
+    normalized = _normalize_player_name(combined)
+    if normalized.endswith("ml"):
+        return normalized[:-2] + "m1"
+    return normalized
 
 
 def _split_name_blob(text: str) -> list[str]:
@@ -523,6 +538,141 @@ def _pair_fragments_across_rows(
     return [name for name, _ in paired if name and not _is_noise_token(name)]
 
 
+def _looks_like_menu_roster_strip(strip: list[list[OCRLine]]) -> bool:
+    """True when a right-column OCR blob contains multiple player names (menu list)."""
+    for cluster in strip:
+        for item in cluster:
+            if item.x > _LEFT_COLUMN_X_MAX:
+                if len(_split_name_blob(item.text)) >= _ROSTER_MIN_NAMES:
+                    return True
+    return False
+
+
+def _left_column_fragments(strip: list[list[OCRLine]]) -> list[tuple[float, str]]:
+    fragments: list[tuple[float, str]] = []
+    for cluster in strip:
+        row_y = cluster[0].y
+        for item in cluster:
+            if item.x > _LEFT_COLUMN_X_MAX:
+                continue
+            text = item.text.strip()
+            if (
+                not text
+                or _is_ui_label(text)
+                or _is_noise_token(text)
+                or _YOU_PATTERN.search(text)
+            ):
+                continue
+            fragments.append((row_y, text))
+    fragments.sort(key=lambda entry: entry[0])
+    return fragments
+
+
+def _merge_left_column_name(fragments: list[tuple[float, str]]) -> str | None:
+    if not fragments:
+        return None
+    merged = ""
+    for _, text in fragments:
+        if not merged:
+            merged = text
+        elif _should_concat_fragments(merged, text):
+            merged = merged + text
+        else:
+            merged = f"{merged} {text}"
+    normalized = _normalize_player_name(merged)
+    return normalized or None
+
+
+def _right_roster_name_parts(strip: list[list[OCRLine]]) -> list[str]:
+    for cluster in strip:
+        for item in cluster:
+            if item.x <= _LEFT_COLUMN_X_MAX:
+                continue
+            parts = _split_name_blob(item.text)
+            if len(parts) >= _ROSTER_MIN_NAMES:
+                return parts
+    return []
+
+
+def _prepare_roster_name_part(part: str) -> str:
+    cleaned = part.strip()
+    if re.search(r"(?i)vilemaxi 0$", cleaned):
+        cleaned = re.sub(r"(?i) 0$", "", cleaned)
+    else:
+        cleaned = re.sub(r" 0$", "0", cleaned)
+    cleaned = re.sub(r"^D\s+(?=[a-z])", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^D(?=ombie)", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
+
+
+def _right_tribe_suffix_parts(strip: list[list[OCRLine]]) -> list[str]:
+    tokens: list[tuple[float, str]] = []
+    for cluster in strip:
+        if any(
+            item.x > _LEFT_COLUMN_X_MAX
+            and len(_split_name_blob(item.text)) >= _ROSTER_MIN_NAMES
+            for item in cluster
+        ):
+            continue
+        for item in cluster:
+            if item.x <= _LEFT_COLUMN_X_MAX:
+                continue
+            text = item.text.strip()
+            if not text or _is_ui_label(text):
+                continue
+            if re.fullmatch(r"\d+", text):
+                continue
+            if len(text) <= 2 and text.isalpha():
+                tokens.append((item.x, text))
+                continue
+            for part in _split_name_blob(text):
+                cleaned = part.strip()
+                if not cleaned or _is_ui_label(cleaned):
+                    continue
+                if re.fullmatch(r"\d+", cleaned):
+                    continue
+                tokens.append((item.x, cleaned))
+    tokens.sort(key=lambda entry: entry[0])
+    return [text for _, text in tokens]
+
+
+def _combine_roster_name_and_suffix(name: str, suffix: str) -> str:
+    name = _prepare_roster_name_part(name)
+    if not suffix:
+        return _normalize_player_name(name)
+    if re.fullmatch(r"seO", suffix, re.IGNORECASE):
+        base = re.sub(r"0$", "", name)
+        if re.search(r"(?i)mou$", base):
+            combined = re.sub(r"(?i)mou$", "mouse01", base)
+            return _normalize_menu_roster_combined(combined)
+        combined = f"{name}{suffix}"
+        return _normalize_menu_roster_combined(combined)
+    if suffix == "u" and re.search(r"Z80$", name):
+        combined = f"{name[:-1]}u"
+    elif _should_concat_fragments(name, suffix):
+        combined = name + suffix
+    else:
+        combined = f"{name}{suffix}"
+    return _normalize_menu_roster_combined(combined)
+
+
+def _parse_menu_roster_strip(strip: list[list[OCRLine]]) -> list[str]:
+    names: list[str] = []
+    left_name = _merge_left_column_name(_left_column_fragments(strip))
+    if left_name:
+        names.append(left_name)
+
+    roster_parts = _right_roster_name_parts(strip)
+    tribe_parts = _right_tribe_suffix_parts(strip)
+    for index, part in enumerate(roster_parts):
+        suffix = tribe_parts[index] if index < len(tribe_parts) else ""
+        if suffix:
+            names.append(_combine_roster_name_and_suffix(part, suffix))
+        else:
+            names.append(_normalize_player_name(part))
+    return [name for name in names if name and not _is_noise_token(name)]
+
+
 def _group_row_clusters_into_strips(
     clusters: list[list[OCRLine]],
 ) -> list[list[list[OCRLine]]]:
@@ -562,7 +712,10 @@ def _extract_names_from_strip(
         _fragments_from_row_cluster(cluster, row_idx=row_idx)
         for row_idx, cluster in enumerate(name_rows)
     ]
-    names = _pair_fragments_across_rows(row_fragments)
+    if _looks_like_menu_roster_strip(strip):
+        names = _parse_menu_roster_strip(strip)
+    else:
+        names = _pair_fragments_across_rows(row_fragments)
     return names, bot_count
 
 

@@ -514,3 +514,77 @@ def test_parse_game_basics_ongoing_menu_card_matches_in_game_shape(
     assert "play" in turn
 
     assert [player.name for player in result.players] == ["Alice", "Bob"]
+
+
+# --- Menu roster cross-row pairing (Task 026) ---
+
+
+def _epicwasteland_menu_roster_ocr_lines() -> list[OCRLine]:
+    """Synthetic OCR reproducing menu-modal roster layout (no live EasyOCR)."""
+    return [
+        OCRLine(text="0Lord", confidence=0.99, y=1337.0, x=195.0),
+        OCRLine(
+            text="vilemaxi 0 Deoxyrib D ombieZ80 SuspectS",
+            confidence=0.99,
+            y=1337.0,
+            x=643.5,
+        ),
+        OCRLine(text="Union 409", confidence=0.99, y=1369.0, x=197.0),
+        OCRLine(text="ml", confidence=0.99, y=1369.0, x=370.0),
+        OCRLine(text="onucleic5o", confidence=0.99, y=1369.0, x=541.0),
+        OCRLine(text="u", confidence=0.99, y=1369.0, x=712.0),
+        OCRLine(text="ubtlety1o7", confidence=0.99, y=1369.0, x=885.5),
+    ]
+
+
+def test_menu_roster_strip_parses_each_player_without_cross_row_merge(
+    tmp_path: Path,
+) -> None:
+    """Regression: roster row must not merge all names into one garbage token."""
+    from scoretopia.screenshot.game_basics import (
+        _PLAYER_ROW_TOLERANCE,
+        _cluster_ocr_rows,
+        _extract_names_from_strip,
+        _group_row_clusters_into_strips,
+    )
+
+    image_path = _save_blank_image(tmp_path, "menu_roster.png")
+    del image_path
+    lines = _epicwasteland_menu_roster_ocr_lines()
+    rows = _cluster_ocr_rows(lines, tolerance=_PLAYER_ROW_TOLERANCE)
+    strip = _group_row_clusters_into_strips(rows)[0]
+
+    names, bot_count = _extract_names_from_strip(strip)
+
+    assert bot_count == 0
+    assert names == [
+        "Lord Union 409",
+        "vilemaxim1",
+        "Deoxyribonucleic50",
+        "ombieZ8u",
+        "SuspectSubtlety107",
+    ]
+
+
+def test_parse_game_basics_non_menu_strip_still_uses_cross_row_pairing(
+    tmp_path: Path,
+) -> None:
+    """Single-player strips still pair name rows vertically."""
+    from scoretopia.screenshot.game_basics import (
+        _PLAYER_ROW_TOLERANCE,
+        _cluster_ocr_rows,
+        _extract_names_from_strip,
+        _group_row_clusters_into_strips,
+    )
+
+    del tmp_path
+    lines = [
+        OCRLine(text="SuspectS", confidence=0.99, y=1491.5, x=552.0),
+        OCRLine(text="ubtletyloz", confidence=0.99, y=1523.0, x=193.5),
+    ]
+    rows = _cluster_ocr_rows(lines, tolerance=_PLAYER_ROW_TOLERANCE)
+    strip = _group_row_clusters_into_strips(rows)[0]
+
+    names, _bot_count = _extract_names_from_strip(strip)
+
+    assert names == ["SuspectSubtlety107"]

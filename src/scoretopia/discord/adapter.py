@@ -24,6 +24,8 @@ from scoretopia.discord.embeds import (
     build_extraction_preview_embed,
     build_game_completed_embed,
     build_game_started_embed,
+    build_player_remote_confirm_embed,
+    build_player_spelling_confirm_embed,
 )
 from scoretopia.discord.publisher import DiscordReportPublisher, report_to_embed
 from scoretopia.discord.views import (
@@ -31,9 +33,14 @@ from scoretopia.discord.views import (
     GameEndConfirmView,
     GameEndPickView,
     ParsedCustomId,
+    PlayerCorrectionPickView,
+    PlayerDiscordUserSelectView,
+    PlayerLinkRemoteConfirmView,
+    PlayerSpellingConfirmView,
     WinRatioConfirmView,
     can_confirm_extraction,
     can_confirm_game_end,
+    can_confirm_player_link,
     can_confirm_win_ratio,
     parse_custom_id,
     unauthorized_confirmation_message,
@@ -46,12 +53,17 @@ from scoretopia.domain.actions import (
     GameStarted,
     IngestError,
     IngestResult,
+    PlayerLinkNeedsConfirmation,
     StagedIngestNotAuthorized,
     UnrecognizedScreenshot,
     WinRatioNeedsConfirmation,
 )
 from scoretopia.domain.games import GameService
 from scoretopia.domain.ingest import IngestService, deserialize_staged_extraction
+from scoretopia.domain.player_identity import (
+    ConfirmPlayerLinkOutcome,
+    PlayerIdentityService,
+)
 from scoretopia.domain.players import PlayerService
 from scoretopia.domain.results import RegisterOutcome
 from scoretopia.domain.win_ratios import ConfirmOutcome, DisputeResult, WinRatioService
@@ -69,6 +81,11 @@ _FAILURE_REACTION = "❌"
 ScreenshotUploadResult = IngestResult | ExtractionNeedsConfirmation
 
 _REJECT_EXTRACTION_MESSAGE = "Discarded — upload again if needed."
+_UNREGISTERED_UPLOADER_MESSAGE = (
+    "Please run `/register` first to link your Discord account to a "
+    "Polytopia player name before uploading screenshots."
+)
+_PLAYER_LINK_KIND = "confirm_player_link"
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +152,8 @@ def plan_ingest_response(
         )
     if isinstance(result, WinRatioNeedsConfirmation):
         return ResponsePlan(channel="input", kind="win_ratio_confirm_view")
+    if isinstance(result, PlayerLinkNeedsConfirmation):
+        return ResponsePlan(channel="input", kind="player_link_needs_confirmation")
     if isinstance(result, (UnrecognizedScreenshot, IngestError)):
         return ResponsePlan(
             channel="input",
@@ -186,6 +205,9 @@ class DiscordBotAdapter(BotPort):
         self._game_repo = game_repo
         self._player_repo = player_repo or getattr(
             player_service, "_player_repo", None
+        )
+        self._player_identity_service: PlayerIdentityService = (
+            ingest_service._player_identity_service
         )
         intents = discord.Intents.default()
         intents.message_content = True
@@ -313,6 +335,17 @@ class DiscordBotAdapter(BotPort):
         attachment: discord.Attachment,
     ) -> None:
         await self._begin_screenshot_ack(message)
+        uploader_discord_id = str(message.author.id)
+        if (
+            self._player_repo is not None
+            and self._player_repo.get_by_discord_id(uploader_discord_id) is None
+        ):
+            await message.reply(_UNREGISTERED_UPLOADER_MESSAGE)
+            await self._finish_screenshot_ack(
+                message,
+                IngestError(message="Uploader is not registered"),
+            )
+            return
         result: ScreenshotUploadResult | None = None
         try:
             result = await self._ingest_screenshot_attachment(message, attachment)
@@ -508,6 +541,18 @@ class DiscordBotAdapter(BotPort):
             await self._handle_confirm_extraction(interaction, parsed)
         elif parsed.action == "reject_extraction":
             await self._handle_reject_extraction(interaction, parsed)
+        elif parsed.action == "confirm_player_spelling":
+            await self._handle_confirm_player_spelling(interaction, parsed)
+        elif parsed.action == "reject_player_spelling":
+            await self._handle_reject_player_spelling(interaction, parsed)
+        elif parsed.action == "pick_player_correction":
+            await self._handle_pick_player_correction(interaction, parsed)
+        elif parsed.action == "select_player_discord_user":
+            await self._handle_select_player_discord_user(interaction, parsed)
+        elif parsed.action == "confirm_player_link":
+            await self._handle_confirm_player_link(interaction, parsed)
+        elif parsed.action == "reject_player_link":
+            await self._handle_reject_player_link(interaction, parsed)
 
     async def _handle_confirm_game_end(
         self,
@@ -668,6 +713,9 @@ class DiscordBotAdapter(BotPort):
         if isinstance(result, StagedIngestNotAuthorized):
             await self._reply_unauthorized(interaction)
             return
+        if isinstance(result, PlayerLinkNeedsConfirmation):
+            await self._deliver_player_link_spelling_ui(interaction, result)
+            return
         await self._deliver_committed_ingest_result(interaction, result)
 
     async def _handle_reject_extraction(
@@ -702,19 +750,21 @@ class DiscordBotAdapter(BotPort):
         plan = plan_ingest_response(result)
         if plan.kind == "embed" and isinstance(result, GameStarted):
             await self._post_game_started_to_reports(result)
-            await interaction.response.send_message(
-                f"Game started: **{result.report.game_name}**.",
-                ephemeral=True,
-            )
+            message = f"Game started: **{result.report.game_name}**."
+            if self._response_is_done(interaction):
+                await interaction.followup.send(message, ephemeral=True)
+            else:
+                await interaction.response.send_message(message, ephemeral=True)
             return
 
         message = interaction.message
         if message is not None:
             await self._deliver_ingest_result(message, result)
-        await interaction.response.send_message(
-            "Extraction confirmed.",
-            ephemeral=True,
-        )
+        confirmation = "Extraction confirmed."
+        if self._response_is_done(interaction):
+            await interaction.followup.send(confirmation, ephemeral=True)
+        else:
+            await interaction.response.send_message(confirmation, ephemeral=True)
 
     def _channel(self, key: str) -> discord.TextChannel | None:
         channel_id = self._channel_ids.get(key)
@@ -756,6 +806,12 @@ class DiscordBotAdapter(BotPort):
             unauthorized_confirmation_message(),
             ephemeral=True,
         )
+
+    def _response_is_done(self, interaction: discord.Interaction) -> bool:
+        is_done = getattr(interaction.response, "is_done", None)
+        if callable(is_done):
+            return is_done() is True
+        return False
 
     def _games_for_ids(self, game_ids: tuple[int, ...]) -> list[Game]:
         if self._game_repo is None:
@@ -825,3 +881,391 @@ class DiscordBotAdapter(BotPort):
             return None
         other_player_id = int(pending.payload["other_player_id"])
         return self._other_player_discord_id(other_player_id)
+
+    def _player_link_uploader_id(self, interaction_id: int) -> str | None:
+        repo = getattr(self._ingest_service, "_pending_repo", None)
+        if repo is None:
+            return None
+        pending = repo.get_by_id(interaction_id)
+        if pending is None or pending.kind != _PLAYER_LINK_KIND:
+            return None
+        return pending.discord_user_id
+
+    def _player_link_slot(
+        self,
+        interaction_id: int,
+        slot_index: int,
+    ) -> dict[str, object] | None:
+        repo = getattr(self._ingest_service, "_pending_repo", None)
+        if repo is None:
+            return None
+        pending = repo.get_by_id(interaction_id)
+        if pending is None:
+            return None
+        slots = pending.payload.get("slots")
+        if not isinstance(slots, list):
+            return None
+        for slot in slots:
+            if isinstance(slot, dict) and slot.get("slot_index") == slot_index:
+                return slot
+        return None
+
+    def _player_link_selected_discord_id(
+        self,
+        interaction_id: int,
+        slot_index: int,
+    ) -> str | None:
+        slot = self._player_link_slot(interaction_id, slot_index)
+        if slot is None:
+            return None
+        selected = slot.get("selected_discord_user_id")
+        return selected if isinstance(selected, str) else None
+
+    def _all_player_link_slots_resolved(self, interaction_id: int) -> bool:
+        repo = getattr(self._ingest_service, "_pending_repo", None)
+        if repo is None:
+            return False
+        pending = repo.get_by_id(interaction_id)
+        if pending is None:
+            return False
+        if pending.status != "open":
+            return True
+        slots = pending.payload.get("slots")
+        if not isinstance(slots, list) or not slots:
+            return False
+        return all(
+            bool(slot.get("resolved"))
+            for slot in slots
+            if isinstance(slot, dict)
+        )
+
+    def _player_link_parent_id(self, interaction_id: int) -> int | None:
+        repo = getattr(self._ingest_service, "_pending_repo", None)
+        if repo is None:
+            return None
+        pending = repo.get_by_id(interaction_id)
+        if pending is None:
+            return None
+        parent_id = pending.payload.get("parent_extraction_interaction_id")
+        return parent_id if isinstance(parent_id, int) else None
+
+    async def _require_player_link_uploader(
+        self,
+        interaction: discord.Interaction,
+        interaction_id: int,
+    ) -> str | None:
+        uploader = self._player_link_uploader_id(interaction_id)
+        if uploader is None or not can_confirm_extraction(
+            uploader_discord_id=uploader,
+            actor_discord_id=str(interaction.user.id),
+        ):
+            await self._reply_unauthorized(interaction)
+            return None
+        return uploader
+
+    async def _deliver_player_link_spelling_ui(
+        self,
+        interaction: discord.Interaction,
+        result: PlayerLinkNeedsConfirmation,
+    ) -> None:
+        if not result.unresolved:
+            await interaction.response.send_message(
+                "No players need identity confirmation.",
+                ephemeral=True,
+            )
+            return
+        slot = result.unresolved[0]
+        uploader = self._player_link_uploader_id(result.interaction_id) or ""
+        embed = build_player_spelling_confirm_embed(slot.polytopia_name)
+        view = PlayerSpellingConfirmView(
+            interaction_id=result.interaction_id,
+            player_slot=slot.slot_index,
+            polytopia_name=slot.polytopia_name,
+            uploader_discord_id=uploader,
+        )
+        await interaction.response.send_message(embed=embed, view=view)
+
+    async def _handle_confirm_player_spelling(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        assert parsed.player_slot is not None
+        uploader = await self._require_player_link_uploader(
+            interaction,
+            parsed.interaction_id,
+        )
+        if uploader is None:
+            return
+        self._player_identity_service.confirm_spelling(
+            parsed.interaction_id,
+            slot_index=parsed.player_slot,
+            confirmer_discord_id=str(interaction.user.id),
+        )
+        await self._advance_player_link_slot(interaction, parsed)
+
+    async def _handle_reject_player_spelling(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        assert parsed.player_slot is not None
+        uploader = await self._require_player_link_uploader(
+            interaction,
+            parsed.interaction_id,
+        )
+        if uploader is None:
+            return
+        self._player_identity_service.reject_spelling(
+            parsed.interaction_id,
+            slot_index=parsed.player_slot,
+            confirmer_discord_id=str(interaction.user.id),
+        )
+        players = self._player_repo.list_all() if self._player_repo is not None else []
+        embed = build_player_spelling_confirm_embed("Pick the correct name")
+        view = PlayerCorrectionPickView(
+            interaction_id=parsed.interaction_id,
+            player_slot=parsed.player_slot,
+            players=players,
+            uploader_discord_id=uploader,
+        )
+        await interaction.response.send_message(embed=embed, view=view)
+
+    async def _handle_pick_player_correction(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        assert parsed.player_slot is not None
+        uploader = await self._require_player_link_uploader(
+            interaction,
+            parsed.interaction_id,
+        )
+        if uploader is None:
+            return
+        values = interaction.data.get("values") if interaction.data else None
+        if not values:
+            await interaction.response.send_message(
+                "No player selected.",
+                ephemeral=True,
+            )
+            return
+        self._player_identity_service.pick_canonical_player(
+            parsed.interaction_id,
+            slot_index=parsed.player_slot,
+            player_id=int(values[0]),
+            picker_discord_id=str(interaction.user.id),
+        )
+        await self._advance_player_link_slot(interaction, parsed)
+
+    async def _handle_select_player_discord_user(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        assert parsed.player_slot is not None
+        uploader = await self._require_player_link_uploader(
+            interaction,
+            parsed.interaction_id,
+        )
+        if uploader is None:
+            return
+        values = interaction.data.get("values") if interaction.data else None
+        if not values:
+            await interaction.response.send_message(
+                "No Discord user selected.",
+                ephemeral=True,
+            )
+            return
+        selected_discord_id = str(values[0])
+        self._player_identity_service.select_discord_user(
+            parsed.interaction_id,
+            slot_index=parsed.player_slot,
+            selected_discord_user_id=selected_discord_id,
+            confirmer_discord_id=str(interaction.user.id),
+        )
+        await self._send_player_remote_confirm(
+            interaction,
+            parsed.interaction_id,
+            parsed.player_slot,
+            selected_discord_id,
+        )
+
+    async def _handle_confirm_player_link(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        assert parsed.player_slot is not None
+        selected = self._player_link_selected_discord_id(
+            parsed.interaction_id,
+            parsed.player_slot,
+        )
+        if selected is None or not can_confirm_player_link(
+            selected_discord_user_id=selected,
+            actor_discord_id=str(interaction.user.id),
+        ):
+            await self._reply_unauthorized(interaction)
+            return
+        result = self._player_identity_service.confirm_remote_link(
+            parsed.interaction_id,
+            slot_index=parsed.player_slot,
+            confirmer_discord_id=str(interaction.user.id),
+        )
+        if result.outcome == ConfirmPlayerLinkOutcome.NOT_AUTHORIZED:
+            await self._reply_unauthorized(interaction)
+            return
+        if result.outcome == ConfirmPlayerLinkOutcome.BLOCKED:
+            owner = result.blocked_owner_discord_id
+            mention = f"<@{owner}>" if owner is not None else "another user"
+            await interaction.response.send_message(
+                f"That Polytopia name is already linked to {mention}.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            "Player link confirmed.",
+            ephemeral=True,
+        )
+        await self._maybe_resume_parent_commit(interaction, parsed.interaction_id)
+
+    async def _handle_reject_player_link(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        assert parsed.player_slot is not None
+        selected = self._player_link_selected_discord_id(
+            parsed.interaction_id,
+            parsed.player_slot,
+        )
+        if selected is None or not can_confirm_player_link(
+            selected_discord_user_id=selected,
+            actor_discord_id=str(interaction.user.id),
+        ):
+            await self._reply_unauthorized(interaction)
+            return
+        slot = self._player_link_slot(parsed.interaction_id, parsed.player_slot)
+        if slot is not None:
+            slot["selected_discord_user_id"] = None
+            repo = getattr(self._ingest_service, "_pending_repo", None)
+            if repo is not None:
+                pending = repo.get_by_id(parsed.interaction_id)
+                if pending is not None:
+                    repo.update_payload(parsed.interaction_id, pending.payload)
+        uploader = self._player_link_uploader_id(parsed.interaction_id) or ""
+        await interaction.response.send_message(
+            "Link rejected. The uploader will pick another Discord user.",
+            ephemeral=True,
+        )
+        if uploader:
+            view = PlayerDiscordUserSelectView(
+                interaction_id=parsed.interaction_id,
+                player_slot=parsed.player_slot,
+                uploader_discord_id=uploader,
+            )
+            channel = interaction.channel
+            if channel is not None:
+                await channel.send(
+                    f"<@{uploader}>, please pick another Discord user for this player.",
+                    view=view,
+                )
+
+    async def _advance_player_link_slot(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        assert parsed.player_slot is not None
+        selected = self._player_link_selected_discord_id(
+            parsed.interaction_id,
+            parsed.player_slot,
+        )
+        if selected is None:
+            uploader = self._player_link_uploader_id(parsed.interaction_id) or ""
+            view = PlayerDiscordUserSelectView(
+                interaction_id=parsed.interaction_id,
+                player_slot=parsed.player_slot,
+                uploader_discord_id=uploader,
+            )
+            await interaction.response.send_message(
+                "Who on Discord is this player?",
+                view=view,
+            )
+            return
+        await self._send_player_remote_confirm(
+            interaction,
+            parsed.interaction_id,
+            parsed.player_slot,
+            selected,
+        )
+
+    async def _send_player_remote_confirm(
+        self,
+        interaction: discord.Interaction,
+        identity_interaction_id: int,
+        slot_index: int,
+        selected_discord_id: str,
+    ) -> None:
+        slot = self._player_link_slot(identity_interaction_id, slot_index)
+        if slot is not None:
+            polytopia_name = str(slot["polytopia_name"])
+        else:
+            polytopia_name = "this player"
+        embed = build_player_remote_confirm_embed(polytopia_name)
+        view = PlayerLinkRemoteConfirmView(
+            interaction_id=identity_interaction_id,
+            player_slot=slot_index,
+            selected_discord_user_id=selected_discord_id,
+        )
+        content = (
+            f"<@{selected_discord_id}>, please confirm or reject this player link."
+        )
+        if self._response_is_done(interaction):
+            await interaction.followup.send(content, embed=embed, view=view)
+        else:
+            await interaction.response.send_message(content, embed=embed, view=view)
+
+    async def _maybe_resume_parent_commit(
+        self,
+        interaction: discord.Interaction,
+        identity_interaction_id: int,
+    ) -> None:
+        if not self._all_player_link_slots_resolved(identity_interaction_id):
+            return
+        parent_id = self._player_link_parent_id(identity_interaction_id)
+        uploader = self._player_link_uploader_id(identity_interaction_id)
+        if parent_id is None or uploader is None:
+            return
+        result = self._ingest_service.commit_staged(
+            parent_id,
+            confirmer_discord_id=uploader,
+        )
+        if isinstance(result, PlayerLinkNeedsConfirmation):
+            if self._response_is_done(interaction):
+                await self._deliver_player_link_spelling_ui_followup(
+                    interaction,
+                    result,
+                )
+            else:
+                await self._deliver_player_link_spelling_ui(interaction, result)
+            return
+        await self._deliver_committed_ingest_result(interaction, result)
+
+    async def _deliver_player_link_spelling_ui_followup(
+        self,
+        interaction: discord.Interaction,
+        result: PlayerLinkNeedsConfirmation,
+    ) -> None:
+        if not result.unresolved:
+            return
+        slot = result.unresolved[0]
+        uploader = self._player_link_uploader_id(result.interaction_id) or ""
+        embed = build_player_spelling_confirm_embed(slot.polytopia_name)
+        view = PlayerSpellingConfirmView(
+            interaction_id=result.interaction_id,
+            player_slot=slot.slot_index,
+            polytopia_name=slot.polytopia_name,
+            uploader_discord_id=uploader,
+        )
+        await interaction.followup.send(embed=embed, view=view)

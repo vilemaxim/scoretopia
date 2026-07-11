@@ -207,3 +207,23 @@ def embed_from_report_dto(dto: ReportDTO) -> discord.Embed:
         fields=dto.fields,
         footer=dto.footer,
     )
+
+
+def build_player_spelling_confirm_embed(polytopia_name: str) -> discord.Embed:
+    return build_embed(
+        ReportKind.active_games,
+        title="Confirm player name",
+        description=(
+            f"Is **{polytopia_name}** spelled correctly on the screenshot?"
+        ),
+    )
+
+
+def build_player_remote_confirm_embed(polytopia_name: str) -> discord.Embed:
+    return build_embed(
+        ReportKind.active_games,
+        title="Confirm Polytopia identity",
+        description=(
+            f"Please confirm that you are **{polytopia_name}** in this game."
+        ),
+    )
