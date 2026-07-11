@@ -30,6 +30,8 @@ def discover_golden_pairs(samples_dir: Path) -> list[tuple[Path, Path]]:
 
 
 GOLDEN_PAIRS = discover_golden_pairs(SAMPLES_DIR)
+FIXIOOOIAN_SAMPLE = SAMPLES_DIR / "fixioooian_butte-start.png"
+FIXIOOOIAN_GOLDEN = FIXIOOOIAN_SAMPLE.with_suffix(".json")
 
 
 def test_discover_golden_pairs_only_includes_matching_json(tmp_path: Path) -> None:
@@ -84,3 +86,15 @@ def test_sample_golden_parametrization_skips_when_no_local_pairs() -> None:
     if GOLDEN_PAIRS:
         pytest.skip("Local golden pairs present")
     assert GOLDEN_PAIRS == []
+
+
+def test_fixioooian_in_golden_pairs_when_both_files_present() -> None:
+    """Task 026: replay-menu sample participates in discovery-based goldens."""
+    if not FIXIOOOIAN_SAMPLE.is_file():
+        pytest.skip("Local fixioooian_butte-start sample not present")
+    assert FIXIOOOIAN_GOLDEN.is_file(), (
+        "Missing fixioooian_butte-start.json for local golden pair"
+    )
+
+    pair_names = {image.name for image, _golden in GOLDEN_PAIRS}
+    assert "fixioooian_butte-start.png" in pair_names

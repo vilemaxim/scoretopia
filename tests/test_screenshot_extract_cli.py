@@ -496,3 +496,56 @@ def test_readme_documents_player_name_goldens_and_no_embed_policy() -> None:
 
     assert "player" in readme and "name" in readme
     assert "no-embed" in readme or "must not" in readme or "hardcode" in readme
+
+
+def test_readme_documents_menu_modal_screenshot_fallback() -> None:
+    """Task 026: README should document Ongoing/Replays menu cards as fallbacks."""
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8").lower()
+
+    assert "ongoing" in readme
+    assert "replay" in readme
+    assert "menu" in readme or "multiplayer" in readme
+    assert "fallback" in readme or "missed" in readme
+    assert "game_timer" in readme
+    assert "turn_status" in readme
+    assert "null" in readme or "may be" in readme
+
+
+FIXIOOOIAN_SAMPLE = (
+    PROJECT_ROOT / "samples" / "screenshots" / "fixioooian_butte-start.png"
+)
+FIXIOOOIAN_GOLDEN = FIXIOOOIAN_SAMPLE.with_suffix(".json")
+
+
+def test_fixioooian_local_golden_json_exists_when_png_present() -> None:
+    """Task 026: local replay-menu golden pair requires matching JSON."""
+    if not FIXIOOOIAN_SAMPLE.is_file():
+        pytest.skip("Local fixioooian_butte-start sample not present")
+
+    assert FIXIOOOIAN_GOLDEN.is_file(), (
+        "Author fixioooian_butte-start.json from live OCR "
+        "(scoretopia-extract --format json), then correct player names."
+    )
+
+
+@pytest.mark.skipif(
+    not FIXIOOOIAN_SAMPLE.is_file() or not FIXIOOOIAN_GOLDEN.is_file(),
+    reason="Local fixioooian_butte-start golden pair not present",
+)
+def test_cli_fixioooian_expected_names_only_exits_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 026: player-name golden gate passes for replay menu sample."""
+    from scoretopia.screenshot.cli import main
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "scoretopia-extract",
+            str(FIXIOOOIAN_SAMPLE),
+            "--expected",
+            str(FIXIOOOIAN_GOLDEN),
+            "--expected-names-only",
+        ],
+    )
+    main()
