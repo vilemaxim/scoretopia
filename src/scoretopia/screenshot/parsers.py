@@ -44,11 +44,6 @@ def _line_texts(results: list[OCRLine]) -> list[str]:
     return [item.text.strip() for item in _sorted_lines(results) if item.text.strip()]
 
 
-_ONGOING_LIST_MESSAGE = (
-    "Ongoing games list is not supported; upload an in-game "
-    "Game Basics screenshot or a pre-game lobby screenshot."
-)
-
 _WINNER_LINE_PATTERN = re.compile(
     r"^([A-Za-z][\w\s]*?)\s+wins?\b",
     re.IGNORECASE,
@@ -71,8 +66,6 @@ def detect_screenshot_type(results: list[OCRLine]) -> str:
         return "friend_profile"
     if _looks_like_game_basics(text):
         return "game_basics"
-    if _looks_like_ongoing_list(text):
-        raise ValueError(_ONGOING_LIST_MESSAGE)
     if _looks_like_game_end(lines, text):
         return "game_end"
     raise ValueError(
@@ -81,27 +74,41 @@ def detect_screenshot_type(results: list[OCRLine]) -> str:
     )
 
 
-def _looks_like_ongoing_list(text: str) -> bool:
-    has_header = "multiplayer" in text and "ongoing" in text
-    has_card_actions = "back" in text and "open" in text
-    return has_header and has_card_actions and _WAITING_TO_PLAY_PATTERN.search(text)
-
-
 def _looks_like_game_end(lines: list[str], text: str) -> bool:
     if "resigned on turn" in text:
         return True
     return any(_winner_line_match(line) for line in lines)
 
 
+def _has_game_basics_state_cue(text: str) -> bool:
+    return (
+        "resign" in text
+        or "leave" in text
+        or "game timer" in text
+        or "share" in text
+        or _WAITING_TO_PLAY_PATTERN.search(text) is not None
+        or "game is over" in text
+    )
+
+
 def _looks_like_game_basics(text: str) -> bool:
-    has_game_timer = "game timer" in text
     has_score_mode = "glory" in text or "might" in text
-    has_in_game_controls = "resign" in text or "leave" in text
+    if not has_score_mode:
+        return False
+
     has_lobby_status = (
         "waiting" in text and "accept" in text and "invitation" in text
     )
-    return has_game_timer and has_score_mode and (
-        has_in_game_controls or has_lobby_status
+    has_in_game_controls = "resign" in text or "leave" in text
+    if "game timer" in text and (has_in_game_controls or has_lobby_status):
+        return True
+
+    return (
+        "points" in text
+        and "win" in text
+        and "back" in text
+        and "open" in text
+        and _has_game_basics_state_cue(text)
     )
 
 

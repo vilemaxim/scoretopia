@@ -14,14 +14,14 @@ venv/
 
 # AI orchestrator infra — local agent tooling, not application code.
 # See .agent-context.md / SETUP.md before deleting anything here.
-.cursor/history/
-.cursor/chat/
+.cursor/
+.claude/
 tdd-mcp/
 .cursor/mcp.json
 .cursor/rules/*
 !.cursor/rules/planner.mdc
 !.cursor/rules/tdd-worker.mdc
-docs/tasks/
+docs/
 project-documentation/
 
 # Local Polytopia screenshot samples for dev/testing (not committed)
