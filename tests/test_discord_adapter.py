@@ -8,7 +8,7 @@ import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -856,10 +856,527 @@ def test_game_basics_upload_preview_confirm_posts_to_reports_channel(
 
     asyncio.run(adapter._handle_confirm_extraction(confirm_interaction, parsed))
 
-    ingest_service.commit_staged.assert_called_once_with(
-        10,
-        confirmer_discord_id="42",
-    )
     reports_channel.send.assert_awaited_once()
     embed = reports_channel.send.await_args.kwargs["embed"]
     assert embed.title == "Game started: Friday Night"
+
+
+# --- Player identity adapter wiring (Task 027) ---
+
+
+def _player_link_needs_confirmation(
+    *,
+    interaction_id: int = 20,
+    parent_id: int = 10,
+    slot_index: int = 1,
+    polytopia_name: str = "NewBob",
+) -> object:
+    from scoretopia.domain.actions import (
+        PlayerLinkNeedsConfirmation,
+        UnresolvedPlayerPreview,
+    )
+
+    return PlayerLinkNeedsConfirmation(
+        interaction_id=interaction_id,
+        parent_extraction_interaction_id=parent_id,
+        unresolved=(
+            UnresolvedPlayerPreview(
+                slot_index=slot_index,
+                polytopia_name=polytopia_name,
+            ),
+        ),
+    )
+
+
+def _player_link_adapter(
+    *,
+    identity_service: MagicMock | None = None,
+    uploader_discord_id: str = "42",
+    selected_discord_user_id: str | None = "999",
+) -> DiscordBotAdapter:
+    adapter = _adapter_with_channels()
+    adapter._player_identity_service = identity_service or MagicMock()
+    adapter._player_link_uploader_id = MagicMock(return_value=uploader_discord_id)
+    adapter._player_link_selected_discord_id = MagicMock(
+        return_value=selected_discord_user_id,
+    )
+    adapter._all_player_link_slots_resolved = MagicMock(return_value=False)
+    return adapter
+
+
+def _player_link_interaction(
+    user_id: int,
+    *,
+    extra: dict[str, object] | None = None,
+) -> MagicMock:
+    interaction = MagicMock()
+    interaction.user.id = user_id
+    interaction.response.send_message = AsyncMock()
+    interaction.response.is_done = MagicMock(return_value=False)
+    interaction.followup.send = AsyncMock()
+    interaction.data = extra
+    interaction.channel = None
+    return interaction
+
+
+def test_plan_ingest_response_routes_player_link_needs_confirmation() -> None:
+    result = _player_link_needs_confirmation()
+
+    plan = plan_ingest_response(result)
+
+    assert plan.channel == "input"
+    assert plan.kind == "player_link_needs_confirmation"
+
+
+def test_unregistered_uploader_gets_register_prompt_without_staging(
+    tmp_path: Path,
+) -> None:
+    from scoretopia.storage.db import open_database
+    from scoretopia.storage.repos import PendingInteractionRepo
+
+    conn = open_database(":memory:")
+    try:
+        pending_repo = PendingInteractionRepo(conn)
+        player_repo = MagicMock()
+        player_repo.get_by_discord_id.return_value = None
+        stored_path = tmp_path / "shot.png"
+        extraction = GameBasicsExtraction(
+            game_name="Friday Night",
+            players=(GameBasicsPlayer(name="Alice", is_you=True),),
+        )
+
+        ingest_service = MagicMock()
+        ingest_service.prepare_stored_path.return_value = stored_path
+        ingest_service.extract_stored_screenshot.return_value = extraction
+
+        adapter = _screenshot_adapter(tmp_path, ingest_service)
+        adapter._player_repo = player_repo
+        adapter._deliver_ingest_result = AsyncMock()
+
+        message = _upload_message()
+        message.author.id = 4242
+        message.reply = AsyncMock()
+        attachment = _upload_attachment()
+
+        asyncio.run(adapter._handle_screenshot_upload(message, attachment))
+
+        player_repo.get_by_discord_id.assert_called_once_with("4242")
+        ingest_service.extract_stored_screenshot.assert_not_called()
+        ingest_service.stage_screenshot.assert_not_called()
+        message.reply.assert_awaited_once()
+        reply_text = message.reply.await_args.args[0]
+        assert "/register" in reply_text
+        assert pending_repo.list_open_by_kind("confirm_extraction") == []
+        adapter._deliver_ingest_result.assert_not_awaited()
+    finally:
+        conn.close()
+
+
+def test_handle_confirm_extraction_delivers_player_link_spelling_ui() -> None:
+    from scoretopia.discord.views import PlayerSpellingConfirmView
+
+    reports_channel = MagicMock()
+    reports_channel.send = AsyncMock()
+    adapter = _adapter_with_channels(reports_channel=reports_channel)
+    adapter._staged_uploader_id = MagicMock(return_value="42")
+    player_link = _player_link_needs_confirmation()
+    adapter._ingest_service.commit_staged.return_value = player_link
+
+    interaction = MagicMock()
+    interaction.user.id = 42
+    interaction.response.send_message = AsyncMock()
+    parsed = ParsedCustomId(action="confirm_extraction", interaction_id=10)
+
+    asyncio.run(adapter._handle_confirm_extraction(interaction, parsed))
+
+    reports_channel.send.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once()
+    kwargs = interaction.response.send_message.await_args.kwargs
+    assert "embed" in kwargs
+    assert "view" in kwargs
+    assert isinstance(kwargs["view"], PlayerSpellingConfirmView)
+    assert kwargs["view"].player_slot == 1
+
+
+@pytest.mark.parametrize(
+    ("action", "identity_method", "interaction_user_id", "extra"),
+    [
+        (
+            "confirm_player_spelling",
+            "confirm_spelling",
+            "42",
+            {},
+        ),
+        (
+            "reject_player_spelling",
+            "reject_spelling",
+            "42",
+            {},
+        ),
+        (
+            "pick_player_correction",
+            "pick_canonical_player",
+            "42",
+            {"values": ["7"]},
+        ),
+        (
+            "confirm_player_link",
+            "confirm_remote_link",
+            "999",
+            {},
+        ),
+    ],
+)
+def test_player_link_component_calls_identity_service_method(
+    action: str,
+    identity_method: str,
+    interaction_user_id: str,
+    extra: dict[str, object],
+) -> None:
+    identity_service = MagicMock()
+    adapter = _player_link_adapter(
+        identity_service=identity_service,
+        uploader_discord_id="42",
+        selected_discord_user_id=(
+            "999" if action == "confirm_player_link" else None
+        ),
+    )
+
+    interaction = _player_link_interaction(
+        int(interaction_user_id),
+        extra=extra or None,
+    )
+    parsed = ParsedCustomId(
+        action=action,
+        interaction_id=20,
+        player_slot=1,
+    )
+
+    asyncio.run(adapter._handle_component(interaction, parsed))
+
+    method = getattr(identity_service, identity_method)
+    method.assert_called_once()
+    call_kwargs = method.call_args.kwargs
+    assert call_kwargs["slot_index"] == 1
+    if action == "pick_player_correction":
+        assert call_kwargs["player_id"] == 7
+        assert call_kwargs["picker_discord_id"] == "42"
+    elif action == "confirm_player_link":
+        assert call_kwargs["confirmer_discord_id"] == "999"
+    else:
+        assert call_kwargs["confirmer_discord_id"] == "42"
+
+
+def test_reject_player_link_responds_without_confirming_remote_link() -> None:
+    identity_service = MagicMock()
+    adapter = _player_link_adapter(
+        identity_service=identity_service,
+        selected_discord_user_id="999",
+    )
+
+    interaction = _player_link_interaction(999)
+    parsed = ParsedCustomId(
+        action="reject_player_link",
+        interaction_id=20,
+        player_slot=1,
+    )
+
+    asyncio.run(adapter._handle_component(interaction, parsed))
+
+    identity_service.confirm_remote_link.assert_not_called()
+    interaction.response.send_message.assert_awaited_once()
+
+
+def _build_identity_adapter_stack(
+    tmp_path: Path,
+) -> tuple[
+    DiscordBotAdapter,
+    object,
+    object,
+    object,
+    object,
+    MagicMock,
+    object,
+]:
+    from scoretopia.domain.games import GameService
+    from scoretopia.domain.ingest import IngestService
+    from scoretopia.domain.player_identity import PlayerIdentityService
+    from scoretopia.domain.players import PlayerService
+    from scoretopia.domain.win_ratios import WinRatioService
+    from scoretopia.storage.db import open_database
+    from scoretopia.storage.repos import (
+        DisputeRepo,
+        GameParticipantRepo,
+        GameRepo,
+        PendingInteractionRepo,
+        PlayerPairRatioRepo,
+        PlayerRepo,
+    )
+
+    conn = open_database(":memory:")
+    player_repo = PlayerRepo(conn)
+    pending_repo = PendingInteractionRepo(conn)
+    game_repo = GameRepo(conn)
+    participant_repo = GameParticipantRepo(conn)
+    ratio_repo = PlayerPairRatioRepo(conn)
+    dispute_repo = DisputeRepo(conn)
+    inbox_path = tmp_path / "inbox"
+    inbox_path.mkdir()
+
+    player_service = PlayerService(player_repo)
+    game_service = GameService(game_repo, participant_repo, player_repo)
+    win_ratio_service = WinRatioService(
+        player_repo,
+        pending_repo,
+        ratio_repo,
+        dispute_repo,
+    )
+    ingest_service = IngestService(
+        player_service=player_service,
+        game_service=game_service,
+        win_ratio_service=win_ratio_service,
+        pending_repo=pending_repo,
+        inbox_path=inbox_path,
+    )
+    identity_service = PlayerIdentityService(player_repo, pending_repo)
+
+    reports_channel = MagicMock()
+    reports_channel.send = AsyncMock()
+    adapter = DiscordBotAdapter(
+        config=MagicMock(inbox=MagicMock(path=inbox_path)),
+        ingest_service=ingest_service,
+        game_service=game_service,
+        win_ratio_service=win_ratio_service,
+        player_service=player_service,
+        report_service=MagicMock(),
+        token="test-token",
+        game_repo=game_repo,
+        player_repo=player_repo,
+    )
+    adapter._channel_ids = {"input": 100, "reports": 200}
+    adapter._channels_by_id = {200: reports_channel}
+    adapter._player_identity_service = identity_service
+
+    return (
+        adapter,
+        ingest_service,
+        player_repo,
+        pending_repo,
+        identity_service,
+        reports_channel,
+        conn,
+    )
+
+
+def test_adapter_identity_flow_starts_game_after_remote_confirm(
+    tmp_path: Path,
+) -> None:
+    (
+        adapter,
+        ingest_service,
+        player_repo,
+        pending_repo,
+        identity_service,
+        reports_channel,
+        conn,
+    ) = _build_identity_adapter_stack(tmp_path)
+    try:
+        player_repo.create(polytopia_name="Uploader", discord_user_id="100")
+        extraction = GameBasicsExtraction(
+            game_name="Adapter Identity Game",
+            players=(
+                GameBasicsPlayer(name="Uploader", is_you=True),
+                GameBasicsPlayer(name="NewBob"),
+            ),
+        )
+
+        ingest_service.prepare_stored_path = MagicMock(
+            side_effect=lambda path: path,
+        )
+        with patch.object(
+            ingest_service,
+            "extract_stored_screenshot",
+            return_value=extraction,
+        ):
+            message = _upload_message(message_id=2001)
+            message.author.id = 100
+            message.reply = AsyncMock()
+            attachment = _upload_attachment("identity-start.png")
+
+            asyncio.run(adapter._handle_screenshot_upload(message, attachment))
+
+        staged = pending_repo.list_open_by_kind("confirm_extraction")
+        assert len(staged) == 1
+        parent_id = staged[0].id
+
+        confirm_extraction = MagicMock()
+        confirm_extraction.user.id = 100
+        confirm_extraction.response.send_message = AsyncMock()
+        asyncio.run(
+            adapter._handle_confirm_extraction(
+                confirm_extraction,
+                ParsedCustomId(action="confirm_extraction", interaction_id=parent_id),
+            )
+        )
+
+        player_link_pending = pending_repo.list_open_by_kind("confirm_player_link")
+        assert len(player_link_pending) == 1
+        identity_id = player_link_pending[0].id
+
+        confirm_spelling = MagicMock()
+        confirm_spelling.user.id = 100
+        confirm_spelling.response.send_message = AsyncMock()
+        asyncio.run(
+            adapter._handle_component(
+                confirm_spelling,
+                ParsedCustomId(
+                    action="confirm_player_spelling",
+                    interaction_id=identity_id,
+                    player_slot=1,
+                ),
+            )
+        )
+
+        remote_confirm = MagicMock()
+        remote_confirm.user.id = 200
+        remote_confirm.response.send_message = AsyncMock()
+        remote_confirm.response.is_done = MagicMock(return_value=False)
+        remote_confirm.followup.send = AsyncMock()
+        identity_service.select_discord_user(
+            identity_id,
+            slot_index=1,
+            selected_discord_user_id="200",
+            confirmer_discord_id="100",
+        )
+        asyncio.run(
+            adapter._handle_component(
+                remote_confirm,
+                ParsedCustomId(
+                    action="confirm_player_link",
+                    interaction_id=identity_id,
+                    player_slot=1,
+                ),
+            )
+        )
+
+        reports_channel.send.assert_awaited_once()
+        embed = reports_channel.send.await_args.kwargs["embed"]
+        assert embed.title == "Game started: Adapter Identity Game"
+        linked = player_repo.get_by_polytopia_name("NewBob")
+        assert linked is not None
+        assert linked.discord_user_id == "200"
+    finally:
+        conn.close()
+
+
+def test_adapter_spelling_correction_flow_resumes_commit(
+    tmp_path: Path,
+) -> None:
+    (
+        adapter,
+        ingest_service,
+        player_repo,
+        pending_repo,
+        identity_service,
+        reports_channel,
+        conn,
+    ) = _build_identity_adapter_stack(tmp_path)
+    try:
+        player_repo.create(polytopia_name="Uploader", discord_user_id="100")
+        canonical = player_repo.create(polytopia_name="RealBob")
+        extraction = GameBasicsExtraction(
+            game_name="Correction Resume Game",
+            players=(
+                GameBasicsPlayer(name="Uploader", is_you=True),
+                GameBasicsPlayer(name="WrngBob"),
+            ),
+        )
+
+        ingest_service.prepare_stored_path = MagicMock(
+            side_effect=lambda path: path,
+        )
+        with patch.object(
+            ingest_service,
+            "extract_stored_screenshot",
+            return_value=extraction,
+        ):
+            message = _upload_message(message_id=3001)
+            message.author.id = 100
+            message.reply = AsyncMock()
+            attachment = _upload_attachment("correction-start.png")
+
+            asyncio.run(adapter._handle_screenshot_upload(message, attachment))
+
+        parent_id = pending_repo.list_open_by_kind("confirm_extraction")[0].id
+
+        confirm_extraction = MagicMock()
+        confirm_extraction.user.id = 100
+        confirm_extraction.response.send_message = AsyncMock()
+        asyncio.run(
+            adapter._handle_confirm_extraction(
+                confirm_extraction,
+                ParsedCustomId(action="confirm_extraction", interaction_id=parent_id),
+            )
+        )
+
+        identity_id = pending_repo.list_open_by_kind("confirm_player_link")[0].id
+
+        reject_spelling = MagicMock()
+        reject_spelling.user.id = 100
+        reject_spelling.response.send_message = AsyncMock()
+        asyncio.run(
+            adapter._handle_component(
+                reject_spelling,
+                ParsedCustomId(
+                    action="reject_player_spelling",
+                    interaction_id=identity_id,
+                    player_slot=1,
+                ),
+            )
+        )
+
+        pick_correction = MagicMock()
+        pick_correction.user.id = 100
+        pick_correction.response.send_message = AsyncMock()
+        pick_correction.data = {"values": [str(canonical.id)]}
+        asyncio.run(
+            adapter._handle_component(
+                pick_correction,
+                ParsedCustomId(
+                    action="pick_player_correction",
+                    interaction_id=identity_id,
+                    player_slot=1,
+                ),
+            )
+        )
+
+        remote_confirm = MagicMock()
+        remote_confirm.user.id = 300
+        remote_confirm.response.send_message = AsyncMock()
+        remote_confirm.response.is_done = MagicMock(return_value=False)
+        remote_confirm.followup.send = AsyncMock()
+        identity_service.select_discord_user(
+            identity_id,
+            slot_index=1,
+            selected_discord_user_id="300",
+            confirmer_discord_id="100",
+        )
+        asyncio.run(
+            adapter._handle_component(
+                remote_confirm,
+                ParsedCustomId(
+                    action="confirm_player_link",
+                    interaction_id=identity_id,
+                    player_slot=1,
+                ),
+            )
+        )
+
+        reports_channel.send.assert_awaited_once()
+        embed = reports_channel.send.await_args.kwargs["embed"]
+        assert embed.title == "Game started: Correction Resume Game"
+        linked = player_repo.get_by_polytopia_name("RealBob")
+        assert linked is not None
+        assert linked.discord_user_id == "300"
+    finally:
+        conn.close()

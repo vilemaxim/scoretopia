@@ -152,6 +152,12 @@ class PlayerRepo:
         assert player is not None
         return player
 
+    def list_all(self) -> list[Player]:
+        rows = self._conn.execute(
+            f"{_PLAYER_SELECT} ORDER BY polytopia_name"
+        ).fetchall()
+        return [_player_from_row(row) for row in rows]
+
 
 class GameRepo:
     def __init__(self, conn: sqlite3.Connection) -> None:

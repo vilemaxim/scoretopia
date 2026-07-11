@@ -60,6 +60,7 @@ _PLAYER_LINK_ACTIONS = frozenset(
         "pick_player_correction",
         "confirm_player_link",
         "reject_player_link",
+        "select_player_discord_user",
     }
 )
 
@@ -333,3 +334,28 @@ class PlayerLinkRemoteConfirmView(discord.ui.View):
                 ),
             )
         )
+
+
+class PlayerDiscordUserSelectView(discord.ui.View):
+    def __init__(
+        self,
+        *,
+        interaction_id: int,
+        player_slot: int,
+        uploader_discord_id: str,
+    ) -> None:
+        super().__init__(timeout=None)
+        del uploader_discord_id
+        self.interaction_id = interaction_id
+        self.player_slot = player_slot
+        select = discord.ui.UserSelect(
+            placeholder="Which Discord user is this player?",
+            custom_id=encode_custom_id(
+                "select_player_discord_user",
+                interaction_id=interaction_id,
+                player_slot=player_slot,
+            ),
+            min_values=1,
+            max_values=1,
+        )
+        self.add_item(select)
