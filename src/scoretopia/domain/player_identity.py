@@ -116,6 +116,18 @@ class PlayerIdentityService:
         extraction: ExtractionResult,
         unresolved: list[UnresolvedPlayerPreview],
     ) -> PlayerLinkNeedsConfirmation:
+        parent = self._pending_repo.get_by_id(parent_interaction_id)
+        if (
+            parent is None
+            or parent.kind != "confirm_extraction"
+            or parent.status != "open"
+        ):
+            msg = (
+                f"Cannot begin identity check: parent "
+                f"{parent_interaction_id} is not an open staged ingest"
+            )
+            raise ValueError(msg)
+
         payload: dict[str, object] = {
             "parent_extraction_interaction_id": parent_interaction_id,
             "uploader_discord_id": uploader_discord_id,

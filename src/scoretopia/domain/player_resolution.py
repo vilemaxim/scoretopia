@@ -195,7 +195,11 @@ def _apply_exact_to_end_players(
 def initial_slot_confirmations(
     resolved: Sequence[RosterSlotResolution],
 ) -> dict[int, bool]:
-    """Exact slots are auto-confirmed; fuzzy/new require explicit acknowledgement."""
+    """Exact slots are auto-confirmed; fuzzy/new start unconfirmed.
+
+    Continue gating (ADR 005) uses ``fix_resolved_roster_slots``, not
+    acknowledgement-only ``slot_confirmations``.
+    """
     return {
         index: slot.match_type == "exact" for index, slot in enumerate(resolved)
     }
@@ -205,3 +209,109 @@ def resolved_roster_as_dicts(
     resolved: Sequence[RosterSlotResolution],
 ) -> list[dict[str, object]]:
     return [asdict(slot) for slot in resolved]
+
+
+def human_roster_index_for_player_slot(
+    players: Sequence[dict[str, object]],
+    player_slot_index: int,
+) -> int | None:
+    """Map extraction ``players`` index → human-only roster index (bots skipped)."""
+    human_index = 0
+    for index, entry in enumerate(players):
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name", ""))
+        if is_bot_name(name):
+            continue
+        if index == player_slot_index:
+            return human_index
+        human_index += 1
+    return None
+
+
+def mark_roster_slot_fix_resolved(
+    payload: dict[str, object],
+    *,
+    player_slot_index: int,
+) -> None:
+    """Record that a fuzzy/new slot was resolved via the Fix path."""
+    extraction = payload.get("extraction")
+    if not isinstance(extraction, dict):
+        return
+    players = extraction.get("players")
+    if not isinstance(players, list):
+        return
+    human_index = human_roster_index_for_player_slot(players, player_slot_index)
+    if human_index is None:
+        return
+    fix_resolved = payload.get("fix_resolved_roster_slots")
+    if not isinstance(fix_resolved, dict):
+        fix_resolved = {}
+    fix_resolved[str(human_index)] = True
+    payload["fix_resolved_roster_slots"] = fix_resolved
+    confirmations = payload.get("slot_confirmations")
+    if isinstance(confirmations, dict):
+        confirmations[str(human_index)] = True
+
+
+def unresolved_fuzzy_new_slot_indexes(
+    payload: dict[str, object],
+) -> tuple[int, ...]:
+    """Human roster indexes still needing Fix before continue_review."""
+    resolved_roster = payload.get("resolved_roster")
+    if not isinstance(resolved_roster, list):
+        return ()
+    fix_resolved = payload.get("fix_resolved_roster_slots")
+    if not isinstance(fix_resolved, dict):
+        fix_resolved = {}
+    unresolved: list[int] = []
+    for index, entry in enumerate(resolved_roster):
+        if not isinstance(entry, dict):
+            continue
+        match_type = entry.get("match_type")
+        if match_type not in {"fuzzy", "new"}:
+            continue
+        if fix_resolved.get(str(index)) is True:
+            continue
+        unresolved.append(index)
+    return tuple(unresolved)
+
+
+def player_slot_indexes_by_human_roster(
+    players: Sequence[dict[str, object]],
+) -> dict[int, int]:
+    """Map human roster index → extraction ``players`` list index."""
+    mapping: dict[int, int] = {}
+    human_index = 0
+    for player_index, entry in enumerate(players):
+        if not isinstance(entry, dict):
+            continue
+        if is_bot_name(str(entry.get("name", ""))):
+            continue
+        mapping[human_index] = player_index
+        human_index += 1
+    return mapping
+
+
+def mark_all_unresolved_roster_slots_fix_resolved(
+    payload: dict[str, object],
+) -> None:
+    """Mark every fuzzy/new slot Fix-resolved (accept current extraction names)."""
+    unresolved = unresolved_fuzzy_new_slot_indexes(payload)
+    if not unresolved:
+        return
+    extraction = payload.get("extraction")
+    if not isinstance(extraction, dict):
+        return
+    players = extraction.get("players")
+    if not isinstance(players, list):
+        return
+    human_to_player = player_slot_indexes_by_human_roster(players)
+    for human_idx in unresolved:
+        player_idx = human_to_player.get(human_idx)
+        if player_idx is None:
+            continue
+        mark_roster_slot_fix_resolved(
+            payload,
+            player_slot_index=player_idx,
+        )

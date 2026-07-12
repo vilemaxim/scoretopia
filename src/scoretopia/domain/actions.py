@@ -103,6 +103,14 @@ class FieldCorrectionNeedsInput:
 
 
 @dataclass(frozen=True)
+class RosterSlotsUnresolved:
+    """continue_review rejected because fuzzy/new slots need Fix resolution."""
+
+    unresolved_slot_indexes: tuple[int, ...] = ()
+    action: str = "roster_slots_unresolved"
+
+
+@dataclass(frozen=True)
 class FinalSummaryPreview:
     screenshot_type: str
     game_name: str | None = None
@@ -146,6 +154,7 @@ IngestResult = (
     | PlayerLinkNeedsConfirmation
     | ModApprovalNeedsConfirmation
     | FieldCorrectionNeedsInput
+    | RosterSlotsUnresolved
     | FinalSummaryNeedsConfirmation
     | UnrecognizedScreenshot
     | IngestError

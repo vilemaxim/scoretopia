@@ -1,4 +1,15 @@
-"""Screenshot ingest orchestrator."""
+"""Screenshot ingest orchestrator.
+
+Confirm-last pipeline (ADR 005 / Task 033):
+- Pending kind ``confirm_extraction`` is kept for the staged diagnosis parent
+  (no kind rename / migration); actions are Continue / Fix / Abandon — not an
+  extraction-level Confirm commit.
+- ``continue_review`` advances diagnosis → identity (if needed) → final summary.
+- ``open_fix`` opens field correction (``reject_staged`` is a deprecated alias).
+- ``abandon_staged`` resolves the ingest tree with no domain mutations.
+- ``confirm_final_summary`` is the sole ``complete_ingest`` / training-export gate.
+- ``commit_staged`` is hard-stopped (returns ``use_continue_review`` error).
+"""
 
 from __future__ import annotations
 
@@ -20,6 +31,7 @@ from scoretopia.domain.actions import (
     IngestError,
     IngestResult,
     PlayerLinkNeedsConfirmation,
+    RosterSlotsUnresolved,
     StagedIngestNotAuthorized,
     UnrecognizedScreenshot,
     WinRatioNeedsConfirmation,
@@ -33,6 +45,7 @@ from scoretopia.domain.player_resolution import (
     resolve_roster_slots,
     resolved_roster_as_dicts,
     roster_names_from_extraction,
+    unresolved_fuzzy_new_slot_indexes,
 )
 from scoretopia.domain.players import PlayerService
 from scoretopia.domain.results import MatchOutcome
@@ -56,9 +69,16 @@ _UNRECOGNIZED_MESSAGE = (
     "Could not recognize this screenshot. Please upload a Polytopia "
     "game basics, game end, or friend profile screenshot."
 )
+# Kind kept as confirm_extraction for DB compatibility; semantics are diagnosis review.
 _CONFIRM_EXTRACTION_KIND = "confirm_extraction"
 _FIELD_CORRECTION_KIND = "field_correction"
 _CONFIRM_FINAL_SUMMARY_KIND = "confirm_final_summary"
+_INGEST_CHILD_KINDS = (
+    _FIELD_CORRECTION_KIND,
+    _CONFIRM_FINAL_SUMMARY_KIND,
+    "confirm_player_link",
+    "mod_approval",
+)
 
 
 def _unrecognized_message_from_value_error(exc: ValueError) -> str:
@@ -126,10 +146,16 @@ class IngestService:
         )
         if isinstance(staged, (UnrecognizedScreenshot, IngestError)):
             return staged
-        return self.commit_staged(
+        continued = self.continue_review(
             staged.interaction_id,
             confirmer_discord_id=uploader_discord_id,
         )
+        if isinstance(continued, FinalSummaryNeedsConfirmation):
+            return self.confirm_final_summary(
+                continued.interaction_id,
+                confirmer_discord_id=uploader_discord_id,
+            )
+        return continued
 
     def stage_screenshot(
         self,
@@ -192,18 +218,25 @@ class IngestService:
             preview=preview,
         )
 
-    def commit_staged(
+    def continue_review(
         self,
         interaction_id: int,
         *,
         confirmer_discord_id: str,
-    ) -> IngestResult | StagedIngestNotAuthorized:
+    ) -> IngestResult | StagedIngestNotAuthorized | RosterSlotsUnresolved:
+        """Advance diagnosis after Fix work; does not commit domain state."""
         pending = self._require_open_staged_pending(
             interaction_id,
             confirmer_discord_id=confirmer_discord_id,
         )
         if isinstance(pending, StagedIngestNotAuthorized):
             return pending
+
+        unresolved_slots = unresolved_fuzzy_new_slot_indexes(pending.payload)
+        if unresolved_slots:
+            return RosterSlotsUnresolved(
+                unresolved_slot_indexes=unresolved_slots,
+            )
 
         extraction = deserialize_staged_extraction(pending.payload)
         identity_result = self._resolve_player_identities(
@@ -217,6 +250,22 @@ class IngestService:
             parent_interaction_id=interaction_id,
             uploader_discord_id=confirmer_discord_id,
             extraction=extraction,
+        )
+
+    def commit_staged(
+        self,
+        interaction_id: int,
+        *,
+        confirmer_discord_id: str,
+    ) -> IngestResult | StagedIngestNotAuthorized:
+        """Hard-stopped (ADR 005): use continue_review then confirm_final_summary."""
+        del interaction_id, confirmer_discord_id
+        return IngestError(
+            message=(
+                "Extraction-level commit is removed. Use continue_review, then "
+                "confirm_final_summary."
+            ),
+            action="use_continue_review",
         )
 
     def confirm_final_summary(
@@ -267,7 +316,7 @@ class IngestService:
         )
         return committed
 
-    def reject_staged(
+    def open_fix(
         self,
         interaction_id: int,
         *,
@@ -303,6 +352,52 @@ class IngestService:
             parent_extraction_interaction_id=interaction_id,
             screenshot_type=screenshot_type,
         )
+
+    def reject_staged(
+        self,
+        interaction_id: int,
+        *,
+        confirmer_discord_id: str,
+    ) -> FieldCorrectionNeedsInput | StagedIngestNotAuthorized:
+        """Deprecated alias for ``open_fix`` (kept for Discord until Task 034)."""
+        return self.open_fix(
+            interaction_id,
+            confirmer_discord_id=confirmer_discord_id,
+        )
+
+    def abandon_staged(
+        self,
+        interaction_id: int,
+        *,
+        confirmer_discord_id: str,
+    ) -> StagedIngestNotAuthorized | None:
+        """Discard staged ingest tree; no games, players, or ratios mutated."""
+        pending = self._require_open_staged_pending(
+            interaction_id,
+            confirmer_discord_id=confirmer_discord_id,
+        )
+        if isinstance(pending, StagedIngestNotAuthorized):
+            return pending
+
+        self._resolve_ingest_tree(interaction_id)
+        ingest_logger.info(
+            "staged ingest abandoned parent=%s by=%s",
+            interaction_id,
+            confirmer_discord_id,
+        )
+        return None
+
+    def _resolve_ingest_tree(self, parent_interaction_id: int) -> None:
+        for kind in _INGEST_CHILD_KINDS:
+            for child in self._pending_repo.list_open_by_kind(kind):
+                if (
+                    child.payload.get("parent_extraction_interaction_id")
+                    == parent_interaction_id
+                ):
+                    self._pending_repo.resolve(child.id)
+        parent = self._pending_repo.get_by_id(parent_interaction_id)
+        if parent is not None and parent.status == "open":
+            self._pending_repo.resolve(parent_interaction_id)
 
     def _stage_final_summary(
         self,
