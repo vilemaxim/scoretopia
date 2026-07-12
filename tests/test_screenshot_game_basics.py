@@ -331,7 +331,9 @@ def test_parse_game_basics_merges_split_name_tokens_on_same_row(
 
     assert len(names) == 2
     assert any("deoxyribonucleic" in name.lower() for name in names)
-    assert any("zombie" in name.lower() and "4" in name.lower() for name in names)
+    # Phone-icon OCR ``Q`` is stripped (not rewritten to Z).
+    assert any("ombie" in name.lower() and "4" in name.lower() for name in names)
+    assert not any(name.lower().startswith("zombie") for name in names)
 
 
 def test_parse_game_basics_filters_ui_labels_from_player_names(
@@ -375,16 +377,20 @@ def test_parse_game_basics_marks_is_you_on_row_with_you_marker(
     assert players_by_name["Bob"].is_you is False
 
 
-# Distinct human roster for Strait of Uhlsii lobby (ground truth / golden).
+# Distinct human roster for Strait of Uhlsii lobby + Ongoing (ground truth).
 # OCR may shorten Deoxyribonucleic504 → Deoxyribonucleic50 (5o→50).
+# Phone-icon OCR must not become a leading letter (ombiez8u, not Zombiez8u).
 _LOBBY_EXPECTED_HUMANS: tuple[str, ...] = (
     "vilemaxim1",
     "Deoxyribonucleic50",
     "Diremouse01",
     "Lord Union 409",
-    "Zombiez8u",
+    "ombiez8u",
     "Zavonics",
 )
+
+ONGOING_STRAIT_SAMPLE = SAMPLES_DIR / "strait of Uhfixi.png"
+ONGOING_STRAIT_GOLDEN = ONGOING_STRAIT_SAMPLE.with_suffix(".json")
 
 
 def _strait_of_uhlsii_dense_roster_ocr_lines() -> list[OCRLine]:
@@ -393,7 +399,8 @@ def _strait_of_uhlsii_dense_roster_ocr_lines() -> list[OCRLine]:
     Reproduces production failure modes without live EasyOCR:
     - spurious short token ``ml`` treated as a player
     - adjacent names concatenated (e.g. vilemaxi + onucleic)
-    - humans dropped / merged across columns (Lord / Zombie / Diremouse)
+    - humans dropped / merged across columns (Lord / ombiez / Diremouse)
+    - phone-icon OCR ``Qombiez8`` must normalize to ``ombiez8u`` (not Zombiez8u)
     """
     return [
         OCRLine(text="0Lord", confidence=0.99, y=1211.0, x=714.0),
@@ -416,14 +423,47 @@ def _strait_of_uhlsii_dense_roster_ocr_lines() -> list[OCRLine]:
     ]
 
 
+def _strait_of_uhfixi_ongoing_roster_ocr_lines() -> list[OCRLine]:
+    """Synthetic OCR from Ongoing Strait card (strait of Uhfixi.png).
+
+    Task 038 failure modes (production Discord paste):
+    - menu-roster misfire on 3-name blob + peer chips → ``m1`` orphan
+    - cross-column merges (``vilemaxionucleic50``, ``DiremouUnion 409``)
+    - dropped human (ombiez8 left as separate chip, never zipped)
+    """
+    return [
+        OCRLine(
+            text="vilemaxi 0 Deoxyrib 0 Diremou",
+            confidence=0.99,
+            y=1214.5,
+            x=382.5,
+        ),
+        OCRLine(text="0Lord", confidence=0.99, y=1211.0, x=713.0),
+        OCRLine(text="ombiez8", confidence=0.99, y=1211.0, x=898.5),
+        OCRLine(text="ml", confidence=0.99, y=1246.0, x=196.0),
+        OCRLine(text="onucleic5o", confidence=0.99, y=1244.5, x=367.5),
+        OCRLine(text="seo1", confidence=0.99, y=1245.0, x=541.0),
+        OCRLine(text="Union 409", confidence=0.99, y=1243.0, x=715.0),
+        OCRLine(text="u", confidence=0.99, y=1249.0, x=886.0),
+        OCRLine(
+            text="DZavonics Crazy Bot Crazy Bot Crazy Bot Crazy Bot",
+            confidence=0.99,
+            y=1465.5,
+            x=539.0,
+        ),
+        OCRLine(text="Crazy Bot Crazy Bot", confidence=0.99, y=1715.5, x=281.5),
+    ]
+
+
 def test_dense_lobby_roster_strip_rejects_junk_merge_and_drops() -> None:
-    """Task 036: dense lobby strip must not invent, merge, or drop humans.
+    """Task 036/038: dense lobby strip must not invent, merge, or drop humans.
 
     Covers failure modes from production Strait of Uhlsii extract:
     1. No spurious short tokens as players (e.g. ``ml``)
     2. No concatenated adjacent names (vilemaxi+onucleic, Diremou+Lord, …)
-    3. No dropped humans when OCR fragments exist (Zombie / Diremouse / …)
-    4. Bot rows stay bots; human count matches expected roster
+    3. No dropped humans when OCR fragments exist (ombiez / Diremouse / …)
+    4. Phone-icon prefix stripped (``Qombiez8`` → ``ombiez8u``, not Zombiez8u)
+    5. Bot rows stay bots; human count matches expected roster
     """
     from scoretopia.screenshot.game_basics import (
         _PLAYER_ROW_TOLERANCE,
@@ -504,6 +544,105 @@ def test_lobby_sample_extracts_full_human_roster() -> None:
     crazy_bots = [name for name in names if name == "Crazy Bot"]
 
     assert "ml" not in humans
+    assert humans == list(_LOBBY_EXPECTED_HUMANS)
+    assert len(crazy_bots) == 6
+
+
+def test_ongoing_strait_roster_strip_rejects_menu_merge_and_drops() -> None:
+    """Task 038: Ongoing dense blob+peers must use pairing, not menu zip.
+
+    Covers production failure modes on strait of Uhfixi.png:
+    1. No orphan second-line token as a player (``m1`` / ``ml``)
+    2. No cross-column merges (vilemaxi+onucleic, Diremou+Union, …)
+    3. No dropped humans (six humans including ``ombiez8u``)
+    4. Phone-icon junk must not invent a leading Z (already clean ``ombiez8``)
+    """
+    from scoretopia.screenshot.game_basics import (
+        _PLAYER_ROW_TOLERANCE,
+        _cluster_ocr_rows,
+        _extract_names_from_strip,
+        _group_row_clusters_into_strips,
+        _looks_like_menu_roster_strip,
+    )
+
+    lines = _strait_of_uhfixi_ongoing_roster_ocr_lines()
+    rows = _cluster_ocr_rows(lines, tolerance=_PLAYER_ROW_TOLERANCE)
+    strips = _group_row_clusters_into_strips(rows)
+
+    assert strips, "expected at least one roster strip"
+    assert _looks_like_menu_roster_strip(strips[0]) is False
+
+    all_names: list[str] = []
+    bot_count = 0
+    for strip in strips:
+        names, bots = _extract_names_from_strip(strip)
+        all_names.extend(names)
+        bot_count += bots
+
+    assert "m1" not in all_names
+    assert "ml" not in all_names
+    assert not any(
+        "onucleic" in name.lower() and "vilemaxi" in name.lower() for name in all_names
+    )
+    assert not any(
+        "diremou" in name.lower() and "union" in name.lower() for name in all_names
+    )
+    assert all_names == list(_LOBBY_EXPECTED_HUMANS)
+    assert bot_count == 6
+
+
+def test_parse_game_basics_ongoing_strait_roster_matches_expected_humans(
+    tmp_path: Path,
+) -> None:
+    """Task 038: parse_game_basics on Ongoing Strait OCR yields full roster."""
+    image_path = _save_blank_image(tmp_path, "strait_ongoing.png")
+    lines = [
+        *_minimal_header_lines(),
+        OCRLine(text="Ongoing", confidence=0.99, y=80.0, x=200.0),
+        OCRLine(
+            text="Waiting for Zavonics to Play",
+            confidence=0.99,
+            y=1100.0,
+            x=200.0,
+        ),
+        *_strait_of_uhfixi_ongoing_roster_ocr_lines(),
+    ]
+
+    result = parse_game_basics(lines, image_path)
+    names = [player.name for player in result.players]
+    humans = [name for name in names if name != "Crazy Bot"]
+    bots = [name for name in names if name == "Crazy Bot"]
+
+    assert humans == list(_LOBBY_EXPECTED_HUMANS)
+    assert len(bots) == 6
+
+
+@pytest.mark.skipif(
+    not ONGOING_STRAIT_SAMPLE.is_file(),
+    reason="Local Ongoing Strait sample screenshot not present",
+)
+def test_ongoing_strait_sample_golden_json_exists() -> None:
+    """Task 038: Ongoing PNG must have a matching golden JSON."""
+    assert ONGOING_STRAIT_GOLDEN.is_file(), (
+        "Author 'strait of Uhfixi.json' next to the Ongoing PNG with the true "
+        "human roster (no m1 junk, no merged names, ombiez8u, six+six)."
+    )
+
+
+@pytest.mark.skipif(
+    not ONGOING_STRAIT_SAMPLE.is_file(),
+    reason="Local Ongoing Strait sample screenshot not present",
+)
+def test_ongoing_strait_sample_extracts_full_human_roster() -> None:
+    """Ongoing Strait screenshot yields six humans + six Crazy Bots."""
+    result = extract_screenshot(ONGOING_STRAIT_SAMPLE, model_dir=MODEL_DIR)
+    assert isinstance(result, GameBasicsExtraction)
+
+    names = [player.name for player in result.players]
+    humans = [name for name in names if name != "Crazy Bot"]
+    crazy_bots = [name for name in names if name == "Crazy Bot"]
+
+    assert "m1" not in humans
     assert humans == list(_LOBBY_EXPECTED_HUMANS)
     assert len(crazy_bots) == 6
 

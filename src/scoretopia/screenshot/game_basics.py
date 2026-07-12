@@ -356,13 +356,13 @@ def _normalize_player_name(fragment: str) -> str:
     # Checkbox / status glyph OCR often inserts " 0" before a name continuation.
     cleaned = re.sub(r"\s+0(?=[A-Za-z])", "", cleaned)
     cleaned = re.sub(r"\s+0$", "", cleaned)
-    if cleaned.startswith("Q") and len(cleaned) > 1:
-        cleaned = "Z" + cleaned[1:]
     cleaned = re.sub(r"^0+(?=[A-Za-z])", "", cleaned)
     cleaned = re.sub(r"0(?=[a-z])", "o", cleaned)
     cleaned = re.sub(r"^D\s+(?=[a-z])", "", cleaned, flags=re.IGNORECASE)
     # Leading D glued onto a capitalized stem (OCR prefix junk).
     cleaned = re.sub(r"^D(?=[A-Z])", "", cleaned)
+    # Phone-icon OCR often becomes a leading Q/Z/D before "ombie…".
+    cleaned = re.sub(r"^[QZD](?=ombie)", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"(?i)mouseo1$", "mouse01", cleaned)
     cleaned = re.sub(r"5o$", "50", cleaned)
     cleaned = re.sub(r"Z80u$", "Z8u", cleaned)
@@ -593,8 +593,40 @@ def _pair_fragments_across_rows(
     return [name for name, _ in paired if name and not _is_noise_token(name)]
 
 
+def _row_has_blob_with_peer_name_tokens(cluster: list[OCRLine]) -> bool:
+    """True when a multi-name blob shares its row with other standalone name chips.
+
+    Dense avatar grids (Ongoing Strait) OCR some names into one box and leave
+    peers like ``0Lord`` / ``ombiez8`` as separate boxes. Menu-roster zip then
+    invents junk (``m1``) and cross-column merges; column pairing is correct.
+    """
+    has_blob = False
+    has_peer = False
+    for item in cluster:
+        if item.x <= _LEFT_COLUMN_X_MAX:
+            continue
+        parts = _split_name_blob(item.text)
+        if len(parts) >= 2:
+            has_blob = True
+            continue
+        if not parts:
+            continue
+        part = parts[0].strip()
+        if (
+            _is_ui_label(part)
+            or _is_noise_token(part)
+            or _is_pairable_suffix_token(part)
+            or re.fullmatch(r"\d+", part)
+        ):
+            continue
+        has_peer = True
+    return has_blob and has_peer
+
+
 def _looks_like_menu_roster_strip(strip: list[list[OCRLine]]) -> bool:
     """True when a right-column OCR blob contains multiple player names (menu list)."""
+    if any(_row_has_blob_with_peer_name_tokens(cluster) for cluster in strip):
+        return False
     suffix_count = len(_right_tribe_suffix_parts(strip))
     for cluster in strip:
         for item in cluster:

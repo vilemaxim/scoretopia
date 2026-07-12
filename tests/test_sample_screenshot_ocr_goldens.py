@@ -34,6 +34,8 @@ FIXIOOOIAN_SAMPLE = SAMPLES_DIR / "fixioooian_butte-start.png"
 FIXIOOOIAN_GOLDEN = FIXIOOOIAN_SAMPLE.with_suffix(".json")
 LOBBY_SAMPLE = SAMPLES_DIR / "game start error.png"
 LOBBY_GOLDEN = LOBBY_SAMPLE.with_suffix(".json")
+ONGOING_STRAIT_SAMPLE = SAMPLES_DIR / "strait of Uhfixi.png"
+ONGOING_STRAIT_GOLDEN = ONGOING_STRAIT_SAMPLE.with_suffix(".json")
 
 
 def test_discover_golden_pairs_only_includes_matching_json(tmp_path: Path) -> None:
@@ -112,3 +114,19 @@ def test_lobby_strait_in_golden_pairs_when_both_files_present() -> None:
 
     pair_names = {image.name for image, _golden in GOLDEN_PAIRS}
     assert "game start error.png" in pair_names
+
+
+def test_ongoing_strait_in_golden_pairs_when_both_files_present() -> None:
+    """Task 038: Ongoing Strait sample participates in discovery-based goldens.
+
+    Golden locks merge / drop / phone-icon failure modes from production:
+    no ``m1``, no cross-column merges, six humans including ``ombiez8u``.
+    """
+    if not ONGOING_STRAIT_SAMPLE.is_file():
+        pytest.skip("Local Ongoing Strait sample not present")
+    assert ONGOING_STRAIT_GOLDEN.is_file(), (
+        "Missing 'strait of Uhfixi.json' for Ongoing Strait golden pair"
+    )
+
+    pair_names = {image.name for image, _golden in GOLDEN_PAIRS}
+    assert "strait of Uhfixi.png" in pair_names
