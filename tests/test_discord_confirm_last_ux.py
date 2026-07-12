@@ -65,7 +65,13 @@ def _adapter_with_channels(
     reports_channel = reports_channel or MagicMock()
     reports_channel.send = AsyncMock()
     input_channel = input_channel or MagicMock()
-    input_channel.send = AsyncMock()
+    if not isinstance(getattr(input_channel, "send", None), AsyncMock):
+        input_channel.send = AsyncMock()
+    input_channel.id = getattr(input_channel, "id", None) or 100
+    if not isinstance(getattr(input_channel, "fetch_message", None), AsyncMock):
+        diagnosis_message = MagicMock()
+        diagnosis_message.edit = AsyncMock()
+        input_channel.fetch_message = AsyncMock(return_value=diagnosis_message)
     adapter = DiscordBotAdapter(
         config=MagicMock(),
         ingest_service=MagicMock(),
@@ -712,6 +718,8 @@ def _fix_pending_repo(
         "resolved_roster": resolved_roster,
         "fix_resolved_roster_slots": {},
         "slot_confirmations": {"0": True, "1": False},
+        "diagnosis_channel_id": 100,
+        "diagnosis_message_id": 9999,
     }
     correction = MagicMock()
     correction.id = correction_id
@@ -809,13 +817,21 @@ def test_submit_field_correction_updates_staged_parent_extraction() -> None:
 def test_accept_roster_suggestion_resolves_slot_and_updates_name() -> None:
     from scoretopia.discord.views import ParsedCustomId
 
-    adapter = _adapter_with_channels()
+    input_channel = MagicMock()
+    input_channel.id = 100
+    input_channel.send = AsyncMock()
+    diagnosis_message = MagicMock()
+    diagnosis_message.edit = AsyncMock()
+    input_channel.fetch_message = AsyncMock(return_value=diagnosis_message)
+    adapter = _adapter_with_channels(input_channel=input_channel)
     repo = _fix_pending_repo()
     adapter._ingest_service._pending_repo = repo
 
     interaction = MagicMock()
     interaction.user.id = 42
     interaction.response.send_message = AsyncMock()
+    interaction.response.is_done = MagicMock(return_value=False)
+    interaction.followup.send = AsyncMock()
 
     asyncio.run(
         adapter._handle_accept_roster_suggestion(
@@ -831,6 +847,137 @@ def test_accept_roster_suggestion_resolves_slot_and_updates_name() -> None:
     assert parent.payload["extraction"]["players"][1]["name"] == "Robert"
     assert parent.payload["fix_resolved_roster_slots"]["1"] is True
     interaction.response.send_message.assert_awaited()
+    assert (
+        interaction.response.send_message.await_args.args[0]
+        == "Player slot resolved. Continue when ready."
+    )
+    input_channel.fetch_message.assert_awaited_once_with(9999)
+    diagnosis_message.edit.assert_awaited_once()
+    edit_kwargs = diagnosis_message.edit.await_args.kwargs
+    assert "embed" in edit_kwargs
+    assert "view" in edit_kwargs
+    continue_btn = _button_by_label(edit_kwargs["view"], "Continue")
+    assert continue_btn.disabled is False
+
+
+def test_accept_roster_keeps_continue_disabled_when_other_slots_open() -> None:
+    from scoretopia.discord.views import ParsedCustomId
+
+    input_channel = MagicMock()
+    input_channel.id = 100
+    input_channel.send = AsyncMock()
+    diagnosis_message = MagicMock()
+    diagnosis_message.edit = AsyncMock()
+    input_channel.fetch_message = AsyncMock(return_value=diagnosis_message)
+    adapter = _adapter_with_channels(input_channel=input_channel)
+    repo = _fix_pending_repo(
+        extraction={
+            "screenshot_type": "game_basics",
+            "game_name": "Typo Game",
+            "map_size": 12,
+            "terrain": "Drylands",
+            "game_timer": "Blitz",
+            "target_score": 10000,
+            "game_type": "Domination",
+            "players": [
+                {"name": "Alice", "tribe": "Xin-xi", "is_you": True},
+                {"name": "Roberrt", "tribe": "Imperius", "is_you": False},
+                {"name": "ZedUnknown", "tribe": "Bardur", "is_you": False},
+            ],
+        },
+        resolved_roster=_resolved_roster_with_fuzzy_and_new(),
+    )
+    adapter._ingest_service._pending_repo = repo
+
+    interaction = MagicMock()
+    interaction.user.id = 42
+    interaction.response.send_message = AsyncMock()
+    interaction.response.is_done = MagicMock(return_value=False)
+
+    asyncio.run(
+        adapter._handle_accept_roster_suggestion(
+            interaction,
+            ParsedCustomId(
+                action="accept_roster_suggestion",
+                interaction_id=20,
+                player_slot=1,
+            ),
+        )
+    )
+    diagnosis_message.edit.assert_awaited_once()
+    view = diagnosis_message.edit.await_args.kwargs["view"]
+    assert _button_by_label(view, "Continue").disabled is True
+
+
+def test_roster_fix_refresh_failure_sends_distinct_ephemeral() -> None:
+    from scoretopia.discord.adapter import _DIAGNOSIS_PREVIEW_REFRESH_FAILED
+    from scoretopia.discord.views import ParsedCustomId
+
+    adapter = _adapter_with_channels()
+    repo = _fix_pending_repo()
+    parent = repo.get_by_id(10)
+    del parent.payload["diagnosis_message_id"]
+    adapter._ingest_service._pending_repo = repo
+
+    interaction = MagicMock()
+    interaction.user.id = 42
+    interaction.response.send_message = AsyncMock()
+    interaction.response.is_done = MagicMock(return_value=False)
+
+    asyncio.run(
+        adapter._handle_accept_roster_suggestion(
+            interaction,
+            ParsedCustomId(
+                action="accept_roster_suggestion",
+                interaction_id=20,
+                player_slot=1,
+            ),
+        )
+    )
+    parent = repo.get_by_id(10)
+    assert parent.payload["fix_resolved_roster_slots"]["1"] is True
+    interaction.response.send_message.assert_awaited_once_with(
+        _DIAGNOSIS_PREVIEW_REFRESH_FAILED,
+        ephemeral=True,
+    )
+
+
+def test_deliver_ingest_result_persists_diagnosis_message_ids() -> None:
+    from scoretopia.domain.actions import ExtractionNeedsConfirmation, ExtractionPreview
+
+    input_channel = MagicMock()
+    input_channel.id = 100
+    input_channel.send = AsyncMock()
+    input_channel.fetch_message = AsyncMock()
+    adapter = _adapter_with_channels(input_channel=input_channel)
+    repo = _fix_pending_repo()
+    # Fresh delivery should write ids onto an empty parent payload.
+    parent = repo.get_by_id(10)
+    parent.payload.pop("diagnosis_channel_id", None)
+    parent.payload.pop("diagnosis_message_id", None)
+    adapter._ingest_service._pending_repo = repo
+
+    reply = MagicMock()
+    reply.id = 4242
+    reply.channel = MagicMock()
+    reply.channel.id = 100
+    message = MagicMock()
+    message.author.id = 42
+    message.reply = AsyncMock(return_value=reply)
+    message.add_reaction = AsyncMock()
+
+    result = ExtractionNeedsConfirmation(
+        interaction_id=10,
+        preview=ExtractionPreview(
+            screenshot_type="game_basics",
+            game_name="Typo Game",
+        ),
+    )
+    asyncio.run(adapter._deliver_ingest_result(message, result))
+
+    assert parent.payload["diagnosis_channel_id"] == 100
+    assert parent.payload["diagnosis_message_id"] == 4242
+    repo.update_payload.assert_any_call(10, parent.payload)
 
 
 def test_fix_controls_unauthorized_non_uploader_are_acked() -> None:
