@@ -48,6 +48,12 @@ def can_confirm_extraction(
     return uploader_discord_id == actor_discord_id
 
 
+def can_confirm_final_summary(
+    *, uploader_discord_id: str, actor_discord_id: str
+) -> bool:
+    return uploader_discord_id == actor_discord_id
+
+
 def can_confirm_player_link(
     *, selected_discord_user_id: str, actor_discord_id: str
 ) -> bool:
@@ -416,6 +422,32 @@ class ModApprovalView(discord.ui.View):
                 style=discord.ButtonStyle.danger,
                 custom_id=encode_custom_id(
                     "reject_mod_batch",
+                    interaction_id=interaction_id,
+                ),
+            )
+        )
+
+
+class FinalSummaryView(discord.ui.View):
+    def __init__(self, *, interaction_id: int) -> None:
+        super().__init__(timeout=None)
+        self.interaction_id = interaction_id
+        self.add_item(
+            discord.ui.Button(
+                label="Confirm all correct",
+                style=discord.ButtonStyle.success,
+                custom_id=encode_custom_id(
+                    "confirm_final_summary",
+                    interaction_id=interaction_id,
+                ),
+            )
+        )
+        self.add_item(
+            discord.ui.Button(
+                label="Reject — back to correction",
+                style=discord.ButtonStyle.secondary,
+                custom_id=encode_custom_id(
+                    "reject_final_summary",
                     interaction_id=interaction_id,
                 ),
             )

@@ -276,3 +276,46 @@ def build_mod_approval_embed(*, summary: str) -> discord.Embed:
         title="Mod approval needed",
         description=summary,
     )
+
+
+def build_final_summary_embed(summary: object) -> discord.Embed:
+    game_name = getattr(summary, "game_name", None)
+    title = (
+        f"Confirm game summary: {game_name}"
+        if game_name
+        else "Confirm game summary"
+    )
+    fields: list[tuple[str, str]] = []
+    map_size = getattr(summary, "map_size", None)
+    if map_size is not None:
+        fields.append(("Map size", str(map_size)))
+    terrain = getattr(summary, "terrain", None)
+    if terrain:
+        fields.append(("Terrain", str(terrain)))
+    game_timer = getattr(summary, "game_timer", None)
+    if game_timer:
+        fields.append(("Timer", str(game_timer)))
+    target_score = getattr(summary, "target_score", None)
+    if target_score is not None:
+        fields.append(("Target score", f"{target_score:,}"))
+    game_type = getattr(summary, "game_type", None)
+    if game_type:
+        fields.append(("Game type", str(game_type)))
+    roster = getattr(summary, "roster", ()) or ()
+    if roster:
+        fields.append(("Roster", ", ".join(str(name) for name in roster)))
+    winner = getattr(summary, "winner", None)
+    if winner:
+        fields.append(("Winner", str(winner)))
+    scores = getattr(summary, "scores", ()) or ()
+    if scores:
+        score_lines = [
+            f"{name}: {score if score is not None else '—'}" for name, score in scores
+        ]
+        fields.append(("Scores", "\n".join(score_lines)))
+    return build_embed(
+        ReportKind.active_games,
+        title=title,
+        description="Review the committed-ready summary, then confirm.",
+        fields=fields,
+    )

@@ -24,7 +24,6 @@ from scoretopia.domain.games import GameService
 from scoretopia.domain.ingest import IngestService, deserialize_staged_extraction
 from scoretopia.domain.matching import is_bot_name
 from scoretopia.domain.players import PlayerService
-from scoretopia.domain.results import RejectResult
 from scoretopia.domain.win_ratios import WinRatioService
 from scoretopia.screenshot.models import (
     ExtractionResult,
@@ -210,10 +209,18 @@ def _commit_staged(
     *,
     confirmer_discord_id: str,
 ):
-    return ingest_service.commit_staged(
+    from scoretopia.domain.actions import FinalSummaryNeedsConfirmation
+
+    result = ingest_service.commit_staged(
         staged.interaction_id,
         confirmer_discord_id=confirmer_discord_id,
     )
+    if isinstance(result, FinalSummaryNeedsConfirmation):
+        return ingest_service.confirm_final_summary(
+            result.interaction_id,
+            confirmer_discord_id=confirmer_discord_id,
+        )
+    return result
 
 
 def _link_game_basics_humans(
@@ -554,6 +561,8 @@ def _integration_stage_commit(
     player_repo: PlayerRepo | None = None,
     pending_repo: PendingInteractionRepo | None = None,
 ):
+    from scoretopia.domain.actions import FinalSummaryNeedsConfirmation
+
     stored_path = ingest_service.prepare_stored_path(image_path)
     staged = ingest_service.stage_screenshot(
         stored_path,
@@ -567,10 +576,16 @@ def _integration_stage_commit(
             staged,
             uploader_discord_id=uploader_discord_id,
         )
-    return ingest_service.commit_staged(
+    result = ingest_service.commit_staged(
         staged.interaction_id,
         confirmer_discord_id=uploader_discord_id,
     )
+    if isinstance(result, FinalSummaryNeedsConfirmation):
+        return ingest_service.confirm_final_summary(
+            result.interaction_id,
+            confirmer_discord_id=uploader_discord_id,
+        )
+    return result
 
 
 @pytest.mark.skipif(
@@ -973,12 +988,14 @@ def test_commit_staged_game_basics_starts_active_game(
     assert active[0].id == result.game.id
 
 
-def test_reject_staged_resolves_pending_without_active_game(
+def test_reject_staged_opens_field_correction_without_active_game(
     ingest_service: IngestService,
     game_repo: GameRepo,
     pending_repo: PendingInteractionRepo,
     tmp_path: Path,
 ) -> None:
+    from scoretopia.domain.actions import FieldCorrectionNeedsInput
+
     source = tmp_path / "reject_start.png"
     Image.new("RGB", (10, 10), color=(128, 0, 128)).save(source)
     extraction = GameBasicsExtraction(
@@ -1004,13 +1021,14 @@ def test_reject_staged_resolves_pending_without_active_game(
         staged.interaction_id,
         confirmer_discord_id="rejecter-1",
     )
-    assert isinstance(reject_result, RejectResult)
-    assert reject_result.interaction_id == staged.interaction_id
+    assert isinstance(reject_result, FieldCorrectionNeedsInput)
+    assert reject_result.parent_extraction_interaction_id == staged.interaction_id
 
     assert game_repo.list_active() == []
-    resolved = pending_repo.get_by_id(staged.interaction_id)
-    assert resolved is not None
-    assert resolved.status == "resolved"
+    parent = pending_repo.get_by_id(staged.interaction_id)
+    assert parent is not None
+    assert parent.status == "open"
+    assert pending_repo.list_open_by_kind("field_correction")
 
 
 def test_commit_staged_game_end_no_match_includes_roster_diagnostics(

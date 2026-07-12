@@ -22,6 +22,7 @@ from scoretopia.config import ChannelsConfig, ScoretopiaConfig
 from scoretopia.discord.embeds import (
     build_dispute_embed,
     build_extraction_preview_embed,
+    build_final_summary_embed,
     build_game_completed_embed,
     build_game_started_embed,
     build_mod_approval_embed,
@@ -31,6 +32,7 @@ from scoretopia.discord.embeds import (
 from scoretopia.discord.publisher import DiscordReportPublisher, report_to_embed
 from scoretopia.discord.views import (
     ExtractionConfirmView,
+    FinalSummaryView,
     GameEndConfirmView,
     GameEndPickView,
     ModApprovalView,
@@ -42,6 +44,7 @@ from scoretopia.discord.views import (
     WinRatioConfirmView,
     can_approve_mod_batch,
     can_confirm_extraction,
+    can_confirm_final_summary,
     can_confirm_game_end,
     can_confirm_player_link,
     can_confirm_win_ratio,
@@ -50,6 +53,8 @@ from scoretopia.discord.views import (
 )
 from scoretopia.domain.actions import (
     ExtractionNeedsConfirmation,
+    FieldCorrectionNeedsInput,
+    FinalSummaryNeedsConfirmation,
     GameEndNeedsConfirmation,
     GameEndNeedsPick,
     GameEndPendingStart,
@@ -85,12 +90,17 @@ _FAILURE_REACTION = "❌"
 
 ScreenshotUploadResult = IngestResult | ExtractionNeedsConfirmation
 
-_REJECT_EXTRACTION_MESSAGE = "Discarded — upload again if needed."
+_FINAL_SUMMARY_PROMPT = "Please confirm the final game summary."
+_REJECT_EXTRACTION_MESSAGE = (
+    "Extraction rejected — use the field correction controls to fix values, "
+    "or re-upload if this screenshot type is not supported for correction."
+)
 _UNREGISTERED_UPLOADER_MESSAGE = (
     "Please run `/register` first to link your Discord account to a "
     "Polytopia player name before uploading screenshots."
 )
 _PLAYER_LINK_KIND = "confirm_player_link"
+_FINAL_SUMMARY_KIND = "confirm_final_summary"
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +171,10 @@ def plan_ingest_response(
         return ResponsePlan(channel="input", kind="player_link_needs_confirmation")
     if isinstance(result, ModApprovalNeedsConfirmation):
         return ResponsePlan(channel="input", kind="mod_approval_view")
+    if isinstance(result, FieldCorrectionNeedsInput):
+        return ResponsePlan(channel="input", kind="field_correction_view")
+    if isinstance(result, FinalSummaryNeedsConfirmation):
+        return ResponsePlan(channel="input", kind="final_summary_view")
     if isinstance(result, (UnrecognizedScreenshot, IngestError)):
         return ResponsePlan(
             channel="input",
@@ -542,6 +556,12 @@ class DiscordBotAdapter(BotPort):
                 await self._post_mod_approval(result)
                 return
 
+            if plan.kind == "final_summary_view" and isinstance(
+                result, FinalSummaryNeedsConfirmation
+            ):
+                await self._post_final_summary(result)
+                return
+
             if plan.body:
                 await message.reply(plan.body)
         finally:
@@ -566,6 +586,10 @@ class DiscordBotAdapter(BotPort):
             await self._handle_confirm_extraction(interaction, parsed)
         elif parsed.action == "reject_extraction":
             await self._handle_reject_extraction(interaction, parsed)
+        elif parsed.action == "confirm_final_summary":
+            await self._handle_confirm_final_summary(interaction, parsed)
+        elif parsed.action == "reject_final_summary":
+            await self._handle_reject_final_summary(interaction, parsed)
         elif parsed.action == "confirm_player_spelling":
             await self._handle_confirm_player_spelling(interaction, parsed)
         elif parsed.action == "reject_player_spelling":
@@ -745,6 +769,9 @@ class DiscordBotAdapter(BotPort):
         if isinstance(result, PlayerLinkNeedsConfirmation):
             await self._deliver_player_link_spelling_ui(interaction, result)
             return
+        if isinstance(result, FinalSummaryNeedsConfirmation):
+            await self._deliver_final_summary_prompt(interaction, result)
+            return
         await self._deliver_committed_ingest_result(interaction, result)
 
     async def _handle_reject_extraction(
@@ -769,6 +796,106 @@ class DiscordBotAdapter(BotPort):
         await interaction.response.send_message(
             _REJECT_EXTRACTION_MESSAGE,
             ephemeral=True,
+        )
+
+    async def _deliver_final_summary_prompt(
+        self,
+        interaction: discord.Interaction,
+        result: FinalSummaryNeedsConfirmation,
+    ) -> None:
+        await self._post_final_summary(result)
+        if self._response_is_done(interaction):
+            await interaction.followup.send(_FINAL_SUMMARY_PROMPT, ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                _FINAL_SUMMARY_PROMPT,
+                ephemeral=True,
+            )
+
+    async def _handle_confirm_final_summary(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        uploader = self._final_summary_uploader_id(parsed.interaction_id)
+        if uploader is None or not can_confirm_final_summary(
+            uploader_discord_id=uploader,
+            actor_discord_id=str(interaction.user.id),
+        ):
+            await self._reply_unauthorized(interaction)
+            return
+        result = self._ingest_service.confirm_final_summary(
+            parsed.interaction_id,
+            confirmer_discord_id=str(interaction.user.id),
+        )
+        if isinstance(result, StagedIngestNotAuthorized):
+            await self._reply_unauthorized(interaction)
+            return
+        await self._deliver_committed_ingest_result(interaction, result)
+
+    async def _handle_reject_final_summary(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        uploader = self._final_summary_uploader_id(parsed.interaction_id)
+        if uploader is None or not can_confirm_final_summary(
+            uploader_discord_id=uploader,
+            actor_discord_id=str(interaction.user.id),
+        ):
+            await self._reply_unauthorized(interaction)
+            return
+        parent_id = self._final_summary_parent_id(parsed.interaction_id)
+        if parent_id is None:
+            await self._reply_unauthorized(interaction)
+            return
+        pending_repo = getattr(self._ingest_service, "_pending_repo", None)
+        if pending_repo is not None:
+            pending_repo.resolve(parsed.interaction_id)
+        reject_result = self._ingest_service.reject_staged(
+            parent_id,
+            confirmer_discord_id=uploader,
+        )
+        if isinstance(reject_result, StagedIngestNotAuthorized):
+            await self._reply_unauthorized(interaction)
+            return
+        await interaction.response.send_message(
+            _REJECT_EXTRACTION_MESSAGE,
+            ephemeral=True,
+        )
+
+    def _final_summary_uploader_id(self, interaction_id: int) -> str | None:
+        pending_repo = getattr(self._ingest_service, "_pending_repo", None)
+        if pending_repo is None:
+            return None
+        pending = pending_repo.get_by_id(interaction_id)
+        if pending is None or pending.kind != _FINAL_SUMMARY_KIND:
+            return None
+        return pending.discord_user_id
+
+    def _final_summary_parent_id(self, interaction_id: int) -> int | None:
+        pending_repo = getattr(self._ingest_service, "_pending_repo", None)
+        if pending_repo is None:
+            return None
+        pending = pending_repo.get_by_id(interaction_id)
+        if pending is None or pending.kind != _FINAL_SUMMARY_KIND:
+            return None
+        parent_id = pending.payload.get("parent_extraction_interaction_id")
+        return parent_id if isinstance(parent_id, int) else None
+
+    async def _post_final_summary(
+        self,
+        result: FinalSummaryNeedsConfirmation,
+    ) -> None:
+        input_channel = self._channel("input")
+        if input_channel is None:
+            return
+        embed = build_final_summary_embed(result.summary)
+        view = FinalSummaryView(interaction_id=result.interaction_id)
+        await input_channel.send(
+            "Please confirm this game summary before commit.",
+            embed=embed,
+            view=view,
         )
 
     async def _deliver_committed_ingest_result(
@@ -1377,6 +1504,9 @@ class DiscordBotAdapter(BotPort):
                 )
             else:
                 await self._deliver_player_link_spelling_ui(interaction, result)
+            return
+        if isinstance(result, FinalSummaryNeedsConfirmation):
+            await self._deliver_final_summary_prompt(interaction, result)
             return
         await self._deliver_committed_ingest_result(interaction, result)
 

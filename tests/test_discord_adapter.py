@@ -759,7 +759,7 @@ def test_handle_confirm_extraction_routes_to_commit_staged() -> None:
     reports_channel.send.assert_awaited_once()
 
 
-def test_handle_reject_extraction_resolves_without_reports_channel_send() -> None:
+def test_handle_reject_extraction_opens_field_correction_without_reports_send() -> None:
     reports_channel = MagicMock()
     reports_channel.send = AsyncMock()
     adapter = _adapter_with_channels(reports_channel=reports_channel)
@@ -778,10 +778,10 @@ def test_handle_reject_extraction_resolves_without_reports_channel_send() -> Non
         confirmer_discord_id="42",
     )
     reports_channel.send.assert_not_awaited()
-    interaction.response.send_message.assert_awaited_once_with(
-        "Discarded — upload again if needed.",
-        ephemeral=True,
-    )
+    interaction.response.send_message.assert_awaited_once()
+    message = interaction.response.send_message.await_args.args[0]
+    assert "field correction" in message.lower() or "rejected" in message.lower()
+    assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
 
 
 def test_confirm_extraction_unauthorized_user_gets_ephemeral_message() -> None:
@@ -1259,6 +1259,24 @@ def test_adapter_identity_flow_starts_game_after_remote_confirm(
             )
         )
 
+        final_pending = pending_repo.list_open_by_kind("confirm_final_summary")
+        assert len(final_pending) == 1
+        confirm_final = MagicMock()
+        confirm_final.user.id = 100
+        confirm_final.response.send_message = AsyncMock()
+        confirm_final.response.is_done = MagicMock(return_value=False)
+        confirm_final.followup.send = AsyncMock()
+        confirm_final.message = None
+        asyncio.run(
+            adapter._handle_confirm_final_summary(
+                confirm_final,
+                ParsedCustomId(
+                    action="confirm_final_summary",
+                    interaction_id=final_pending[0].id,
+                ),
+            )
+        )
+
         reports_channel.send.assert_awaited_once()
         embed = reports_channel.send.await_args.kwargs["embed"]
         assert embed.title == "Game started: Adapter Identity Game"
@@ -1372,6 +1390,24 @@ def test_adapter_spelling_correction_flow_resumes_commit(
             )
         )
 
+        final_pending = pending_repo.list_open_by_kind("confirm_final_summary")
+        assert len(final_pending) == 1
+        confirm_final = MagicMock()
+        confirm_final.user.id = 100
+        confirm_final.response.send_message = AsyncMock()
+        confirm_final.response.is_done = MagicMock(return_value=False)
+        confirm_final.followup.send = AsyncMock()
+        confirm_final.message = None
+        asyncio.run(
+            adapter._handle_confirm_final_summary(
+                confirm_final,
+                ParsedCustomId(
+                    action="confirm_final_summary",
+                    interaction_id=final_pending[0].id,
+                ),
+            )
+        )
+
         reports_channel.send.assert_awaited_once()
         embed = reports_channel.send.await_args.kwargs["embed"]
         assert embed.title == "Game started: Correction Resume Game"
@@ -1451,3 +1487,93 @@ def test_mod_approval_unauthorized_user_cannot_approve() -> None:
         ephemeral=True,
     )
     adapter._mod_approval_service.approve.assert_not_called()
+
+
+# --- Final summary confirmation (Task 030) ---
+
+
+def _final_summary_needs_confirmation(
+    *,
+    interaction_id: int = 40,
+    parent_id: int = 10,
+    game_name: str = "Final Summary Game",
+) -> object:
+    from scoretopia.domain.actions import (
+        FinalSummaryNeedsConfirmation,
+        FinalSummaryPreview,
+    )
+
+    return FinalSummaryNeedsConfirmation(
+        interaction_id=interaction_id,
+        parent_extraction_interaction_id=parent_id,
+        summary=FinalSummaryPreview(
+            screenshot_type="game_basics",
+            game_name=game_name,
+            map_size=400,
+            terrain="Pangea",
+            game_timer="24 hours",
+            target_score=20000,
+            game_type="Glory",
+            roster=("Alice", "Bob"),
+        ),
+    )
+
+
+def test_plan_ingest_response_routes_final_summary_needs_confirmation() -> None:
+    result = _final_summary_needs_confirmation()
+
+    plan = plan_ingest_response(result)  # type: ignore[arg-type]
+
+    assert plan.channel == "input"
+    assert plan.kind == "final_summary_view"
+
+
+def test_deliver_final_summary_posts_embed_with_confirm_button() -> None:
+    from scoretopia.discord.embeds import build_final_summary_embed
+    from scoretopia.discord.views import FinalSummaryView, encode_custom_id
+
+    input_channel = MagicMock()
+    input_channel.send = AsyncMock()
+    adapter = _adapter_with_channels(input_channel=input_channel)
+    result = _final_summary_needs_confirmation(game_name="Doomed Gods")
+    message = _upload_message()
+
+    asyncio.run(adapter._deliver_ingest_result(message, result))  # type: ignore[arg-type]
+
+    input_channel.send.assert_awaited_once()
+    kwargs = input_channel.send.await_args.kwargs
+    assert "embed" in kwargs
+    assert "view" in kwargs
+    embed = kwargs["embed"]
+    view = kwargs["view"]
+    assert isinstance(view, FinalSummaryView)
+    assert "Doomed Gods" in (embed.title or "") or "Doomed Gods" in (
+        embed.description or ""
+    ) or any("Doomed Gods" in field.value for field in embed.fields)
+    custom_ids = {child.custom_id for child in view.children}
+    assert encode_custom_id("confirm_final_summary", interaction_id=40) in custom_ids
+    assert encode_custom_id("reject_final_summary", interaction_id=40) in custom_ids
+    # Embed builder exists and produces a usable embed for the DTO.
+    rebuilt = build_final_summary_embed(result.summary)  # type: ignore[attr-defined]
+    assert rebuilt.title or rebuilt.description or rebuilt.fields
+
+
+def test_final_summary_unauthorized_user_cannot_confirm() -> None:
+    from scoretopia.discord.views import ParsedCustomId
+
+    adapter = _adapter_with_channels()
+    adapter._final_summary_uploader_id = MagicMock(return_value="111")
+    adapter._ingest_service.confirm_final_summary = MagicMock()
+
+    interaction = MagicMock()
+    interaction.user.id = 222
+    interaction.response.send_message = AsyncMock()
+    parsed = ParsedCustomId(action="confirm_final_summary", interaction_id=40)
+
+    asyncio.run(adapter._handle_confirm_final_summary(interaction, parsed))
+
+    interaction.response.send_message.assert_awaited_once_with(
+        "not your confirmation",
+        ephemeral=True,
+    )
+    adapter._ingest_service.confirm_final_summary.assert_not_called()

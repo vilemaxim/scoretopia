@@ -453,3 +453,31 @@ def test_mod_approval_view_exposes_approve_and_reject_buttons() -> None:
     assert view.timeout is None
     assert encode_custom_id("approve_mod_batch", interaction_id=30) in custom_ids
     assert encode_custom_id("reject_mod_batch", interaction_id=30) in custom_ids
+
+
+def test_final_summary_view_exposes_confirm_and_reject_buttons() -> None:
+    from scoretopia.discord.views import FinalSummaryView, encode_custom_id
+
+    view = FinalSummaryView(interaction_id=40)
+
+    labels = {child.label for child in view.children}
+    custom_ids = {child.custom_id for child in view.children}
+
+    assert "Confirm all correct" in labels
+    assert any("Reject" in label for label in labels)
+    assert view.timeout is None
+    assert encode_custom_id("confirm_final_summary", interaction_id=40) in custom_ids
+    assert encode_custom_id("reject_final_summary", interaction_id=40) in custom_ids
+
+
+def test_can_confirm_final_summary_allows_uploader_only() -> None:
+    from scoretopia.discord.views import can_confirm_final_summary
+
+    assert can_confirm_final_summary(
+        uploader_discord_id="111",
+        actor_discord_id="111",
+    )
+    assert not can_confirm_final_summary(
+        uploader_discord_id="111",
+        actor_discord_id="222",
+    )

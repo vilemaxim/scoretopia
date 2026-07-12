@@ -95,6 +95,36 @@ class ModApprovalNeedsConfirmation:
 
 
 @dataclass(frozen=True)
+class FieldCorrectionNeedsInput:
+    interaction_id: int
+    parent_extraction_interaction_id: int
+    screenshot_type: str
+    action: str = "field_correction_needs_input"
+
+
+@dataclass(frozen=True)
+class FinalSummaryPreview:
+    screenshot_type: str
+    game_name: str | None = None
+    map_size: int | None = None
+    terrain: str | None = None
+    game_timer: str | None = None
+    target_score: int | None = None
+    game_type: str | None = None
+    roster: tuple[str, ...] = ()
+    winner: str | None = None
+    scores: tuple[tuple[str, int | None], ...] = ()
+
+
+@dataclass(frozen=True)
+class FinalSummaryNeedsConfirmation:
+    interaction_id: int
+    parent_extraction_interaction_id: int
+    summary: FinalSummaryPreview
+    action: str = "final_summary_needs_confirmation"
+
+
+@dataclass(frozen=True)
 class UnrecognizedScreenshot:
     message: str
     action: str = "unrecognized_screenshot"
@@ -115,6 +145,8 @@ IngestResult = (
     | WinRatioNeedsConfirmation
     | PlayerLinkNeedsConfirmation
     | ModApprovalNeedsConfirmation
+    | FieldCorrectionNeedsInput
+    | FinalSummaryNeedsConfirmation
     | UnrecognizedScreenshot
     | IngestError
 )
