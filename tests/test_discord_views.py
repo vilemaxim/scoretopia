@@ -125,7 +125,7 @@ def test_can_confirm_extraction_allows_uploader_only() -> None:
     )
 
 
-def test_extraction_confirm_view_exposes_confirm_and_reject_buttons() -> None:
+def test_extraction_confirm_view_exposes_continue_fix_abandon_buttons() -> None:
     from scoretopia.discord.views import ExtractionConfirmView
 
     view = ExtractionConfirmView(
@@ -136,21 +136,22 @@ def test_extraction_confirm_view_exposes_confirm_and_reject_buttons() -> None:
     labels = {child.label for child in view.children}
     custom_ids = {child.custom_id for child in view.children}
 
-    assert labels == {"Confirm", "Reject"}
+    assert labels == {"Continue", "Fix", "Abandon"}
     assert view.timeout is None
-    assert encode_custom_id("confirm_extraction", interaction_id=5) in custom_ids
-    assert encode_custom_id("reject_extraction", interaction_id=5) in custom_ids
+    assert encode_custom_id("continue_review", interaction_id=5) in custom_ids
+    assert encode_custom_id("fix_extraction", interaction_id=5) in custom_ids
+    assert encode_custom_id("abandon_staged", interaction_id=5) in custom_ids
 
 
-def _confirm_button(view: object):
+def _continue_button(view: object):
     for child in getattr(view, "children", []):
-        if getattr(child, "label", None) == "Confirm":
+        if getattr(child, "label", None) == "Continue":
             return child
-    raise AssertionError("Confirm button missing")
+    raise AssertionError("Continue button missing")
 
 
-def test_extraction_confirm_disabled_until_fuzzy_and_new_slots_acknowledged() -> None:
-    """Task 028: Confirm stays disabled until fuzzy/new slots are acknowledged."""
+def test_extraction_continue_disabled_until_fuzzy_and_new_slots_fix_resolved() -> None:
+    """Task 034: Continue stays disabled until fuzzy/new slots are Fix-resolved."""
     from scoretopia.discord.views import ExtractionConfirmView
 
     resolved_roster = [
@@ -178,21 +179,21 @@ def test_extraction_confirm_disabled_until_fuzzy_and_new_slots_acknowledged() ->
         interaction_id=5,
         uploader_discord_id="111",
         resolved_roster=resolved_roster,
-        slot_confirmations={0: True},
+        fix_resolved_roster_slots={0: True},
     )
-    assert _confirm_button(pending_view).disabled is True
+    assert _continue_button(pending_view).disabled is True
 
     ready_view = ExtractionConfirmView(
         interaction_id=5,
         uploader_discord_id="111",
         resolved_roster=resolved_roster,
-        slot_confirmations={0: True, 1: True, 2: True},
+        fix_resolved_roster_slots={0: True, 1: True, 2: True},
     )
-    assert _confirm_button(ready_view).disabled is False
+    assert _continue_button(ready_view).disabled is False
 
 
-def test_extraction_confirm_enabled_when_all_slots_exact() -> None:
-    """Task 028: exact matches are auto-confirmed, so Confirm starts enabled."""
+def test_extraction_continue_enabled_when_all_slots_exact() -> None:
+    """Task 034: exact matches need no Fix, so Continue starts enabled."""
     from scoretopia.discord.views import ExtractionConfirmView
 
     resolved_roster = [
@@ -214,9 +215,9 @@ def test_extraction_confirm_enabled_when_all_slots_exact() -> None:
         interaction_id=6,
         uploader_discord_id="111",
         resolved_roster=resolved_roster,
-        slot_confirmations={0: True, 1: True},
+        fix_resolved_roster_slots={0: True, 1: True},
     )
-    assert _confirm_button(view).disabled is False
+    assert _continue_button(view).disabled is False
 
 
 def _require_player_link_views():
@@ -455,7 +456,7 @@ def test_mod_approval_view_exposes_approve_and_reject_buttons() -> None:
     assert encode_custom_id("reject_mod_batch", interaction_id=30) in custom_ids
 
 
-def test_final_summary_view_exposes_confirm_and_reject_buttons() -> None:
+def test_final_summary_view_exposes_confirm_fix_abandon_buttons() -> None:
     from scoretopia.discord.views import FinalSummaryView, encode_custom_id
 
     view = FinalSummaryView(interaction_id=40)
@@ -463,11 +464,11 @@ def test_final_summary_view_exposes_confirm_and_reject_buttons() -> None:
     labels = {child.label for child in view.children}
     custom_ids = {child.custom_id for child in view.children}
 
-    assert "Confirm all correct" in labels
-    assert any("Reject" in label for label in labels)
+    assert labels == {"Confirm", "Fix", "Abandon"}
     assert view.timeout is None
     assert encode_custom_id("confirm_final_summary", interaction_id=40) in custom_ids
-    assert encode_custom_id("reject_final_summary", interaction_id=40) in custom_ids
+    assert encode_custom_id("fix_final_summary", interaction_id=40) in custom_ids
+    assert encode_custom_id("abandon_final_summary", interaction_id=40) in custom_ids
 
 
 def test_can_confirm_final_summary_allows_uploader_only() -> None:

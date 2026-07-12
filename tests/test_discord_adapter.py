@@ -778,24 +778,31 @@ def test_handle_reject_extraction_opens_field_correction_without_reports_send() 
     reports_channel.send = AsyncMock()
     adapter = _adapter_with_channels(reports_channel=reports_channel)
     adapter._staged_uploader_id = MagicMock(return_value="42")
-    adapter._ingest_service.reject_staged.return_value = MagicMock()
+    from scoretopia.domain.actions import FieldCorrectionNeedsInput
+
+    adapter._ingest_service.open_fix.return_value = FieldCorrectionNeedsInput(
+        interaction_id=20,
+        parent_extraction_interaction_id=10,
+        screenshot_type="game_basics",
+    )
 
     interaction = MagicMock()
     interaction.user.id = 42
     interaction.response.send_message = AsyncMock()
+    interaction.response.is_done = MagicMock(return_value=False)
     parsed = ParsedCustomId(action="reject_extraction", interaction_id=10)
 
     asyncio.run(adapter._handle_reject_extraction(interaction, parsed))
 
-    adapter._ingest_service.reject_staged.assert_called_once_with(
+    adapter._ingest_service.open_fix.assert_called_once_with(
         10,
         confirmer_discord_id="42",
     )
     reports_channel.send.assert_not_awaited()
     interaction.response.send_message.assert_awaited_once()
-    message = interaction.response.send_message.await_args.args[0]
-    assert "field correction" in message.lower() or "rejected" in message.lower()
-    assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
+    kwargs = interaction.response.send_message.await_args.kwargs
+    assert "view" in kwargs
+    assert len(kwargs["view"].children) >= 1
 
 
 def test_confirm_extraction_unauthorized_user_gets_ephemeral_message() -> None:
@@ -1568,7 +1575,8 @@ def test_deliver_final_summary_posts_embed_with_confirm_button() -> None:
     ) or any("Doomed Gods" in field.value for field in embed.fields)
     custom_ids = {child.custom_id for child in view.children}
     assert encode_custom_id("confirm_final_summary", interaction_id=40) in custom_ids
-    assert encode_custom_id("reject_final_summary", interaction_id=40) in custom_ids
+    assert encode_custom_id("fix_final_summary", interaction_id=40) in custom_ids
+    assert encode_custom_id("abandon_final_summary", interaction_id=40) in custom_ids
     # Embed builder exists and produces a usable embed for the DTO.
     rebuilt = build_final_summary_embed(result.summary)  # type: ignore[attr-defined]
     assert rebuilt.title or rebuilt.description or rebuilt.fields
