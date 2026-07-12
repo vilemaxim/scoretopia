@@ -17,6 +17,18 @@ database:
 inbox:
   path: data/inbox
 
+# Trusted Discord users who may approve sensitive ingest corrections immediately
+# or Approve/Reject non-mod correction batches. Empty list = no mod bypass
+# (every sensitive action queues mod_approval).
+bot_mods:
+  discord_user_ids:
+    - "123456789012345678"
+
+# Training artifact export directory (written on successful ingest commit).
+# Default: data/training (relative to this file). Parsed here for forward compat.
+training:
+  path: data/training
+
 # Scheduled reports. Each entry must use a known report name.
 # channel references a key under channels (input or reports), not the name.
 reports:

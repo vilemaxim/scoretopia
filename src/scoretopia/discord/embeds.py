@@ -268,3 +268,11 @@ def build_player_remote_confirm_embed(polytopia_name: str) -> discord.Embed:
             f"Please confirm that you are **{polytopia_name}** in this game."
         ),
     )
+
+
+def build_mod_approval_embed(*, summary: str) -> discord.Embed:
+    return build_embed(
+        ReportKind.dispute,
+        title="Mod approval needed",
+        description=summary,
+    )

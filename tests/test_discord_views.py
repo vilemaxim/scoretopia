@@ -426,3 +426,30 @@ def test_player_correction_pick_view_select_custom_id_and_option_values() -> Non
     )
     assert [option.label for option in select.options] == ["Alice", "Bob"]
     assert [option.value for option in select.options] == ["10", "20"]
+
+
+def test_can_approve_mod_batch_allows_bot_mods_only() -> None:
+    from scoretopia.discord.views import can_approve_mod_batch
+
+    assert can_approve_mod_batch(
+        bot_mod_discord_ids=("111", "222"),
+        actor_discord_id="111",
+    )
+    assert not can_approve_mod_batch(
+        bot_mod_discord_ids=("111", "222"),
+        actor_discord_id="333",
+    )
+
+
+def test_mod_approval_view_exposes_approve_and_reject_buttons() -> None:
+    from scoretopia.discord.views import ModApprovalView, encode_custom_id
+
+    view = ModApprovalView(interaction_id=30)
+
+    labels = {child.label for child in view.children}
+    custom_ids = {child.custom_id for child in view.children}
+
+    assert labels == {"Approve", "Reject"}
+    assert view.timeout is None
+    assert encode_custom_id("approve_mod_batch", interaction_id=30) in custom_ids
+    assert encode_custom_id("reject_mod_batch", interaction_id=30) in custom_ids

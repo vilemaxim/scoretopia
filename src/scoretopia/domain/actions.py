@@ -87,6 +87,14 @@ class PlayerLinkNeedsConfirmation:
 
 
 @dataclass(frozen=True)
+class ModApprovalNeedsConfirmation:
+    interaction_id: int
+    parent_extraction_interaction_id: int
+    summary: str
+    action: str = "mod_approval_needs_confirmation"
+
+
+@dataclass(frozen=True)
 class UnrecognizedScreenshot:
     message: str
     action: str = "unrecognized_screenshot"
@@ -106,6 +114,7 @@ IngestResult = (
     | GameEndPendingStart
     | WinRatioNeedsConfirmation
     | PlayerLinkNeedsConfirmation
+    | ModApprovalNeedsConfirmation
     | UnrecognizedScreenshot
     | IngestError
 )

@@ -13,6 +13,7 @@ CHANNEL_KEYS = frozenset({"input", "reports"})
 DEFAULT_CONFIG_PATH = Path("config/scoretopia.yaml")
 DEFAULT_DATABASE_PATH = Path("data/scoretopia.db")
 DEFAULT_INBOX_PATH = Path("data/inbox")
+DEFAULT_TRAINING_PATH = Path("data/training")
 
 
 class ConfigError(ValueError):
@@ -36,6 +37,22 @@ class InboxConfig:
 
 
 @dataclass(frozen=True)
+class BotModsConfig:
+    """Trusted Discord users who may approve sensitive ingest corrections.
+
+    An empty ``discord_user_ids`` list means no mod bypass: every sensitive
+    action queues ``mod_approval`` (there is no user who can skip the queue).
+    """
+
+    discord_user_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class TrainingConfig:
+    path: Path
+
+
+@dataclass(frozen=True)
 class ReportConfig:
     enabled: bool
     schedule: str
@@ -49,13 +66,27 @@ class ScoretopiaConfig:
     database: DatabaseConfig
     inbox: InboxConfig
     reports: dict[str, ReportConfig]
+    bot_mods: BotModsConfig = BotModsConfig(discord_user_ids=())
+    training: TrainingConfig = TrainingConfig(path=DEFAULT_TRAINING_PATH)
+
+
+def is_bot_mod(discord_user_id: str, config: object) -> bool:
+    """Return True if ``discord_user_id`` is listed under ``bot_mods``.
+
+    ``config`` must expose ``bot_mods.discord_user_ids`` (typically
+    :class:`ScoretopiaConfig`). An empty list means no mod bypass.
+    """
+    bot_mods = getattr(config, "bot_mods", None)
+    user_ids = getattr(bot_mods, "discord_user_ids", ()) or ()
+    return discord_user_id in user_ids
 
 
 def load_config(path: Path | None = None) -> ScoretopiaConfig:
     """Load and validate Scoretopia YAML configuration.
 
-    Relative paths in ``database.path`` and ``inbox.path`` resolve against the
-    directory containing the config file (not the process working directory).
+    Relative paths in ``database.path``, ``inbox.path``, and ``training.path``
+    resolve against the directory containing the config file (not the process
+    working directory).
     """
     config_path = Path(path) if path is not None else DEFAULT_CONFIG_PATH
     if not config_path.is_file():
@@ -98,12 +129,46 @@ def _parse_config(raw: dict[str, Any], base_dir: Path) -> ScoretopiaConfig:
     reports_raw = _require_mapping(raw, "reports")
     reports = _parse_reports(reports_raw, channels_raw)
 
+    bot_mods = _parse_bot_mods(raw.get("bot_mods"))
+    training = _parse_training(raw.get("training"), base_dir)
+
     return ScoretopiaConfig(
         channels=channels,
         database=DatabaseConfig(path=database_path),
         inbox=InboxConfig(path=inbox_path),
         reports=reports,
+        bot_mods=bot_mods,
+        training=training,
     )
+
+
+def _parse_bot_mods(raw: Any) -> BotModsConfig:
+    if raw is None:
+        return BotModsConfig(discord_user_ids=())
+    if not isinstance(raw, dict):
+        raise ConfigError("bot_mods must be a mapping")
+    user_ids_raw = raw.get("discord_user_ids", [])
+    if user_ids_raw is None:
+        user_ids_raw = []
+    if not isinstance(user_ids_raw, list):
+        raise ConfigError("bot_mods.discord_user_ids must be a list")
+    parsed: list[str] = []
+    for entry in user_ids_raw:
+        if not isinstance(entry, str) or not entry or not entry.isdigit():
+            raise ConfigError(
+                "bot_mods.discord_user_ids must be non-empty digit strings"
+            )
+        parsed.append(entry)
+    return BotModsConfig(discord_user_ids=tuple(parsed))
+
+
+def _parse_training(raw: Any, base_dir: Path) -> TrainingConfig:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ConfigError("training must be a mapping")
+    path_value = raw.get("path", DEFAULT_TRAINING_PATH)
+    return TrainingConfig(path=_resolve_path(base_dir, path_value))
 
 
 def _parse_reports(
