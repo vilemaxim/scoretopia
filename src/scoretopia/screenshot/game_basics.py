@@ -23,9 +23,14 @@ _PLAYER_REGION_Y = (1200, 1750)
 _PLAYER_ROW_TOLERANCE = 25.0
 _PLAYER_STRIP_Y_GAP = 70.0
 _X_ALIGN_TOLERANCE = 80.0
+# Same-row OCR tokens farther apart than this are distinct players, not one name.
+_SAME_ROW_MERGE_X_GAP = 100.0
+# When EasyOCR merges adjacent names into one box, spread part x for column align.
+_BLOB_PART_X_SPREAD = 120.0
 _LEFT_COLUMN_X_MAX = 320.0
 _ROSTER_MIN_NAMES = 3
 _UI_LABELS = frozenset({"back", "open", "start game", "add", "start", "game"})
+_PAIRABLE_SUFFIX_TOKENS = frozenset({"u", "ml", "m1", "ru", "r8"})
 _SKIP_GAME_NAME_TITLES = frozenset(
     {
         "ongoing",
@@ -308,28 +313,70 @@ def _is_noise_token(text: str) -> bool:
     return len(cleaned) < 2
 
 
+def _is_pairable_suffix_token(text: str) -> bool:
+    """Short OCR chips that complete a name across rows (not standalone players)."""
+    cleaned = text.strip().lower()
+    if cleaned in _PAIRABLE_SUFFIX_TOKENS:
+        return True
+    return len(cleaned) <= 2 and cleaned.isalpha()
+
+
+def _stem_without_checkbox(text: str) -> str:
+    """Drop trailing OCR checkbox/status `` 0`` before affinity checks."""
+    return re.sub(r"\s+0$", "", text).strip() or text
+
+
+def _split_name_affinity(left: str, right: str) -> int:
+    """Affinity score for known vertically/horizontally split name pairs."""
+    if not left or not right:
+        return 0
+    left_stem = _stem_without_checkbox(left)
+    left_lower = left_stem.lower()
+    right_lower = right.lower()
+    score = 0
+    if left_lower.endswith("maxi") and right_lower in {"ml", "m1"}:
+        score += 100
+    if "mou" in left_lower and right_lower.startswith("se"):
+        score += 100
+    if left_lower.endswith("rib") and right_lower.startswith("onucleic"):
+        score += 100
+    if left_lower.endswith("z4") and right_lower in {"ru", "r8"}:
+        score += 100
+    if left_lower.endswith(("z8", "z80")) and right_lower == "u":
+        score += 100
+    if _is_pairable_suffix_token(right) and re.search(r"[A-Za-z]\d+$", left_stem):
+        score += 100
+    return score
+
+
 def _normalize_player_name(fragment: str) -> str:
     cleaned = _strip_crazy_bots(fragment)
     cleaned = re.sub(r"[\[\]]", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    # Checkbox / status glyph OCR often inserts " 0" before a name continuation.
+    cleaned = re.sub(r"\s+0(?=[A-Za-z])", "", cleaned)
+    cleaned = re.sub(r"\s+0$", "", cleaned)
     if cleaned.startswith("Q") and len(cleaned) > 1:
         cleaned = "Z" + cleaned[1:]
     cleaned = re.sub(r"^0+(?=[A-Za-z])", "", cleaned)
     cleaned = re.sub(r"0(?=[a-z])", "o", cleaned)
     cleaned = re.sub(r"^D\s+(?=[a-z])", "", cleaned, flags=re.IGNORECASE)
+    # Leading D glued onto a capitalized stem (OCR prefix junk).
+    cleaned = re.sub(r"^D(?=[A-Z])", "", cleaned)
+    cleaned = re.sub(r"(?i)mouseo1$", "mouse01", cleaned)
     cleaned = re.sub(r"5o$", "50", cleaned)
     cleaned = re.sub(r"Z80u$", "Z8u", cleaned)
     cleaned = re.sub(r"Z80$", "Z8u", cleaned)
     cleaned = re.sub(r"1o7$", "107", cleaned)
     cleaned = re.sub(r"loz$", "107", cleaned)
-    return _normalize_ocr_name(cleaned)
+    cleaned = _normalize_ocr_name(cleaned)
+    if cleaned.endswith("ml"):
+        cleaned = cleaned[:-2] + "m1"
+    return cleaned
 
 
 def _normalize_menu_roster_combined(combined: str) -> str:
-    normalized = _normalize_player_name(combined)
-    if normalized.endswith("ml"):
-        return normalized[:-2] + "m1"
-    return normalized
+    return _normalize_player_name(combined)
 
 
 def _split_name_blob(text: str) -> list[str]:
@@ -339,34 +386,39 @@ def _split_name_blob(text: str) -> list[str]:
     return [
         part.strip()
         for part in parts
-        if part.strip() and not _is_noise_token(part)
+        if part.strip()
+        and (not _is_noise_token(part) or _is_pairable_suffix_token(part))
     ]
 
 
 def _should_concat_fragments(left: str, right: str) -> bool:
     if not left or not right:
         return False
-    left_lower = left.lower()
+    left_stem = _stem_without_checkbox(left)
     right_lower = right.lower()
-    if left_lower.endswith("maxi") and right_lower in {"ml", "m1"}:
+    # Digit-prefixed capital stem is a new player name, not a numeric suffix.
+    if re.match(r"^\d+[A-Za-z]", right):
+        return False
+    if _split_name_affinity(left_stem, right) > 0:
         return True
-    if "mou" in left_lower and right_lower.startswith("se"):
+    if re.search(r"[A-Za-z]\d$", left_stem) and right[0].isupper() and len(right) <= 3:
         return True
-    if left_lower.endswith("rib") and right_lower.startswith("onucleic"):
-        return True
-    if re.search(r"[A-Za-z]\d$", left) and right[0].isupper() and len(right) <= 3:
-        return True
-    if re.search(r"\d$", left) and right_lower.islower():
+    if re.search(r"\d$", left_stem) and right_lower.islower():
         return False
     if right.islower():
         return True
-    if left[-1].isalpha() and right[0].isdigit():
+    if left_stem[-1].isalpha() and right[0].isdigit():
         return True
-    if left[-1].isdigit() and right[0].isalpha():
+    if left_stem[-1].isdigit() and right[0].isalpha():
         return True
     if len(right) <= 3 and right.isalnum() and right[0].islower():
         return True
     return False
+
+
+def _is_high_affinity_concat(left: str, right: str) -> bool:
+    """True for known split-name pairs that may sit farther apart on one OCR row."""
+    return _split_name_affinity(left, right) > 0
 
 
 def _fragments_from_row_cluster(
@@ -381,11 +433,21 @@ def _fragments_from_row_cluster(
         if _is_ui_label(item.text):
             continue
         parts = _split_name_blob(item.text)
+        if not parts and _is_pairable_suffix_token(item.text):
+            parts = [item.text.strip()]
         standalone = len(parts) > 1
-        for part in parts:
-            if _is_ui_label(part) or _is_noise_token(part):
+        for part_idx, part in enumerate(parts):
+            if _is_ui_label(part):
                 continue
-            fragments.append((part, item.x, standalone, (row_idx, item.x)))
+            if _is_noise_token(part) and not _is_pairable_suffix_token(part):
+                continue
+            if len(parts) == 1:
+                part_x = item.x
+            else:
+                # Spread merged-box parts so each can x-align with its tribe row.
+                offset = (part_idx - (len(parts) - 1) / 2) * _BLOB_PART_X_SPREAD
+                part_x = item.x + offset
+            fragments.append((part, part_x, standalone, (row_idx, part_x)))
     return fragments
 
 
@@ -410,7 +472,10 @@ def _merge_row_fragments(
             current_frag = frag
             current_x = x_pos
             current_source = source
-        elif _should_concat_fragments(current_frag, frag):
+        elif _should_concat_fragments(current_frag, frag) and (
+            _is_high_affinity_concat(current_frag, frag)
+            or abs(x_pos - current_x) <= _SAME_ROW_MERGE_X_GAP
+        ):
             current_frag = current_frag + frag
         else:
             grouped.append((current_frag, current_x, current_source))
@@ -429,17 +494,7 @@ def _orphan_pair_score(
     left_name, left_x, _ = left
     right_name, right_x, _ = right
     distance = abs(left_x - right_x)
-    affinity = 0
-    left_lower = left_name.lower()
-    right_lower = right_name.lower()
-    if left_lower.endswith("maxi") and right_lower in {"ml", "m1"}:
-        affinity += 100
-    if "mou" in left_lower and right_lower.startswith("se"):
-        affinity += 100
-    if left_lower.endswith("rib") and right_lower.startswith("onucleic"):
-        affinity += 100
-    if left_lower.endswith("z4") and right_lower.lower() in {"ru", "r8"}:
-        affinity += 100
+    affinity = _split_name_affinity(left_name, right_name)
     return (distance - affinity, distance)
 
 
@@ -540,10 +595,15 @@ def _pair_fragments_across_rows(
 
 def _looks_like_menu_roster_strip(strip: list[list[OCRLine]]) -> bool:
     """True when a right-column OCR blob contains multiple player names (menu list)."""
+    suffix_count = len(_right_tribe_suffix_parts(strip))
     for cluster in strip:
         for item in cluster:
             if item.x > _LEFT_COLUMN_X_MAX:
-                if len(_split_name_blob(item.text)) >= _ROSTER_MIN_NAMES:
+                part_count = len(_split_name_blob(item.text))
+                if part_count >= _ROSTER_MIN_NAMES:
+                    return True
+                # Two humans + tribe-row chips (Doomed Gods / dense lobby style).
+                if part_count >= 2 and suffix_count >= 2:
                     return True
     return False
 
@@ -584,14 +644,15 @@ def _merge_left_column_name(fragments: list[tuple[float, str]]) -> str | None:
 
 
 def _right_roster_name_parts(strip: list[list[OCRLine]]) -> list[str]:
+    best: list[str] = []
     for cluster in strip:
         for item in cluster:
             if item.x <= _LEFT_COLUMN_X_MAX:
                 continue
             parts = _split_name_blob(item.text)
-            if len(parts) >= _ROSTER_MIN_NAMES:
-                return parts
-    return []
+            if len(parts) >= 2 and len(parts) > len(best):
+                best = parts
+    return best
 
 
 def _prepare_roster_name_part(part: str) -> str:
@@ -609,8 +670,7 @@ def _right_tribe_suffix_parts(strip: list[list[OCRLine]]) -> list[str]:
     tokens: list[tuple[float, str]] = []
     for cluster in strip:
         if any(
-            item.x > _LEFT_COLUMN_X_MAX
-            and len(_split_name_blob(item.text)) >= _ROSTER_MIN_NAMES
+            item.x > _LEFT_COLUMN_X_MAX and len(_split_name_blob(item.text)) >= 2
             for item in cluster
         ):
             continue
@@ -640,7 +700,7 @@ def _combine_roster_name_and_suffix(name: str, suffix: str) -> str:
     name = _prepare_roster_name_part(name)
     if not suffix:
         return _normalize_player_name(name)
-    if re.fullmatch(r"seO", suffix, re.IGNORECASE):
+    if re.fullmatch(r"seO1?", suffix, re.IGNORECASE):
         base = re.sub(r"0$", "", name)
         if re.search(r"(?i)mou$", base):
             combined = re.sub(r"(?i)mou$", "mouse01", base)
