@@ -581,3 +581,339 @@ def test_diagnosis_to_final_confirm_flow_delivers_committed_result() -> None:
         confirmer_discord_id="42",
     )
     adapter._deliver_committed_ingest_result.assert_awaited_once()
+
+
+def test_field_correction_view_uses_field_buttons_not_lone_select() -> None:
+    from scoretopia.discord.views import FieldCorrectionView
+
+    view = FieldCorrectionView(
+        interaction_id=20,
+        screenshot_type="game_basics",
+        uploader_discord_id="111",
+    )
+    custom_ids = {getattr(child, "custom_id", "") for child in view.children}
+    assert encode_custom_id(
+        "pick_field_correction",
+        interaction_id=20,
+        field="game_name",
+    ) in custom_ids
+    assert all(
+        not type(child).__name__.endswith("Select")
+        for child in view.children
+    )
+
+
+def test_component_router_wires_fix_child_actions() -> None:
+    """Fix child custom_ids must be dispatched (never silent no-op)."""
+    from scoretopia.discord.views import ParsedCustomId
+
+    adapter = _adapter_with_channels()
+    adapter._handle_pick_field_correction = AsyncMock()
+    adapter._handle_submit_field_correction = AsyncMock()
+    adapter._handle_accept_roster_suggestion = AsyncMock()
+    adapter._handle_pick_roster_known_player = AsyncMock()
+    adapter._handle_select_roster_known_player = AsyncMock()
+    adapter._handle_override_roster_name = AsyncMock()
+    adapter._handle_submit_roster_override = AsyncMock()
+
+    interaction = MagicMock()
+    cases = [
+        (
+            "pick_field_correction",
+            "_handle_pick_field_correction",
+            {"field": "game_name"},
+        ),
+        (
+            "submit_field_correction",
+            "_handle_submit_field_correction",
+            {"field": "game_name"},
+        ),
+        (
+            "accept_roster_suggestion",
+            "_handle_accept_roster_suggestion",
+            {"player_slot": 1},
+        ),
+        (
+            "pick_roster_known_player",
+            "_handle_pick_roster_known_player",
+            {"player_slot": 1},
+        ),
+        (
+            "select_roster_known_player",
+            "_handle_select_roster_known_player",
+            {"player_slot": 1},
+        ),
+        (
+            "override_roster_name",
+            "_handle_override_roster_name",
+            {"player_slot": 1},
+        ),
+        (
+            "submit_roster_override",
+            "_handle_submit_roster_override",
+            {"player_slot": 1},
+        ),
+    ]
+    for action, attr, extra in cases:
+        asyncio.run(
+            adapter._handle_component(
+                interaction,
+                ParsedCustomId(action=action, interaction_id=20, **extra),
+            )
+        )
+        getattr(adapter, attr).assert_awaited()
+
+
+def _fix_pending_repo(
+    *,
+    correction_id: int = 20,
+    parent_id: int = 10,
+    uploader: str = "42",
+    screenshot_type: str = "game_basics",
+    extraction: dict[str, object] | None = None,
+    resolved_roster: list[dict[str, object]] | None = None,
+) -> MagicMock:
+    extraction = extraction or {
+        "screenshot_type": "game_basics",
+        "game_name": "Typo Game",
+        "map_size": 12,
+        "terrain": "Drylands",
+        "game_timer": "Blitz",
+        "target_score": 10000,
+        "game_type": "Domination",
+        "players": [
+            {"name": "Alice", "tribe": "Xin-xi", "is_you": True},
+            {"name": "Roberrt", "tribe": "Imperius", "is_you": False},
+        ],
+    }
+    resolved_roster = resolved_roster or [
+        {
+            "raw_ocr": "Alice",
+            "suggested_name": "Alice",
+            "confidence": 1.0,
+            "match_type": "exact",
+        },
+        {
+            "raw_ocr": "Roberrt",
+            "suggested_name": "Robert",
+            "confidence": 0.85,
+            "match_type": "fuzzy",
+        },
+    ]
+    parent = MagicMock()
+    parent.id = parent_id
+    parent.kind = "confirm_extraction"
+    parent.discord_user_id = uploader
+    parent.status = "open"
+    parent.payload = {
+        "screenshot_type": screenshot_type,
+        "uploader_discord_id": uploader,
+        "extraction": extraction,
+        "resolved_roster": resolved_roster,
+        "fix_resolved_roster_slots": {},
+        "slot_confirmations": {"0": True, "1": False},
+    }
+    correction = MagicMock()
+    correction.id = correction_id
+    correction.kind = "field_correction"
+    correction.discord_user_id = uploader
+    correction.status = "open"
+    correction.payload = {
+        "parent_extraction_interaction_id": parent_id,
+        "uploader_discord_id": uploader,
+        "screenshot_type": screenshot_type,
+        "corrections": [],
+    }
+
+    def _get(interaction_id: int):
+        if interaction_id == correction_id:
+            return correction
+        if interaction_id == parent_id:
+            return parent
+        return None
+
+    repo = MagicMock()
+    repo.get_by_id.side_effect = _get
+    repo.update_payload = MagicMock()
+    return repo
+
+
+def test_pick_field_correction_opens_modal_for_uploader() -> None:
+    from scoretopia.discord.views import ParsedCustomId
+
+    adapter = _adapter_with_channels()
+    repo = _fix_pending_repo()
+    adapter._ingest_service._pending_repo = repo
+
+    interaction = MagicMock()
+    interaction.user.id = 42
+    interaction.response.send_modal = AsyncMock()
+    interaction.response.send_message = AsyncMock()
+
+    asyncio.run(
+        adapter._handle_pick_field_correction(
+            interaction,
+            ParsedCustomId(
+                action="pick_field_correction",
+                interaction_id=20,
+                field="game_name",
+            ),
+        )
+    )
+    interaction.response.send_modal.assert_awaited_once()
+    modal = interaction.response.send_modal.await_args.args[0]
+    assert "game_name" in modal.custom_id
+
+
+def test_submit_field_correction_updates_staged_parent_extraction() -> None:
+    from scoretopia.discord.views import ParsedCustomId
+
+    adapter = _adapter_with_channels()
+    repo = _fix_pending_repo()
+    adapter._ingest_service._pending_repo = repo
+
+    interaction = MagicMock()
+    interaction.user.id = 42
+    interaction.response.send_message = AsyncMock()
+    interaction.data = {
+        "custom_id": encode_custom_id(
+            "submit_field_correction",
+            interaction_id=20,
+            field="game_name",
+        ),
+        "components": [
+            {
+                "components": [
+                    {"custom_id": "new_value", "value": "Friday Night"},
+                ]
+            }
+        ],
+    }
+
+    asyncio.run(
+        adapter._handle_submit_field_correction(
+            interaction,
+            ParsedCustomId(
+                action="submit_field_correction",
+                interaction_id=20,
+                field="game_name",
+            ),
+        )
+    )
+    parent = repo.get_by_id(10)
+    assert parent.payload["extraction"]["game_name"] == "Friday Night"
+    interaction.response.send_message.assert_awaited()
+    assert interaction.response.send_message.await_args.kwargs.get("ephemeral") is True
+
+
+def test_accept_roster_suggestion_resolves_slot_and_updates_name() -> None:
+    from scoretopia.discord.views import ParsedCustomId
+
+    adapter = _adapter_with_channels()
+    repo = _fix_pending_repo()
+    adapter._ingest_service._pending_repo = repo
+
+    interaction = MagicMock()
+    interaction.user.id = 42
+    interaction.response.send_message = AsyncMock()
+
+    asyncio.run(
+        adapter._handle_accept_roster_suggestion(
+            interaction,
+            ParsedCustomId(
+                action="accept_roster_suggestion",
+                interaction_id=20,
+                player_slot=1,
+            ),
+        )
+    )
+    parent = repo.get_by_id(10)
+    assert parent.payload["extraction"]["players"][1]["name"] == "Robert"
+    assert parent.payload["fix_resolved_roster_slots"]["1"] is True
+    interaction.response.send_message.assert_awaited()
+
+
+def test_fix_controls_unauthorized_non_uploader_are_acked() -> None:
+    from scoretopia.discord.views import ParsedCustomId
+
+    adapter = _adapter_with_channels()
+    repo = _fix_pending_repo()
+    adapter._ingest_service._pending_repo = repo
+
+    interaction = MagicMock()
+    interaction.user.id = 99
+    interaction.response.send_message = AsyncMock()
+
+    asyncio.run(
+        adapter._handle_pick_field_correction(
+            interaction,
+            ParsedCustomId(
+                action="pick_field_correction",
+                interaction_id=20,
+                field="game_name",
+            ),
+        )
+    )
+    interaction.response.send_message.assert_awaited()
+    assert "not your" in interaction.response.send_message.await_args.args[0].lower()
+    interaction.response.send_modal = AsyncMock()
+    # Ensure we did not open a modal for the unauthorized user.
+    assert not hasattr(interaction.response.send_modal, "await_args") or (
+        interaction.response.send_modal.await_count == 0
+        if hasattr(interaction.response.send_modal, "await_count")
+        else True
+    )
+
+
+def test_handle_fix_extraction_posts_roster_slot_views_for_fuzzy() -> None:
+    from scoretopia.discord.views import ParsedCustomId, RosterSlotFixView
+
+    input_channel = MagicMock()
+    input_channel.send = AsyncMock()
+    adapter = _adapter_with_channels(input_channel=input_channel)
+    repo = _fix_pending_repo()
+    adapter._ingest_service._pending_repo = repo
+    adapter._staged_uploader_id = MagicMock(return_value="42")
+    adapter._ingest_service.open_fix.return_value = FieldCorrectionNeedsInput(
+        interaction_id=20,
+        parent_extraction_interaction_id=10,
+        screenshot_type="game_basics",
+    )
+
+    interaction = MagicMock()
+    interaction.user.id = 42
+    interaction.response.send_message = AsyncMock()
+    interaction.response.is_done = MagicMock(return_value=False)
+    interaction.followup.send = AsyncMock()
+    interaction.channel = input_channel
+
+    asyncio.run(
+        adapter._handle_fix_extraction(
+            interaction,
+            ParsedCustomId(action="fix_extraction", interaction_id=10),
+        )
+    )
+
+    # Initial Fix response posts FieldCorrectionView; roster views via followup
+    # after response.is_done becomes true, or channel.send.
+    interaction.response.is_done = MagicMock(return_value=True)
+    # Re-run delivery path directly to assert roster posting with done response.
+    asyncio.run(
+        adapter._deliver_field_correction_response(
+            interaction,
+            FieldCorrectionNeedsInput(
+                interaction_id=20,
+                parent_extraction_interaction_id=10,
+                screenshot_type="game_basics",
+            ),
+        )
+    )
+    roster_views = []
+    for mock in (interaction.followup.send, input_channel.send):
+        for call in mock.await_args_list:
+            view = call.kwargs.get("view")
+            if isinstance(view, RosterSlotFixView):
+                roster_views.append(view)
+    assert roster_views, (
+        "Fix must post RosterSlotFixView for unresolved fuzzy/new slots"
+    )

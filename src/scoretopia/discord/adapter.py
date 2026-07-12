@@ -42,13 +42,19 @@ from scoretopia.discord.views import (
     PlayerDiscordUserSelectView,
     PlayerLinkRemoteConfirmView,
     PlayerSpellingConfirmView,
+    RosterKnownPlayerPickView,
+    RosterSlotFixView,
     WinRatioConfirmView,
+    build_field_correction_modal,
+    build_roster_override_modal,
     can_approve_mod_batch,
     can_confirm_final_summary,
     can_confirm_game_end,
     can_confirm_player_link,
     can_confirm_win_ratio,
     can_review_staged,
+    field_label_for,
+    modal_text_value,
     parse_custom_id,
     unauthorized_confirmation_message,
 )
@@ -69,12 +75,19 @@ from scoretopia.domain.actions import (
     UnrecognizedScreenshot,
     WinRatioNeedsConfirmation,
 )
+from scoretopia.domain.field_correction import apply_field_correction_to_parent
 from scoretopia.domain.games import GameService
 from scoretopia.domain.ingest import IngestService, deserialize_staged_extraction
 from scoretopia.domain.mod_approval import ModApprovalService
 from scoretopia.domain.player_identity import (
     ConfirmPlayerLinkOutcome,
     PlayerIdentityService,
+)
+from scoretopia.domain.player_resolution import (
+    human_roster_index_for_player_slot,
+    mark_roster_slot_fix_resolved,
+    player_slot_indexes_by_human_roster,
+    unresolved_fuzzy_new_slot_indexes,
 )
 from scoretopia.domain.players import PlayerService
 from scoretopia.domain.results import RegisterOutcome
@@ -103,12 +116,21 @@ _FIELD_CORRECTION_PROMPT = (
     "Fix the extracted values below. Continue from the diagnosis preview "
     "when ready; Confirm only appears on the final summary."
 )
+_FIELD_CORRECTION_APPLIED = "Updated staged extraction. Continue when ready."
+_ROSTER_SLOT_RESOLVED = "Player slot resolved. Continue when ready."
+_REUPLOAD_GUIDANCE = (
+    "This screenshot type is not fully correctable here — please re-upload "
+    "a clearer shot."
+)
 _UNREGISTERED_UPLOADER_MESSAGE = (
     "Please run `/register` first to link your Discord account to a "
     "Polytopia player name before uploading screenshots."
 )
 _PLAYER_LINK_KIND = "confirm_player_link"
 _FINAL_SUMMARY_KIND = "confirm_final_summary"
+_FIELD_CORRECTION_KIND = "field_correction"
+_CONFIRM_EXTRACTION_KIND = "confirm_extraction"
+_NUMERIC_FIX_FIELDS = frozenset({"map_size", "target_score", "score"})
 
 logger = logging.getLogger(__name__)
 
@@ -304,7 +326,10 @@ class DiscordBotAdapter(BotPort):
 
         @self._bot.event
         async def on_interaction(interaction: discord.Interaction) -> None:
-            if interaction.type != discord.InteractionType.component:
+            if interaction.type not in {
+                discord.InteractionType.component,
+                discord.InteractionType.modal_submit,
+            }:
                 return
             custom_id = interaction.data.get("custom_id") if interaction.data else None
             if not isinstance(custom_id, str) or not custom_id.startswith("st:"):
@@ -646,6 +671,20 @@ class DiscordBotAdapter(BotPort):
             await self._handle_approve_mod_batch(interaction, parsed)
         elif parsed.action == "reject_mod_batch":
             await self._handle_reject_mod_batch(interaction, parsed)
+        elif parsed.action == "pick_field_correction":
+            await self._handle_pick_field_correction(interaction, parsed)
+        elif parsed.action == "submit_field_correction":
+            await self._handle_submit_field_correction(interaction, parsed)
+        elif parsed.action == "accept_roster_suggestion":
+            await self._handle_accept_roster_suggestion(interaction, parsed)
+        elif parsed.action == "pick_roster_known_player":
+            await self._handle_pick_roster_known_player(interaction, parsed)
+        elif parsed.action == "select_roster_known_player":
+            await self._handle_select_roster_known_player(interaction, parsed)
+        elif parsed.action == "override_roster_name":
+            await self._handle_override_roster_name(interaction, parsed)
+        elif parsed.action == "submit_roster_override":
+            await self._handle_submit_roster_override(interaction, parsed)
 
     async def _handle_confirm_game_end(
         self,
@@ -1019,16 +1058,22 @@ class DiscordBotAdapter(BotPort):
             _FIELD_CORRECTION_PROMPT,
             view=view,
         )
+        await self._post_roster_slot_fix_views(
+            channel=input_channel,
+            result=result,
+            uploader_discord_id=uploader,
+        )
 
     async def _deliver_field_correction_response(
         self,
         interaction: discord.Interaction,
         result: FieldCorrectionNeedsInput,
     ) -> None:
+        uploader = str(interaction.user.id)
         view = FieldCorrectionView(
             interaction_id=result.interaction_id,
             screenshot_type=result.screenshot_type,
-            uploader_discord_id=str(interaction.user.id),
+            uploader_discord_id=uploader,
         )
         if self._response_is_done(interaction):
             await interaction.followup.send(
@@ -1036,12 +1081,404 @@ class DiscordBotAdapter(BotPort):
                 view=view,
                 ephemeral=False,
             )
-            return
-        await interaction.response.send_message(
-            _FIELD_CORRECTION_PROMPT,
-            view=view,
-            ephemeral=False,
+        else:
+            await interaction.response.send_message(
+                _FIELD_CORRECTION_PROMPT,
+                view=view,
+                ephemeral=False,
+            )
+        await self._post_roster_slot_fix_views(
+            channel=interaction.channel or self._channel("input"),
+            result=result,
+            uploader_discord_id=uploader,
+            interaction=interaction,
         )
+
+    async def _post_roster_slot_fix_views(
+        self,
+        *,
+        channel: discord.abc.Messageable | None,
+        result: FieldCorrectionNeedsInput,
+        uploader_discord_id: str,
+        interaction: discord.Interaction | None = None,
+    ) -> None:
+        parent = self._pending_by_id(result.parent_extraction_interaction_id)
+        if parent is None or parent.kind != _CONFIRM_EXTRACTION_KIND:
+            return
+        extraction = parent.payload.get("extraction")
+        if not isinstance(extraction, dict):
+            return
+        players = extraction.get("players")
+        if not isinstance(players, list):
+            return
+        human_to_player = player_slot_indexes_by_human_roster(players)
+        resolved_roster = parent.payload.get("resolved_roster")
+        if not isinstance(resolved_roster, list):
+            return
+        for human_idx in unresolved_fuzzy_new_slot_indexes(parent.payload):
+            player_idx = human_to_player.get(human_idx)
+            if player_idx is None or human_idx >= len(resolved_roster):
+                continue
+            slot = resolved_roster[human_idx]
+            if not isinstance(slot, dict):
+                continue
+            raw_ocr = str(slot.get("raw_ocr") or "")
+            suggested = slot.get("suggested_name")
+            suggested_name = suggested if isinstance(suggested, str) else None
+            view = RosterSlotFixView(
+                interaction_id=result.interaction_id,
+                player_slot=player_idx,
+                raw_ocr=raw_ocr,
+                suggested_name=suggested_name,
+                uploader_discord_id=uploader_discord_id,
+            )
+            content = f"Fix player: **{raw_ocr}**"
+            if interaction is not None and self._response_is_done(interaction):
+                await interaction.followup.send(content, view=view, ephemeral=False)
+            elif channel is not None:
+                await channel.send(content, view=view)
+
+    async def _handle_pick_field_correction(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        context = await self._require_fix_actor(interaction, parsed.interaction_id)
+        if context is None:
+            return
+        parent_id, _uploader, screenshot_type = context
+        field = parsed.field
+        if not field:
+            await interaction.response.send_message(
+                "No field selected.",
+                ephemeral=True,
+            )
+            return
+        if field == "reupload":
+            await interaction.response.send_message(
+                _REUPLOAD_GUIDANCE,
+                ephemeral=True,
+            )
+            return
+        current = self._staged_field_value(parent_id, field)
+        label = field_label_for(field, screenshot_type)
+        modal = build_field_correction_modal(
+            interaction_id=parsed.interaction_id,
+            field=field,
+            label=label,
+            current_value=current,
+        )
+        await interaction.response.send_modal(modal)
+
+    async def _handle_submit_field_correction(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        context = await self._require_fix_actor(interaction, parsed.interaction_id)
+        if context is None:
+            return
+        parent_id, _uploader, _screenshot_type = context
+        field = parsed.field
+        if not field or field == "reupload":
+            await interaction.response.send_message(
+                "Nothing to update.",
+                ephemeral=True,
+            )
+            return
+        raw_value = modal_text_value(interaction)
+        if raw_value is None or not raw_value.strip():
+            await interaction.response.send_message(
+                "Enter a value to apply.",
+                ephemeral=True,
+            )
+            return
+        new_value: object = raw_value.strip()
+        if field in _NUMERIC_FIX_FIELDS:
+            try:
+                new_value = int(str(new_value))
+            except ValueError:
+                await interaction.response.send_message(
+                    f"{field} must be a number.",
+                    ephemeral=True,
+                )
+                return
+        pending_repo = getattr(self._ingest_service, "_pending_repo", None)
+        if pending_repo is None:
+            await interaction.response.send_message(
+                "Correction unavailable.",
+                ephemeral=True,
+            )
+            return
+        apply_field_correction_to_parent(
+            pending_repo,
+            parent_id,
+            field=field,
+            new=new_value,
+        )
+        await interaction.response.send_message(
+            _FIELD_CORRECTION_APPLIED,
+            ephemeral=True,
+        )
+
+    async def _handle_accept_roster_suggestion(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        context = await self._require_fix_actor(interaction, parsed.interaction_id)
+        if context is None:
+            return
+        parent_id, _uploader, _screenshot_type = context
+        assert parsed.player_slot is not None
+        pending_repo = getattr(self._ingest_service, "_pending_repo", None)
+        parent = self._pending_by_id(parent_id)
+        if pending_repo is None or parent is None:
+            await interaction.response.send_message(
+                "Correction unavailable.",
+                ephemeral=True,
+            )
+            return
+        suggested = self._roster_suggested_name(parent.payload, parsed.player_slot)
+        if suggested is not None:
+            apply_field_correction_to_parent(
+                pending_repo,
+                parent_id,
+                field="players",
+                new=suggested,
+                slot_index=parsed.player_slot,
+            )
+        else:
+            mark_roster_slot_fix_resolved(
+                parent.payload,
+                player_slot_index=parsed.player_slot,
+            )
+            pending_repo.update_payload(parent_id, parent.payload)
+        await interaction.response.send_message(
+            _ROSTER_SLOT_RESOLVED,
+            ephemeral=True,
+        )
+
+    async def _handle_pick_roster_known_player(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        context = await self._require_fix_actor(interaction, parsed.interaction_id)
+        if context is None:
+            return
+        _parent_id, uploader, _screenshot_type = context
+        assert parsed.player_slot is not None
+        players = self._player_repo.list_all() if self._player_repo is not None else []
+        view = RosterKnownPlayerPickView(
+            interaction_id=parsed.interaction_id,
+            player_slot=parsed.player_slot,
+            players=players,
+            uploader_discord_id=uploader,
+        )
+        await interaction.response.send_message(
+            "Pick a known player for this slot.",
+            view=view,
+            ephemeral=True,
+        )
+
+    async def _handle_select_roster_known_player(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        context = await self._require_fix_actor(interaction, parsed.interaction_id)
+        if context is None:
+            return
+        parent_id, _uploader, _screenshot_type = context
+        assert parsed.player_slot is not None
+        values = interaction.data.get("values") if interaction.data else None
+        if not values:
+            await interaction.response.send_message(
+                "No player selected.",
+                ephemeral=True,
+            )
+            return
+        player_id = int(values[0])
+        if self._player_repo is None:
+            await interaction.response.send_message(
+                "Player list unavailable.",
+                ephemeral=True,
+            )
+            return
+        player = self._player_repo.get_by_id(player_id)
+        if player is None:
+            await interaction.response.send_message(
+                "Unknown player selected.",
+                ephemeral=True,
+            )
+            return
+        pending_repo = getattr(self._ingest_service, "_pending_repo", None)
+        if pending_repo is None:
+            await interaction.response.send_message(
+                "Correction unavailable.",
+                ephemeral=True,
+            )
+            return
+        apply_field_correction_to_parent(
+            pending_repo,
+            parent_id,
+            field="players",
+            new=player.polytopia_name,
+            slot_index=parsed.player_slot,
+        )
+        await interaction.response.send_message(
+            _ROSTER_SLOT_RESOLVED,
+            ephemeral=True,
+        )
+
+    async def _handle_override_roster_name(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        context = await self._require_fix_actor(interaction, parsed.interaction_id)
+        if context is None:
+            return
+        parent_id, _uploader, _screenshot_type = context
+        assert parsed.player_slot is not None
+        current = self._staged_player_name(parent_id, parsed.player_slot)
+        modal = build_roster_override_modal(
+            interaction_id=parsed.interaction_id,
+            player_slot=parsed.player_slot,
+            current_name=current,
+        )
+        await interaction.response.send_modal(modal)
+
+    async def _handle_submit_roster_override(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        context = await self._require_fix_actor(interaction, parsed.interaction_id)
+        if context is None:
+            return
+        parent_id, _uploader, _screenshot_type = context
+        assert parsed.player_slot is not None
+        raw_value = modal_text_value(interaction)
+        if raw_value is None or not raw_value.strip():
+            await interaction.response.send_message(
+                "Enter a player name.",
+                ephemeral=True,
+            )
+            return
+        pending_repo = getattr(self._ingest_service, "_pending_repo", None)
+        if pending_repo is None:
+            await interaction.response.send_message(
+                "Correction unavailable.",
+                ephemeral=True,
+            )
+            return
+        apply_field_correction_to_parent(
+            pending_repo,
+            parent_id,
+            field="players",
+            new=raw_value.strip(),
+            slot_index=parsed.player_slot,
+        )
+        await interaction.response.send_message(
+            _ROSTER_SLOT_RESOLVED,
+            ephemeral=True,
+        )
+
+    async def _require_fix_actor(
+        self,
+        interaction: discord.Interaction,
+        interaction_id: int,
+    ) -> tuple[int, str, str] | None:
+        """Return ``(parent_id, uploader_id, screenshot_type)`` or unauthorized."""
+        pending = self._pending_by_id(interaction_id)
+        if pending is None:
+            await self._reply_unauthorized(interaction)
+            return None
+        if pending.kind == _FIELD_CORRECTION_KIND:
+            parent_id = pending.payload.get("parent_extraction_interaction_id")
+            if not isinstance(parent_id, int):
+                await self._reply_unauthorized(interaction)
+                return None
+            uploader = pending.payload.get("uploader_discord_id")
+            if not isinstance(uploader, str):
+                uploader = pending.discord_user_id
+            screenshot_type = str(pending.payload.get("screenshot_type") or "")
+        elif pending.kind == _CONFIRM_EXTRACTION_KIND:
+            parent_id = pending.id
+            uploader = pending.discord_user_id
+            screenshot_type = str(pending.payload.get("screenshot_type") or "")
+        else:
+            await self._reply_unauthorized(interaction)
+            return None
+        if not can_review_staged(
+            uploader_discord_id=uploader,
+            actor_discord_id=str(interaction.user.id),
+        ):
+            await self._reply_unauthorized(interaction)
+            return None
+        return parent_id, uploader, screenshot_type
+
+    def _pending_by_id(self, interaction_id: int):
+        repo = getattr(self._ingest_service, "_pending_repo", None)
+        if repo is None:
+            return None
+        return repo.get_by_id(interaction_id)
+
+    def _staged_field_value(self, parent_id: int, field: str) -> str:
+        pending = self._pending_by_id(parent_id)
+        if pending is None:
+            return ""
+        extraction = pending.payload.get("extraction")
+        if not isinstance(extraction, dict):
+            return ""
+        value = extraction.get(field)
+        if value is None:
+            return ""
+        return str(value)
+
+    def _staged_player_name(self, parent_id: int, player_slot: int) -> str:
+        pending = self._pending_by_id(parent_id)
+        if pending is None:
+            return ""
+        extraction = pending.payload.get("extraction")
+        if not isinstance(extraction, dict):
+            return ""
+        players = extraction.get("players")
+        if not isinstance(players, list) or player_slot >= len(players):
+            return ""
+        entry = players[player_slot]
+        if not isinstance(entry, dict):
+            return ""
+        name = entry.get("name")
+        return str(name) if name is not None else ""
+
+    def _roster_suggested_name(
+        self,
+        payload: dict[str, object],
+        player_slot_index: int,
+    ) -> str | None:
+        extraction = payload.get("extraction")
+        if not isinstance(extraction, dict):
+            return None
+        players = extraction.get("players")
+        if not isinstance(players, list):
+            return None
+        human_idx = human_roster_index_for_player_slot(
+            players,
+            player_slot_index,
+        )
+        if human_idx is None:
+            return None
+        resolved_roster = payload.get("resolved_roster")
+        if not isinstance(resolved_roster, list) or human_idx >= len(resolved_roster):
+            return None
+        slot = resolved_roster[human_idx]
+        if not isinstance(slot, dict):
+            return None
+        suggested = slot.get("suggested_name")
+        return suggested if isinstance(suggested, str) else None
 
     def _final_summary_uploader_id(self, interaction_id: int) -> str | None:
         pending_repo = getattr(self._ingest_service, "_pending_repo", None)
