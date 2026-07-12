@@ -10,6 +10,9 @@ from scoretopia.domain.actions import (
     ActiveGameReport,
     ExtractionNeedsConfirmation,
     ExtractionPreview,
+    FieldCorrectionNeedsInput,
+    FinalSummaryNeedsConfirmation,
+    FinalSummaryPreview,
     GameEndNeedsConfirmation,
     GameEndNeedsPick,
     GameEndPendingStart,
@@ -32,7 +35,7 @@ from scoretopia.domain.player_resolution import (
     roster_names_from_extraction,
 )
 from scoretopia.domain.players import PlayerService
-from scoretopia.domain.results import MatchOutcome, RejectResult
+from scoretopia.domain.results import MatchOutcome
 from scoretopia.domain.win_ratios import WinRatioService
 from scoretopia.ingest import logger as ingest_logger
 from scoretopia.screenshot.extract import DEFAULT_MODEL_DIR, extract_screenshot
@@ -53,6 +56,8 @@ _UNRECOGNIZED_MESSAGE = (
     "game basics, game end, or friend profile screenshot."
 )
 _CONFIRM_EXTRACTION_KIND = "confirm_extraction"
+_FIELD_CORRECTION_KIND = "field_correction"
+_CONFIRM_FINAL_SUMMARY_KIND = "confirm_final_summary"
 
 
 def _unrecognized_message_from_value_error(exc: ValueError) -> str:
@@ -194,7 +199,6 @@ class IngestService:
         if isinstance(pending, StagedIngestNotAuthorized):
             return pending
 
-        stored_path = Path(str(pending.payload["screenshot_path"]))
         extraction = deserialize_staged_extraction(pending.payload)
         identity_result = self._resolve_player_identities(
             extraction,
@@ -203,12 +207,51 @@ class IngestService:
         )
         if isinstance(identity_result, PlayerLinkNeedsConfirmation):
             return identity_result
+        return self._stage_final_summary(
+            parent_interaction_id=interaction_id,
+            uploader_discord_id=confirmer_discord_id,
+            extraction=extraction,
+        )
+
+    def confirm_final_summary(
+        self,
+        interaction_id: int,
+        *,
+        confirmer_discord_id: str,
+    ) -> IngestResult | StagedIngestNotAuthorized:
+        pending = self._pending_repo.get_by_id(interaction_id)
+        if pending is None or pending.kind != _CONFIRM_FINAL_SUMMARY_KIND:
+            return StagedIngestNotAuthorized()
+        if pending.status != "open":
+            return StagedIngestNotAuthorized()
+        if pending.discord_user_id != confirmer_discord_id:
+            return StagedIngestNotAuthorized()
+
+        parent_id = pending.payload.get("parent_extraction_interaction_id")
+        if not isinstance(parent_id, int):
+            return StagedIngestNotAuthorized()
+        parent = self._require_open_staged_pending(
+            parent_id,
+            confirmer_discord_id=confirmer_discord_id,
+        )
+        if isinstance(parent, StagedIngestNotAuthorized):
+            return parent
+
+        stored_path = Path(str(parent.payload["screenshot_path"]))
+        extraction = deserialize_staged_extraction(parent.payload)
         committed = self.complete_ingest(
             stored_path,
             extraction,
             uploader_discord_id=confirmer_discord_id,
         )
         self._pending_repo.resolve(interaction_id)
+        self._pending_repo.resolve(parent_id)
+        ingest_logger.info(
+            "final summary confirmed interaction_id=%s parent=%s by=%s",
+            interaction_id,
+            parent_id,
+            confirmer_discord_id,
+        )
         return committed
 
     def reject_staged(
@@ -216,7 +259,7 @@ class IngestService:
         interaction_id: int,
         *,
         confirmer_discord_id: str,
-    ) -> RejectResult | StagedIngestNotAuthorized:
+    ) -> FieldCorrectionNeedsInput | StagedIngestNotAuthorized:
         pending = self._require_open_staged_pending(
             interaction_id,
             confirmer_discord_id=confirmer_discord_id,
@@ -224,8 +267,68 @@ class IngestService:
         if isinstance(pending, StagedIngestNotAuthorized):
             return pending
 
-        self._pending_repo.resolve(interaction_id)
-        return RejectResult(interaction_id=interaction_id)
+        screenshot_type = str(pending.payload.get("screenshot_type", ""))
+        correction_pending = self._pending_repo.create(
+            kind=_FIELD_CORRECTION_KIND,
+            discord_user_id=confirmer_discord_id,
+            payload={
+                "parent_extraction_interaction_id": interaction_id,
+                "uploader_discord_id": confirmer_discord_id,
+                "screenshot_type": screenshot_type,
+                "corrections": [],
+            },
+        )
+        ingest_logger.info(
+            "field correction opened interaction_id=%s parent=%s by=%s type=%s",
+            correction_pending.id,
+            interaction_id,
+            confirmer_discord_id,
+            screenshot_type,
+        )
+        return FieldCorrectionNeedsInput(
+            interaction_id=correction_pending.id,
+            parent_extraction_interaction_id=interaction_id,
+            screenshot_type=screenshot_type,
+        )
+
+    def _stage_final_summary(
+        self,
+        *,
+        parent_interaction_id: int,
+        uploader_discord_id: str,
+        extraction: ExtractionResult,
+    ) -> FinalSummaryNeedsConfirmation:
+        summary = _final_summary_preview(extraction)
+        pending = self._pending_repo.create(
+            kind=_CONFIRM_FINAL_SUMMARY_KIND,
+            discord_user_id=uploader_discord_id,
+            payload={
+                "parent_extraction_interaction_id": parent_interaction_id,
+                "uploader_discord_id": uploader_discord_id,
+                "summary": {
+                    "screenshot_type": summary.screenshot_type,
+                    "game_name": summary.game_name,
+                    "map_size": summary.map_size,
+                    "terrain": summary.terrain,
+                    "game_timer": summary.game_timer,
+                    "target_score": summary.target_score,
+                    "game_type": summary.game_type,
+                    "roster": list(summary.roster),
+                    "winner": summary.winner,
+                    "scores": [[name, score] for name, score in summary.scores],
+                },
+            },
+        )
+        ingest_logger.info(
+            "final summary pending created id=%s parent=%s",
+            pending.id,
+            parent_interaction_id,
+        )
+        return FinalSummaryNeedsConfirmation(
+            interaction_id=pending.id,
+            parent_extraction_interaction_id=parent_interaction_id,
+            summary=summary,
+        )
 
     def _require_open_staged_pending(
         self,
@@ -566,6 +669,39 @@ def _extraction_preview(extraction: ExtractionResult) -> ExtractionPreview:
             game_name=extraction.game_name,
         )
     return ExtractionPreview(screenshot_type=extraction.screenshot_type)
+
+
+def _final_summary_preview(extraction: ExtractionResult) -> FinalSummaryPreview:
+    if isinstance(extraction, GameBasicsExtraction):
+        return FinalSummaryPreview(
+            screenshot_type=extraction.screenshot_type,
+            game_name=extraction.game_name,
+            map_size=extraction.map_size,
+            terrain=extraction.terrain,
+            game_timer=extraction.game_timer,
+            target_score=extraction.target_score,
+            game_type=extraction.game_type,
+            roster=tuple(player.name for player in extraction.players),
+        )
+    if isinstance(extraction, GameEndExtraction):
+        return FinalSummaryPreview(
+            screenshot_type=extraction.screenshot_type,
+            game_name=None,
+            roster=tuple(player.name for player in extraction.players),
+            winner=extraction.winner,
+            scores=tuple((player.name, player.score) for player in extraction.players),
+        )
+    if isinstance(extraction, FriendProfileExtraction):
+        return FinalSummaryPreview(
+            screenshot_type=extraction.screenshot_type,
+            game_name=extraction.friend_name,
+            roster=tuple(
+                name
+                for name in (extraction.friend_name, extraction.win_ratio.you_name)
+                if name
+            ),
+        )
+    return FinalSummaryPreview(screenshot_type="unknown")
 
 
 def _serialize_extraction(extraction: ExtractionResult) -> dict[str, object]:

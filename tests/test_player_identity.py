@@ -291,7 +291,13 @@ def test_remote_confirm_creates_discord_link_and_completes_ingest_chain(
         parent.id,
         confirmer_discord_id="uploader-1",
     )
-    from scoretopia.domain.actions import GameStarted
+    from scoretopia.domain.actions import FinalSummaryNeedsConfirmation, GameStarted
+
+    if isinstance(committed, FinalSummaryNeedsConfirmation):
+        committed = ingest.confirm_final_summary(
+            committed.interaction_id,
+            confirmer_discord_id="uploader-1",
+        )
 
     assert isinstance(committed, GameStarted)
     assert committed.game.name == "Identity Test Game"

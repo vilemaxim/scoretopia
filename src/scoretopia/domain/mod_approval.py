@@ -48,11 +48,12 @@ def _session_corrections(payload: dict[str, object]) -> list[dict[str, object]]:
 
 
 def _summary_from_corrections(corrections: list[dict[str, object]]) -> str:
-    parts = [
-        f"{entry['old_name']} → {entry['new_name']}"
-        for entry in corrections
-        if "old_name" in entry and "new_name" in entry
-    ]
+    parts: list[str] = []
+    for entry in corrections:
+        if "old_name" in entry and "new_name" in entry:
+            parts.append(f"{entry['old_name']} → {entry['new_name']}")
+        elif "field" in entry and "old" in entry and "new" in entry:
+            parts.append(f"{entry['field']}: {entry['old']} → {entry['new']}")
     return "; ".join(parts) if parts else "No corrections"
 
 
@@ -215,16 +216,16 @@ class ModApprovalService:
             msg = "mod_approval missing parent_extraction_interaction_id"
             raise ValueError(msg)
 
+        # Lazy import avoids cycle with field_correction → ModApprovalService.
+        from scoretopia.domain.field_correction import (
+            apply_field_correction_to_parent,
+        )
+
         for entry in _session_corrections(pending.payload):
-            slot_index = entry.get("slot_index")
-            new_name = entry.get("new_name")
-            if not isinstance(slot_index, int) or not isinstance(new_name, str):
-                continue
-            _apply_name_correction_to_parent(
-                self._pending_repo,
+            self._apply_correction_entry(
                 parent_id,
-                slot_index=slot_index,
-                new_name=new_name,
+                entry,
+                apply_field=apply_field_correction_to_parent,
             )
 
         _clear_parent_correction_session(self._pending_repo, parent_id)
@@ -234,6 +235,42 @@ class ModApprovalService:
             interaction_id,
             approver_discord_id,
             parent_id,
+        )
+
+    def _apply_correction_entry(
+        self,
+        parent_id: int,
+        entry: dict[str, object],
+        *,
+        apply_field: object,
+    ) -> None:
+        kind = entry.get("kind")
+        if kind == "field_correction" or (
+            "field" in entry and kind != "name_correction"
+        ):
+            field = entry.get("field")
+            if not isinstance(field, str):
+                return
+            slot_index = entry.get("slot_index")
+            slot = slot_index if isinstance(slot_index, int) else None
+            apply_field(
+                self._pending_repo,
+                parent_id,
+                field=field,
+                new=entry.get("new"),
+                slot_index=slot,
+            )
+            return
+
+        slot_index = entry.get("slot_index")
+        new_name = entry.get("new_name")
+        if not isinstance(slot_index, int) or not isinstance(new_name, str):
+            return
+        _apply_name_correction_to_parent(
+            self._pending_repo,
+            parent_id,
+            slot_index=slot_index,
+            new_name=new_name,
         )
 
     def reject(
