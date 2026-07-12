@@ -26,6 +26,7 @@ class ParsedCustomId:
     interaction_id: int
     game_id: int | None = None
     player_slot: int | None = None
+    field: str | None = None
 
 
 def unauthorized_confirmation_message() -> str:
@@ -90,7 +91,15 @@ _PLAYER_LINK_ACTIONS = frozenset(
         "accept_roster_suggestion",
         "pick_roster_known_player",
         "override_roster_name",
+        "select_roster_known_player",
+        "submit_roster_override",
+    }
+)
+
+_FIX_FIELD_ACTIONS = frozenset(
+    {
         "pick_field_correction",
+        "submit_field_correction",
     }
 )
 
@@ -101,7 +110,10 @@ def encode_custom_id(
     interaction_id: int,
     game_id: int | None = None,
     player_slot: int | None = None,
+    field: str | None = None,
 ) -> str:
+    if field is not None:
+        return f"{_CUSTOM_ID_PREFIX}:{action}:{interaction_id}:{field}"
     if game_id is not None:
         return f"{_CUSTOM_ID_PREFIX}:{action}:{interaction_id}:{game_id}"
     if player_slot is not None:
@@ -115,17 +127,23 @@ def parse_custom_id(custom_id: str) -> ParsedCustomId:
         raise ValueError(f"Invalid custom_id: {custom_id}")
     action = parts[1]
     interaction_id = int(parts[2])
-    qualifier = int(parts[3]) if len(parts) > 3 else None
+    qualifier = parts[3] if len(parts) > 3 else None
+    if action in _FIX_FIELD_ACTIONS:
+        return ParsedCustomId(
+            action=action,
+            interaction_id=interaction_id,
+            field=qualifier,
+        )
     if action in _PLAYER_LINK_ACTIONS:
         return ParsedCustomId(
             action=action,
             interaction_id=interaction_id,
-            player_slot=qualifier,
+            player_slot=int(qualifier) if qualifier is not None else None,
         )
     return ParsedCustomId(
         action=action,
         interaction_id=interaction_id,
-        game_id=qualifier,
+        game_id=int(qualifier) if qualifier is not None else None,
     )
 
 
@@ -512,18 +530,22 @@ _GAME_BASICS_CORRECTION_FIELDS = (
     ("game_timer", "Game timer"),
     ("target_score", "Target score"),
     ("game_type", "Game type"),
-    ("players", "Player names"),
 )
 
 _GAME_END_CORRECTION_FIELDS = (
     ("game_name", "Game name"),
     ("winner", "Winner"),
-    ("players", "Player names / scores"),
 )
+
+_REUPLOAD_ONLY_FIELDS = (("reupload", "Re-upload required"),)
 
 
 class FieldCorrectionView(discord.ui.View):
-    """Visible field-correction controls posted by Fix (ADR 005)."""
+    """Mobile-first field-correction controls posted by Fix (ADR 005).
+
+    Buttons open modals (handled by the adapter); player-name slots use
+    :class:`RosterSlotFixView` instead of a bulk players field.
+    """
 
     def __init__(
         self,
@@ -536,33 +558,120 @@ class FieldCorrectionView(discord.ui.View):
         del uploader_discord_id
         self.interaction_id = interaction_id
         self.screenshot_type = screenshot_type
-        field_options = _correction_field_options(screenshot_type)
-        select = discord.ui.Select(
-            placeholder="Choose a field to correct",
-            options=field_options,
-            custom_id=encode_custom_id(
-                "pick_field_correction",
-                interaction_id=interaction_id,
-            ),
-            min_values=1,
-            max_values=1,
-        )
-        self.add_item(select)
+        for field, label in _correction_fields(screenshot_type):
+            self.add_item(
+                discord.ui.Button(
+                    label=label[:80],
+                    style=discord.ButtonStyle.secondary,
+                    custom_id=encode_custom_id(
+                        "pick_field_correction",
+                        interaction_id=interaction_id,
+                        field=field,
+                    ),
+                )
+            )
+
+
+def _correction_fields(screenshot_type: str) -> tuple[tuple[str, str], ...]:
+    if screenshot_type == "game_end":
+        return _GAME_END_CORRECTION_FIELDS
+    if screenshot_type in {"friend_profile", "win_ratio"}:
+        return _REUPLOAD_ONLY_FIELDS
+    return _GAME_BASICS_CORRECTION_FIELDS
 
 
 def _correction_field_options(
     screenshot_type: str,
 ) -> list[discord.SelectOption]:
-    if screenshot_type == "game_end":
-        fields = _GAME_END_CORRECTION_FIELDS
-    elif screenshot_type in {"friend_profile", "win_ratio"}:
-        fields = (("reupload", "Re-upload (type not fully correctable)"),)
-    else:
-        fields = _GAME_BASICS_CORRECTION_FIELDS
+    """Legacy select options (kept for tests / callers); Fix UI uses buttons."""
     return [
         discord.SelectOption(label=label, value=field)
-        for field, label in fields
+        for field, label in _correction_fields(screenshot_type)
     ]
+
+
+def field_label_for(field: str, screenshot_type: str) -> str:
+    for name, label in _correction_fields(screenshot_type):
+        if name == field:
+            return label
+    return field.replace("_", " ").title()
+
+
+def build_field_correction_modal(
+    *,
+    interaction_id: int,
+    field: str,
+    label: str,
+    current_value: str,
+) -> discord.ui.Modal:
+    modal = discord.ui.Modal(
+        title=f"Fix {label}"[:45],
+        custom_id=encode_custom_id(
+            "submit_field_correction",
+            interaction_id=interaction_id,
+            field=field,
+        ),
+    )
+    default = current_value[:400] if current_value else None
+    modal.add_item(
+        discord.ui.TextInput(
+            label=label[:45],
+            custom_id="new_value",
+            default=default,
+            required=True,
+            max_length=200,
+            style=discord.TextStyle.short,
+        )
+    )
+    return modal
+
+
+def build_roster_override_modal(
+    *,
+    interaction_id: int,
+    player_slot: int,
+    current_name: str,
+) -> discord.ui.Modal:
+    modal = discord.ui.Modal(
+        title="Override player name",
+        custom_id=encode_custom_id(
+            "submit_roster_override",
+            interaction_id=interaction_id,
+            player_slot=player_slot,
+        ),
+    )
+    default = current_name[:400] if current_name else None
+    modal.add_item(
+        discord.ui.TextInput(
+            label="Player name",
+            custom_id="new_value",
+            default=default,
+            required=True,
+            max_length=100,
+            style=discord.TextStyle.short,
+        )
+    )
+    return modal
+
+
+def modal_text_value(
+    interaction: discord.Interaction,
+    *,
+    custom_id: str = "new_value",
+) -> str | None:
+    data = interaction.data if isinstance(interaction.data, dict) else None
+    if not data:
+        return None
+    for row in data.get("components", []):
+        if not isinstance(row, dict):
+            continue
+        for component in row.get("components", []):
+            if not isinstance(component, dict):
+                continue
+            if component.get("custom_id") == custom_id:
+                value = component.get("value")
+                return value if isinstance(value, str) else None
+    return None
 
 
 class RosterSlotFixView(discord.ui.View):
@@ -595,7 +704,6 @@ class RosterSlotFixView(discord.ui.View):
                     interaction_id=interaction_id,
                     player_slot=player_slot,
                 ),
-                disabled=suggested_name is None,
             )
         )
         self.add_item(
@@ -620,3 +728,38 @@ class RosterSlotFixView(discord.ui.View):
                 ),
             )
         )
+
+
+class RosterKnownPlayerPickView(discord.ui.View):
+    """Known-player picker opened from Fix roster controls."""
+
+    def __init__(
+        self,
+        *,
+        interaction_id: int,
+        player_slot: int,
+        players: list[Player],
+        uploader_discord_id: str,
+    ) -> None:
+        super().__init__(timeout=None)
+        del uploader_discord_id
+        self.interaction_id = interaction_id
+        self.player_slot = player_slot
+        options = build_player_pick_options(players)
+        if not options:
+            options = [
+                discord.SelectOption(
+                    label="No known players",
+                    value="0",
+                )
+            ]
+        select = discord.ui.Select(
+            placeholder="Pick a known Polytopia name",
+            options=options,
+            custom_id=encode_custom_id(
+                "select_roster_known_player",
+                interaction_id=interaction_id,
+                player_slot=player_slot,
+            ),
+        )
+        self.add_item(select)
