@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 
 import discord
@@ -118,6 +119,7 @@ def build_dispute_embed(body: str) -> discord.Embed:
 def _extraction_preview_fields(
     preview: ExtractionPreview,
     extraction: ExtractionResult | None,
+    resolved_roster: Sequence[Mapping[str, object]] | None = None,
 ) -> list[tuple[str, str]]:
     fields: list[tuple[str, str]] = []
     if isinstance(extraction, GameBasicsExtraction):
@@ -140,14 +142,20 @@ def _extraction_preview_fields(
         )
         if settings:
             fields.append(("Settings", settings))
-        player_names = ", ".join(player.name for player in extraction.players)
-        if player_names:
-            fields.append(("Players", player_names))
+        if resolved_roster:
+            fields.extend(_resolved_roster_fields(resolved_roster))
+        else:
+            player_names = ", ".join(player.name for player in extraction.players)
+            if player_names:
+                fields.append(("Players", player_names))
         return fields
 
     if isinstance(extraction, GameEndExtraction):
         if extraction.winner:
             fields.append(("Winner", extraction.winner))
+        if resolved_roster:
+            fields.extend(_resolved_roster_fields(resolved_roster))
+            return fields
         for player in extraction.players:
             parts = [player.name]
             if player.score is not None:
@@ -176,16 +184,48 @@ def _extraction_preview_fields(
     return fields
 
 
+_MATCH_TYPE_MARKERS = {
+    "exact": "",
+    "fuzzy": " ≈",
+    "new": " 🆕",
+}
+
+
+def _resolved_roster_fields(
+    resolved_roster: Sequence[Mapping[str, object]],
+) -> list[tuple[str, str]]:
+    fields: list[tuple[str, str]] = []
+    for slot in resolved_roster:
+        raw = str(slot.get("raw_ocr", ""))
+        suggested = slot.get("suggested_name")
+        match_type = str(slot.get("match_type", "new"))
+        marker = _MATCH_TYPE_MARKERS.get(match_type, f" ({match_type})")
+        if match_type == "exact":
+            fields.append(("Player", raw))
+            continue
+        label = f"Player{marker}"
+        if suggested and suggested != raw:
+            fields.append((label, f"{raw} → {suggested}"))
+        else:
+            fields.append((label, raw))
+    return fields
+
+
 def build_extraction_preview_embed(
     preview: ExtractionPreview,
     *,
     extraction: ExtractionResult | None = None,
+    resolved_roster: Sequence[Mapping[str, object]] | None = None,
 ) -> discord.Embed:
     title = _SCREENSHOT_TYPE_TITLES.get(
         preview.screenshot_type,
         preview.screenshot_type.replace("_", " ").title(),
     )
-    fields = _extraction_preview_fields(preview, extraction)
+    fields = _extraction_preview_fields(
+        preview,
+        extraction,
+        resolved_roster=resolved_roster,
+    )
     description: str | None = None
     if extraction is not None and len(fields) >= _MAX_EMBED_FIELDS:
         description = format_extraction(extraction)
@@ -196,6 +236,7 @@ def build_extraction_preview_embed(
         description=description,
         fields=fields,
     )
+
 
 
 def embed_from_report_dto(dto: ReportDTO) -> discord.Embed:

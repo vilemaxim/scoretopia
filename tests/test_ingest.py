@@ -1280,3 +1280,108 @@ def test_identity_confirm_flow_starts_game_with_linked_player(
     assert linked is not None
     assert linked.discord_user_id == "flow-bob-discord"
     assert len(game_repo.list_active()) == 1
+
+
+# --- DB-assisted roster resolution staging (Task 028) ---
+
+
+def _resolved_record(entry: object) -> dict[str, object]:
+    if hasattr(entry, "raw_ocr"):
+        return {
+            "raw_ocr": entry.raw_ocr,
+            "suggested_name": entry.suggested_name,
+            "confidence": entry.confidence,
+            "match_type": entry.match_type,
+        }
+    assert isinstance(entry, dict)
+    return {
+        "raw_ocr": entry["raw_ocr"],
+        "suggested_name": entry["suggested_name"],
+        "confidence": entry["confidence"],
+        "match_type": entry["match_type"],
+    }
+
+
+def test_stage_screenshot_stores_raw_extraction_and_resolved_roster(
+    ingest_service: IngestService,
+    pending_repo: PendingInteractionRepo,
+    player_repo: PlayerRepo,
+    tmp_path: Path,
+) -> None:
+    """Task 028: staged payload keeps raw OCR, resolved roster, working extraction."""
+    player_repo.create(polytopia_name="Alice")
+    player_repo.create(polytopia_name="Robert")
+
+    source = tmp_path / "roster-resolve.png"
+    Image.new("RGB", (10, 10), color=(0, 128, 0)).save(source)
+    extraction = GameBasicsExtraction(
+        game_name="Roster Resolve Game",
+        players=(
+            GameBasicsPlayer(name="Alice", is_you=True),
+            GameBasicsPlayer(name="Roberrt"),
+            GameBasicsPlayer(name="ZedUnknown"),
+            GameBasicsPlayer(name="Crazy Bot"),
+        ),
+    )
+
+    with patch(
+        "scoretopia.domain.ingest.extract_screenshot",
+        return_value=extraction,
+    ):
+        staged = _stage_screenshot(
+            ingest_service,
+            source,
+            uploader_discord_id="resolver-1",
+        )
+
+    assert isinstance(staged, ExtractionNeedsConfirmation)
+    pending = pending_repo.get_by_id(staged.interaction_id)
+    assert pending is not None
+
+    assert "raw_extraction" in pending.payload
+    assert "resolved_roster" in pending.payload
+    assert "extraction" in pending.payload
+    assert "slot_confirmations" in pending.payload
+
+    raw_extraction = pending.payload["raw_extraction"]
+    assert isinstance(raw_extraction, dict)
+    assert raw_extraction["players"][0]["name"] == "Alice"
+    assert raw_extraction["players"][1]["name"] == "Roberrt"
+    assert raw_extraction["players"][2]["name"] == "ZedUnknown"
+
+    resolved = pending.payload["resolved_roster"]
+    assert isinstance(resolved, list)
+    records = [_resolved_record(entry) for entry in resolved]
+    by_raw = {str(record["raw_ocr"]): record for record in records}
+    assert set(by_raw) == {"Alice", "Roberrt", "ZedUnknown"}
+    assert by_raw["Alice"]["match_type"] == "exact"
+    assert by_raw["Roberrt"]["match_type"] == "fuzzy"
+    assert by_raw["Roberrt"]["suggested_name"] == "Robert"
+    assert by_raw["ZedUnknown"]["match_type"] == "new"
+
+    working = pending.payload["extraction"]
+    assert isinstance(working, dict)
+    working_names = [player["name"] for player in working["players"]]
+    # Exact matches applied; fuzzy/new keep raw OCR until slot confirm.
+    assert working_names == ["Alice", "Roberrt", "ZedUnknown", "Crazy Bot"]
+
+    slot_confirmations = pending.payload["slot_confirmations"]
+    assert isinstance(slot_confirmations, dict)
+    # Exact slot auto-confirmed; fuzzy/new require explicit acknowledgement.
+    confirmed = {
+        int(index): bool(flag) for index, flag in slot_confirmations.items()
+    }
+    exact_indexes = [
+        index
+        for index, record in enumerate(records)
+        if record["match_type"] == "exact"
+    ]
+    fuzzy_new_indexes = [
+        index
+        for index, record in enumerate(records)
+        if record["match_type"] in {"fuzzy", "new"}
+    ]
+    for index in exact_indexes:
+        assert confirmed.get(index) is True
+    for index in fuzzy_new_indexes:
+        assert confirmed.get(index) is not True
