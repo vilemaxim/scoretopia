@@ -27,5 +27,8 @@ project-documentation/
 # Local Polytopia screenshot samples for dev/testing (not committed)
 samples/screenshots/
 
+# Local training artifact bundles from ingest commits (not committed)
+data/training/
+
 # EasyOCR model cache (downloaded on first run)
 .easyocr_models/
