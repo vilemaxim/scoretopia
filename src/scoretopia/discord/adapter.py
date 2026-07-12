@@ -24,6 +24,7 @@ from scoretopia.discord.embeds import (
     build_extraction_preview_embed,
     build_game_completed_embed,
     build_game_started_embed,
+    build_mod_approval_embed,
     build_player_remote_confirm_embed,
     build_player_spelling_confirm_embed,
 )
@@ -32,12 +33,14 @@ from scoretopia.discord.views import (
     ExtractionConfirmView,
     GameEndConfirmView,
     GameEndPickView,
+    ModApprovalView,
     ParsedCustomId,
     PlayerCorrectionPickView,
     PlayerDiscordUserSelectView,
     PlayerLinkRemoteConfirmView,
     PlayerSpellingConfirmView,
     WinRatioConfirmView,
+    can_approve_mod_batch,
     can_confirm_extraction,
     can_confirm_game_end,
     can_confirm_player_link,
@@ -53,6 +56,7 @@ from scoretopia.domain.actions import (
     GameStarted,
     IngestError,
     IngestResult,
+    ModApprovalNeedsConfirmation,
     PlayerLinkNeedsConfirmation,
     StagedIngestNotAuthorized,
     UnrecognizedScreenshot,
@@ -60,6 +64,7 @@ from scoretopia.domain.actions import (
 )
 from scoretopia.domain.games import GameService
 from scoretopia.domain.ingest import IngestService, deserialize_staged_extraction
+from scoretopia.domain.mod_approval import ModApprovalService
 from scoretopia.domain.player_identity import (
     ConfirmPlayerLinkOutcome,
     PlayerIdentityService,
@@ -154,6 +159,8 @@ def plan_ingest_response(
         return ResponsePlan(channel="input", kind="win_ratio_confirm_view")
     if isinstance(result, PlayerLinkNeedsConfirmation):
         return ResponsePlan(channel="input", kind="player_link_needs_confirmation")
+    if isinstance(result, ModApprovalNeedsConfirmation):
+        return ResponsePlan(channel="input", kind="mod_approval_view")
     if isinstance(result, (UnrecognizedScreenshot, IngestError)):
         return ResponsePlan(
             channel="input",
@@ -209,6 +216,12 @@ class DiscordBotAdapter(BotPort):
         self._player_identity_service: PlayerIdentityService = (
             ingest_service._player_identity_service
         )
+        pending_repo = getattr(ingest_service, "_pending_repo", None)
+        self._mod_approval_service = ModApprovalService(
+            pending_repo,
+            config=config,
+            player_repo=self._player_repo,
+        ) if pending_repo is not None else None
         intents = discord.Intents.default()
         intents.message_content = True
         intents.guilds = True
@@ -523,6 +536,12 @@ class DiscordBotAdapter(BotPort):
                 await message.reply(content, view=view)
                 return
 
+            if plan.kind == "mod_approval_view" and isinstance(
+                result, ModApprovalNeedsConfirmation
+            ):
+                await self._post_mod_approval(result)
+                return
+
             if plan.body:
                 await message.reply(plan.body)
         finally:
@@ -559,6 +578,10 @@ class DiscordBotAdapter(BotPort):
             await self._handle_confirm_player_link(interaction, parsed)
         elif parsed.action == "reject_player_link":
             await self._handle_reject_player_link(interaction, parsed)
+        elif parsed.action == "approve_mod_batch":
+            await self._handle_approve_mod_batch(interaction, parsed)
+        elif parsed.action == "reject_mod_batch":
+            await self._handle_reject_mod_batch(interaction, parsed)
 
     async def _handle_confirm_game_end(
         self,
@@ -800,6 +823,81 @@ class DiscordBotAdapter(BotPort):
             return
         embed = build_game_completed_embed(game_name, winner_name=winner_name)
         await reports_channel.send(embed=embed)
+
+    async def _post_mod_approval(
+        self,
+        result: ModApprovalNeedsConfirmation,
+    ) -> None:
+        input_channel = self._channel("input")
+        if input_channel is None:
+            return
+        mod_ids = self._bot_mod_discord_ids()
+        mention = f"<@{mod_ids[0]}>" if mod_ids else "bot mods"
+        embed = build_mod_approval_embed(summary=result.summary)
+        view = ModApprovalView(interaction_id=result.interaction_id)
+        await input_channel.send(
+            f"{mention}, please approve or reject this correction batch.",
+            embed=embed,
+            view=view,
+        )
+
+    def _bot_mod_discord_ids(self) -> tuple[str, ...]:
+        raw = getattr(self._config.bot_mods, "discord_user_ids", ())
+        if raw is None:
+            return ()
+        return tuple(str(entry) for entry in raw)
+
+    async def _require_mod_batch_actor(
+        self,
+        interaction: discord.Interaction,
+    ) -> str | None:
+        actor_id = str(interaction.user.id)
+        if not can_approve_mod_batch(
+            bot_mod_discord_ids=self._bot_mod_discord_ids(),
+            actor_discord_id=actor_id,
+        ):
+            await self._reply_unauthorized(interaction)
+            return None
+        if self._mod_approval_service is None:
+            await self._reply_unauthorized(interaction)
+            return None
+        return actor_id
+
+    async def _handle_approve_mod_batch(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        actor_id = await self._require_mod_batch_actor(interaction)
+        if actor_id is None:
+            return
+        assert self._mod_approval_service is not None
+        self._mod_approval_service.approve(
+            parsed.interaction_id,
+            approver_discord_id=actor_id,
+        )
+        await interaction.response.send_message(
+            "Correction batch approved.",
+            ephemeral=True,
+        )
+
+    async def _handle_reject_mod_batch(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        actor_id = await self._require_mod_batch_actor(interaction)
+        if actor_id is None:
+            return
+        assert self._mod_approval_service is not None
+        self._mod_approval_service.reject(
+            parsed.interaction_id,
+            rejector_discord_id=actor_id,
+        )
+        await interaction.response.send_message(
+            "Correction batch rejected. Ask the uploader to revise or re-upload.",
+            ephemeral=True,
+        )
 
     def _winner_name(self, game: Game) -> str | None:
         if game.winner_player_id is None or self._player_repo is None:

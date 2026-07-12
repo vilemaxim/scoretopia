@@ -54,6 +54,14 @@ def can_confirm_player_link(
     return selected_discord_user_id == actor_discord_id
 
 
+def can_approve_mod_batch(
+    *,
+    bot_mod_discord_ids: Sequence[str],
+    actor_discord_id: str,
+) -> bool:
+    return actor_discord_id in bot_mod_discord_ids
+
+
 _PLAYER_LINK_ACTIONS = frozenset(
     {
         "confirm_player_spelling",
@@ -386,3 +394,29 @@ class PlayerDiscordUserSelectView(discord.ui.View):
             max_values=1,
         )
         self.add_item(select)
+
+
+class ModApprovalView(discord.ui.View):
+    def __init__(self, *, interaction_id: int) -> None:
+        super().__init__(timeout=None)
+        self.interaction_id = interaction_id
+        self.add_item(
+            discord.ui.Button(
+                label="Approve",
+                style=discord.ButtonStyle.success,
+                custom_id=encode_custom_id(
+                    "approve_mod_batch",
+                    interaction_id=interaction_id,
+                ),
+            )
+        )
+        self.add_item(
+            discord.ui.Button(
+                label="Reject",
+                style=discord.ButtonStyle.danger,
+                custom_id=encode_custom_id(
+                    "reject_mod_batch",
+                    interaction_id=interaction_id,
+                ),
+            )
+        )

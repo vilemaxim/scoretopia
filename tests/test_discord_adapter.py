@@ -1380,3 +1380,74 @@ def test_adapter_spelling_correction_flow_resumes_commit(
         assert linked.discord_user_id == "300"
     finally:
         conn.close()
+
+
+# --- Bot mod approval (Task 029) ---
+
+
+def _mod_approval_needs_confirmation(
+    *,
+    interaction_id: int = 30,
+    parent_id: int = 10,
+    summary: str = "WrngBob → RealBob",
+) -> object:
+    from scoretopia.domain.actions import ModApprovalNeedsConfirmation
+
+    return ModApprovalNeedsConfirmation(
+        interaction_id=interaction_id,
+        parent_extraction_interaction_id=parent_id,
+        summary=summary,
+    )
+
+
+def test_plan_ingest_response_routes_mod_approval_needs_confirmation() -> None:
+    result = _mod_approval_needs_confirmation()
+
+    plan = plan_ingest_response(result)  # type: ignore[arg-type]
+
+    assert plan.channel == "input"
+    assert plan.kind == "mod_approval_view"
+
+
+def test_deliver_mod_approval_posts_embed_to_input_channel_with_mention() -> None:
+    input_channel = MagicMock()
+    input_channel.send = AsyncMock()
+    adapter = _adapter_with_channels(input_channel=input_channel)
+    adapter._config.bot_mods.discord_user_ids = ("111111111111111111",)
+    result = _mod_approval_needs_confirmation(summary="WrngBob → RealBob")
+    message = _upload_message()
+
+    asyncio.run(adapter._deliver_ingest_result(message, result))  # type: ignore[arg-type]
+
+    input_channel.send.assert_awaited_once()
+    call = input_channel.send.await_args
+    kwargs = call.kwargs
+    content = call.args[0] if call.args else kwargs.get("content", "")
+    assert "<@111111111111111111>" in content
+    assert "embed" in kwargs
+    assert "view" in kwargs
+    embed = kwargs["embed"]
+    assert "WrngBob" in (embed.description or "") or any(
+        "WrngBob" in field.value for field in embed.fields
+    )
+
+
+def test_mod_approval_unauthorized_user_cannot_approve() -> None:
+    from scoretopia.discord.views import ParsedCustomId
+
+    adapter = _adapter_with_channels()
+    adapter._config.bot_mods.discord_user_ids = ("111111111111111111",)
+    adapter._mod_approval_service = MagicMock()
+
+    interaction = MagicMock()
+    interaction.user.id = 222222222222222222
+    interaction.response.send_message = AsyncMock()
+    parsed = ParsedCustomId(action="approve_mod_batch", interaction_id=30)
+
+    asyncio.run(adapter._handle_approve_mod_batch(interaction, parsed))
+
+    interaction.response.send_message.assert_awaited_once_with(
+        "not your confirmation",
+        ephemeral=True,
+    )
+    adapter._mod_approval_service.approve.assert_not_called()
