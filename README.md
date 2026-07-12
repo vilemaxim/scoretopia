@@ -247,6 +247,11 @@ OCR **player names only** (via `compare_extraction_player_names`) — scores,
 tribes, and other fields are not part of the golden gate. Images without a
 matching `.json` are skipped.
 
+Successful ingest commits also write a local training artifact bundle under
+`data/training/` (configurable via `training.path`; gitignored). Promote curated
+screenshot + JSON pairs from that directory into `samples/screenshots/` when you
+want them as pytest goldens (`scoretopia-extract --expected-names-only`).
+
 Production code under `src/scoretopia/` must **not** hardcode human player
 names from your local sample JSON; a pytest guard enforces this so parsers stay
 generic. Use `--expected-names-only` with `scoretopia-extract` for the same

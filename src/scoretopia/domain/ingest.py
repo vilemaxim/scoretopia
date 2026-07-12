@@ -36,6 +36,7 @@ from scoretopia.domain.player_resolution import (
 )
 from scoretopia.domain.players import PlayerService
 from scoretopia.domain.results import MatchOutcome
+from scoretopia.domain.training_export import try_export_training_bundle
 from scoretopia.domain.win_ratios import WinRatioService
 from scoretopia.ingest import logger as ingest_logger
 from scoretopia.screenshot.extract import DEFAULT_MODEL_DIR, extract_screenshot
@@ -90,6 +91,7 @@ class IngestService:
         win_ratio_service: WinRatioService,
         pending_repo: PendingInteractionRepo,
         inbox_path: Path,
+        training_path: Path | None = None,
         model_dir: str | Path = DEFAULT_MODEL_DIR,
         player_identity_service: PlayerIdentityService | None = None,
     ) -> None:
@@ -105,6 +107,7 @@ class IngestService:
             )
         )
         self._inbox_path = inbox_path
+        self._training_path = training_path
         self._model_dir = model_dir
         self._inbox_path.mkdir(parents=True, exist_ok=True)
 
@@ -161,6 +164,7 @@ class IngestService:
             screenshot_type=extracted.screenshot_type,
         )
         working = apply_exact_resolutions(extracted, resolved)
+        resolved_extraction = _serialize_extraction(working)
         slot_confirmations = {
             str(index): confirmed
             for index, confirmed in initial_slot_confirmations(resolved).items()
@@ -170,6 +174,8 @@ class IngestService:
             "screenshot_type": extracted.screenshot_type,
             "uploader_discord_id": uploader_discord_id,
             "raw_extraction": raw_extraction,
+            # Frozen post-fuzzy-match snapshot; corrections mutate ``extraction`` only.
+            "resolved_extraction": resolved_extraction,
             "resolved_roster": resolved_roster_as_dicts(resolved),
             "extraction": _serialize_extraction(working),
             "slot_confirmations": slot_confirmations,
@@ -243,6 +249,13 @@ class IngestService:
             stored_path,
             extraction,
             uploader_discord_id=confirmer_discord_id,
+        )
+        try_export_training_bundle(
+            training_path=self._training_path,
+            interaction_id=parent_id,
+            screenshot_path=stored_path,
+            payload=parent.payload,
+            committed_extraction=_serialize_extraction(extraction),
         )
         self._pending_repo.resolve(interaction_id)
         self._pending_repo.resolve(parent_id)

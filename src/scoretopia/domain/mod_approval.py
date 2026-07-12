@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import Protocol
 
 from scoretopia.config import is_bot_mod
@@ -97,6 +98,28 @@ def _clear_parent_correction_session(
     if isinstance(parent.payload.get("correction_session"), dict):
         parent.payload["correction_session"] = {"corrections": []}
         pending_repo.update_payload(parent_id, parent.payload)
+
+
+def _record_mod_approval(
+    pending_repo: PendingInteractionRepo,
+    parent_id: int,
+    *,
+    mod_discord_id: str,
+) -> None:
+    parent = pending_repo.get_by_id(parent_id)
+    if parent is None:
+        return
+    approvals = parent.payload.get("mod_approvals")
+    if not isinstance(approvals, list):
+        approvals = []
+    approvals.append(
+        {
+            "mod_discord_id": mod_discord_id,
+            "approved_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+    )
+    parent.payload["mod_approvals"] = approvals
+    pending_repo.update_payload(parent_id, parent.payload)
 
 
 class ModApprovalService:
@@ -228,6 +251,11 @@ class ModApprovalService:
                 apply_field=apply_field_correction_to_parent,
             )
 
+        _record_mod_approval(
+            self._pending_repo,
+            parent_id,
+            mod_discord_id=approver_discord_id,
+        )
         _clear_parent_correction_session(self._pending_repo, parent_id)
         self._pending_repo.resolve(interaction_id)
         logger.info(

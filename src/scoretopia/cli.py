@@ -109,6 +109,7 @@ def _build_discord_bot(config: ScoretopiaConfig, token: str) -> DiscordBotAdapte
         win_ratio_service=win_ratio_service,
         pending_repo=pending_repo,
         inbox_path=config.inbox.path,
+        training_path=config.training.path,
     )
     report_service = ReportService(
         game_repo,
