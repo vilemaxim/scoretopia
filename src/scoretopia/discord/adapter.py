@@ -460,13 +460,19 @@ class DiscordBotAdapter(BotPort):
                 result, ExtractionNeedsConfirmation
             ):
                 extraction = self._staged_extraction(result.interaction_id)
+                resolved_roster, slot_confirmations = self._staged_roster_resolution(
+                    result.interaction_id
+                )
                 embed = build_extraction_preview_embed(
                     result.preview,
                     extraction=extraction,
+                    resolved_roster=resolved_roster,
                 )
                 view = ExtractionConfirmView(
                     interaction_id=result.interaction_id,
                     uploader_discord_id=str(message.author.id),
+                    resolved_roster=resolved_roster,
+                    slot_confirmations=slot_confirmations,
                 )
                 await message.reply(embed=embed, view=view)
                 return
@@ -863,6 +869,30 @@ class DiscordBotAdapter(BotPort):
             return deserialize_staged_extraction(pending.payload)
         except ValueError:
             return None
+
+    def _staged_roster_resolution(
+        self,
+        interaction_id: int,
+    ) -> tuple[list[dict[str, object]] | None, dict[str, bool] | None]:
+        repo = getattr(self._ingest_service, "_pending_repo", None)
+        if repo is None:
+            return None, None
+        pending = repo.get_by_id(interaction_id)
+        if pending is None:
+            return None, None
+        raw_roster = pending.payload.get("resolved_roster")
+        resolved_roster: list[dict[str, object]] | None = None
+        if isinstance(raw_roster, list):
+            resolved_roster = [
+                entry for entry in raw_roster if isinstance(entry, dict)
+            ]
+        raw_confirmations = pending.payload.get("slot_confirmations")
+        slot_confirmations: dict[str, bool] | None = None
+        if isinstance(raw_confirmations, dict):
+            slot_confirmations = {
+                str(index): bool(flag) for index, flag in raw_confirmations.items()
+            }
+        return resolved_roster, slot_confirmations
 
     def _other_player_discord_id(self, other_player_id: int) -> str | None:
         if self._player_repo is None:

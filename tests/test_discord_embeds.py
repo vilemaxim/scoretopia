@@ -209,3 +209,63 @@ def test_embed_from_report_dto_uses_kind_colour_and_timestamp() -> None:
     assert embed.colour.value == 0x5865F2
     assert embed.timestamp is not None
     assert embed.fields[0].name == "Recent Win"
+
+
+def test_extraction_preview_embed_shows_raw_vs_suggested_with_match_type() -> None:
+    """Task 028: preview highlights raw OCR vs suggestion when they differ."""
+    from scoretopia.discord.embeds import build_extraction_preview_embed
+    from scoretopia.domain.actions import ExtractionPreview
+    from scoretopia.screenshot.models import GameBasicsExtraction, GameBasicsPlayer
+
+    preview = ExtractionPreview(
+        screenshot_type="game_basics",
+        game_name="Preview Roster",
+    )
+    extraction = GameBasicsExtraction(
+        game_name="Preview Roster",
+        players=(
+            GameBasicsPlayer(name="Alice", is_you=True),
+            GameBasicsPlayer(name="Roberrt"),
+            GameBasicsPlayer(name="ZedUnknown"),
+        ),
+    )
+    resolved_roster = [
+        {
+            "raw_ocr": "Alice",
+            "suggested_name": "Alice",
+            "confidence": 1.0,
+            "match_type": "exact",
+        },
+        {
+            "raw_ocr": "Roberrt",
+            "suggested_name": "Robert",
+            "confidence": 0.92,
+            "match_type": "fuzzy",
+        },
+        {
+            "raw_ocr": "ZedUnknown",
+            "suggested_name": None,
+            "confidence": 0.0,
+            "match_type": "new",
+        },
+    ]
+
+    embed = build_extraction_preview_embed(
+        preview,
+        extraction=extraction,
+        resolved_roster=resolved_roster,
+    )
+    field_map = {field.name: field.value for field in embed.fields}
+    joined_names = " ".join(field_map)
+    joined_values = " ".join(field_map.values())
+
+    # Exact match shown as-is (no raw≠suggested prompt).
+    assert "Alice" in joined_values or "Alice" in joined_names
+    # Fuzzy/new show raw vs suggested and a match_type indicator.
+    assert "Roberrt" in joined_values or "Roberrt" in joined_names
+    assert "Robert" in joined_values or "Robert" in joined_names
+    assert "ZedUnknown" in joined_values or "ZedUnknown" in joined_names
+    assert any(
+        marker in joined_names or marker in joined_values
+        for marker in ("fuzzy", "Fuzzy", "~", "≈", "❓", "🆕", "new", "New")
+    )

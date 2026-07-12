@@ -24,6 +24,13 @@ from scoretopia.domain.actions import (
 from scoretopia.domain.games import GameService
 from scoretopia.domain.matching import is_bot_name
 from scoretopia.domain.player_identity import PlayerIdentityService
+from scoretopia.domain.player_resolution import (
+    apply_exact_resolutions,
+    initial_slot_confirmations,
+    resolve_roster_slots,
+    resolved_roster_as_dicts,
+    roster_names_from_extraction,
+)
 from scoretopia.domain.players import PlayerService
 from scoretopia.domain.results import MatchOutcome, RejectResult
 from scoretopia.domain.win_ratios import WinRatioService
@@ -142,11 +149,25 @@ class IngestService:
         )
         self._log_extraction(extracted)
 
+        raw_extraction = _serialize_extraction(extracted)
+        resolved = resolve_roster_slots(
+            roster_names_from_extraction(extracted),
+            self._player_service.player_repo,
+            screenshot_type=extracted.screenshot_type,
+        )
+        working = apply_exact_resolutions(extracted, resolved)
+        slot_confirmations = {
+            str(index): confirmed
+            for index, confirmed in initial_slot_confirmations(resolved).items()
+        }
         payload: dict[str, object] = {
             "screenshot_path": str(path),
             "screenshot_type": extracted.screenshot_type,
             "uploader_discord_id": uploader_discord_id,
-            "extraction": _serialize_extraction(extracted),
+            "raw_extraction": raw_extraction,
+            "resolved_roster": resolved_roster_as_dicts(resolved),
+            "extraction": _serialize_extraction(working),
+            "slot_confirmations": slot_confirmations,
         }
         pending = self._create_pending(
             kind=_CONFIRM_EXTRACTION_KIND,
@@ -154,7 +175,7 @@ class IngestService:
             payload=payload,
         )
         self._log_pending_interaction(kind=pending.kind, interaction_id=pending.id)
-        preview = _extraction_preview(extracted)
+        preview = _extraction_preview(working)
         return ExtractionNeedsConfirmation(
             interaction_id=pending.id,
             preview=preview,

@@ -7,6 +7,7 @@ Create a bot at https://discord.com/developers, invite it with the
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import discord
@@ -212,10 +213,16 @@ class ExtractionConfirmView(discord.ui.View):
         *,
         interaction_id: int,
         uploader_discord_id: str,
+        resolved_roster: Sequence[Mapping[str, object]] | None = None,
+        slot_confirmations: Mapping[int, bool] | Mapping[str, bool] | None = None,
     ) -> None:
         super().__init__(timeout=None)
         del uploader_discord_id
         self.interaction_id = interaction_id
+        confirm_disabled = _extraction_confirm_disabled(
+            resolved_roster=resolved_roster,
+            slot_confirmations=slot_confirmations,
+        )
         self.add_item(
             discord.ui.Button(
                 label="Confirm",
@@ -224,6 +231,7 @@ class ExtractionConfirmView(discord.ui.View):
                     "confirm_extraction",
                     interaction_id=interaction_id,
                 ),
+                disabled=confirm_disabled,
             )
         )
         self.add_item(
@@ -236,6 +244,25 @@ class ExtractionConfirmView(discord.ui.View):
                 ),
             )
         )
+
+
+def _extraction_confirm_disabled(
+    *,
+    resolved_roster: Sequence[Mapping[str, object]] | None,
+    slot_confirmations: Mapping[int, bool] | Mapping[str, bool] | None,
+) -> bool:
+    if not resolved_roster:
+        return False
+    confirmations = slot_confirmations or {}
+    for index, slot in enumerate(resolved_roster):
+        if str(slot.get("match_type", "")) not in {"fuzzy", "new"}:
+            continue
+        confirmed = confirmations.get(index)
+        if confirmed is None:
+            confirmed = confirmations.get(str(index))
+        if not confirmed:
+            return True
+    return False
 
 
 class PlayerSpellingConfirmView(discord.ui.View):

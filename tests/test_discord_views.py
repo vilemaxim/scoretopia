@@ -142,6 +142,83 @@ def test_extraction_confirm_view_exposes_confirm_and_reject_buttons() -> None:
     assert encode_custom_id("reject_extraction", interaction_id=5) in custom_ids
 
 
+def _confirm_button(view: object):
+    for child in getattr(view, "children", []):
+        if getattr(child, "label", None) == "Confirm":
+            return child
+    raise AssertionError("Confirm button missing")
+
+
+def test_extraction_confirm_disabled_until_fuzzy_and_new_slots_acknowledged() -> None:
+    """Task 028: Confirm stays disabled until fuzzy/new slots are acknowledged."""
+    from scoretopia.discord.views import ExtractionConfirmView
+
+    resolved_roster = [
+        {
+            "raw_ocr": "Alice",
+            "suggested_name": "Alice",
+            "confidence": 1.0,
+            "match_type": "exact",
+        },
+        {
+            "raw_ocr": "Roberrt",
+            "suggested_name": "Robert",
+            "confidence": 0.92,
+            "match_type": "fuzzy",
+        },
+        {
+            "raw_ocr": "ZedUnknown",
+            "suggested_name": None,
+            "confidence": 0.0,
+            "match_type": "new",
+        },
+    ]
+
+    pending_view = ExtractionConfirmView(
+        interaction_id=5,
+        uploader_discord_id="111",
+        resolved_roster=resolved_roster,
+        slot_confirmations={0: True},
+    )
+    assert _confirm_button(pending_view).disabled is True
+
+    ready_view = ExtractionConfirmView(
+        interaction_id=5,
+        uploader_discord_id="111",
+        resolved_roster=resolved_roster,
+        slot_confirmations={0: True, 1: True, 2: True},
+    )
+    assert _confirm_button(ready_view).disabled is False
+
+
+def test_extraction_confirm_enabled_when_all_slots_exact() -> None:
+    """Task 028: exact matches are auto-confirmed, so Confirm starts enabled."""
+    from scoretopia.discord.views import ExtractionConfirmView
+
+    resolved_roster = [
+        {
+            "raw_ocr": "Alice",
+            "suggested_name": "Alice",
+            "confidence": 1.0,
+            "match_type": "exact",
+        },
+        {
+            "raw_ocr": "Bob",
+            "suggested_name": "Bob",
+            "confidence": 1.0,
+            "match_type": "exact",
+        },
+    ]
+
+    view = ExtractionConfirmView(
+        interaction_id=6,
+        uploader_discord_id="111",
+        resolved_roster=resolved_roster,
+        slot_confirmations={0: True, 1: True},
+    )
+    assert _confirm_button(view).disabled is False
+
+
 def _require_player_link_views():
     try:
         from scoretopia.discord.views import (
