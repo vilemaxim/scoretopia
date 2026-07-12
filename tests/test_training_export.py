@@ -200,8 +200,19 @@ def _confirm_through_final_summary(
     confirmer_discord_id: str,
 ) -> Any:
     from scoretopia.domain.actions import FinalSummaryNeedsConfirmation
+    from scoretopia.domain.player_resolution import (
+        mark_all_unresolved_roster_slots_fix_resolved,
+    )
 
-    paused = ingest_service.commit_staged(
+    pending = ingest_service._pending_repo.get_by_id(parent_interaction_id)
+    assert pending is not None
+    mark_all_unresolved_roster_slots_fix_resolved(pending.payload)
+    ingest_service._pending_repo.update_payload(
+        parent_interaction_id,
+        pending.payload,
+    )
+
+    paused = ingest_service.continue_review(
         parent_interaction_id,
         confirmer_discord_id=confirmer_discord_id,
     )
@@ -353,7 +364,7 @@ def test_metadata_includes_correction_count_and_mod_approvals(
         filename="metadata_export.png",
     )
 
-    ingest_service.reject_staged(
+    ingest_service.open_fix(
         staged.interaction_id,
         confirmer_discord_id=uploader_id,
     )

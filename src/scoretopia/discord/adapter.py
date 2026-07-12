@@ -63,6 +63,7 @@ from scoretopia.domain.actions import (
     IngestResult,
     ModApprovalNeedsConfirmation,
     PlayerLinkNeedsConfirmation,
+    RosterSlotsUnresolved,
     StagedIngestNotAuthorized,
     UnrecognizedScreenshot,
     WinRatioNeedsConfirmation,
@@ -759,12 +760,18 @@ class DiscordBotAdapter(BotPort):
         ):
             await self._reply_unauthorized(interaction)
             return
-        result = self._ingest_service.commit_staged(
+        result = self._ingest_service.continue_review(
             parsed.interaction_id,
             confirmer_discord_id=str(interaction.user.id),
         )
         if isinstance(result, StagedIngestNotAuthorized):
             await self._reply_unauthorized(interaction)
+            return
+        if isinstance(result, RosterSlotsUnresolved):
+            await interaction.response.send_message(
+                "Resolve fuzzy/new player slots with Fix before Continue.",
+                ephemeral=True,
+            )
             return
         if isinstance(result, PlayerLinkNeedsConfirmation):
             await self._deliver_player_link_spelling_ui(interaction, result)
@@ -1492,7 +1499,7 @@ class DiscordBotAdapter(BotPort):
         uploader = self._player_link_uploader_id(identity_interaction_id)
         if parent_id is None or uploader is None:
             return
-        result = self._ingest_service.commit_staged(
+        result = self._ingest_service.continue_review(
             parent_id,
             confirmer_discord_id=uploader,
         )

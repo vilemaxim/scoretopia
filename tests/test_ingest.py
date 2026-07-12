@@ -203,6 +203,25 @@ def _stage_screenshot(
     )
 
 
+def _fix_resolve_unresolved_roster_slots(
+    pending_repo: PendingInteractionRepo,
+    parent_interaction_id: int,
+) -> None:
+    """Mark fuzzy/new roster slots Fix-resolved (accept current OCR names).
+
+    Production requires real Fix controls; tests use this to clear the
+    continue_review gate without exercising Discord field-correction UI.
+    """
+    from scoretopia.domain.player_resolution import (
+        mark_all_unresolved_roster_slots_fix_resolved,
+    )
+
+    pending = pending_repo.get_by_id(parent_interaction_id)
+    assert pending is not None
+    mark_all_unresolved_roster_slots_fix_resolved(pending.payload)
+    pending_repo.update_payload(parent_interaction_id, pending.payload)
+
+
 def _commit_staged(
     ingest_service: IngestService,
     staged: ExtractionNeedsConfirmation,
@@ -211,7 +230,11 @@ def _commit_staged(
 ):
     from scoretopia.domain.actions import FinalSummaryNeedsConfirmation
 
-    result = ingest_service.commit_staged(
+    _fix_resolve_unresolved_roster_slots(
+        ingest_service._pending_repo,
+        staged.interaction_id,
+    )
+    result = ingest_service.continue_review(
         staged.interaction_id,
         confirmer_discord_id=confirmer_discord_id,
     )
@@ -576,7 +599,11 @@ def _integration_stage_commit(
             staged,
             uploader_discord_id=uploader_discord_id,
         )
-    result = ingest_service.commit_staged(
+    _fix_resolve_unresolved_roster_slots(
+        ingest_service._pending_repo,
+        staged.interaction_id,
+    )
+    result = ingest_service.continue_review(
         staged.interaction_id,
         confirmer_discord_id=uploader_discord_id,
     )
@@ -1017,7 +1044,7 @@ def test_reject_staged_opens_field_correction_without_active_game(
         )
     assert isinstance(staged, ExtractionNeedsConfirmation)
 
-    reject_result = ingest_service.reject_staged(
+    reject_result = ingest_service.open_fix(
         staged.interaction_id,
         confirmer_discord_id="rejecter-1",
     )
@@ -1132,7 +1159,7 @@ def test_reject_staged_by_other_user_returns_not_authorized(
         )
     assert isinstance(staged, ExtractionNeedsConfirmation)
 
-    result = ingest_service.reject_staged(
+    result = ingest_service.open_fix(
         staged.interaction_id,
         confirmer_discord_id="intruder-2",
     )

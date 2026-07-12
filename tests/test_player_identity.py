@@ -287,7 +287,7 @@ def test_remote_confirm_creates_discord_link_and_completes_ingest_chain(
         pending_repo=pending_repo,
         inbox_path=inbox_path,
     )
-    committed = ingest.commit_staged(
+    committed = ingest.continue_review(
         parent.id,
         confirmer_discord_id="uploader-1",
     )

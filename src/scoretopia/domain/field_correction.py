@@ -8,6 +8,7 @@ from typing import Protocol
 from scoretopia.config import is_bot_mod
 from scoretopia.domain.actions import ModApprovalNeedsConfirmation
 from scoretopia.domain.mod_approval import ModApprovalService
+from scoretopia.domain.player_resolution import mark_roster_slot_fix_resolved
 from scoretopia.storage.models import PendingInteraction
 from scoretopia.storage.repos import PendingInteractionRepo
 
@@ -118,6 +119,11 @@ def apply_field_correction_to_parent(
         new=new,
         slot_index=slot_index,
     )
+    if field == "players" and slot_index is not None:
+        mark_roster_slot_fix_resolved(
+            parent.payload,
+            player_slot_index=slot_index,
+        )
     pending_repo.update_payload(parent_id, parent.payload)
 
 
@@ -183,16 +189,14 @@ class FieldCorrectionService:
         )
 
         if is_bot_mod(actor_discord_id, self._config):
-            extraction = parent.payload.get("extraction")
-            if not isinstance(extraction, dict):
-                msg = "Missing extraction payload"
-                raise ValueError(msg)
-            apply_field_correction_to_extraction(
-                extraction,
+            apply_field_correction_to_parent(
+                self._pending_repo,
+                parent_interaction_id,
                 field=field,
                 new=new,
                 slot_index=slot_index,
             )
+            parent = self._require_open_extraction(parent_interaction_id)
             _append_parent_correction(self._pending_repo, parent, entry)
             logger.info(
                 "mod field correction applied parent=%s field=%s old=%r new=%r",

@@ -40,6 +40,20 @@ from scoretopia.screenshot.models import GameBasicsExtraction, GameBasicsPlayer
 from scoretopia.storage.models import Game
 
 
+def _fix_resolve_unresolved_roster_slots_for_tests(
+    pending_repo: object,
+    parent_interaction_id: int,
+) -> None:
+    from scoretopia.domain.player_resolution import (
+        mark_all_unresolved_roster_slots_fix_resolved,
+    )
+
+    pending = pending_repo.get_by_id(parent_interaction_id)  # type: ignore[attr-defined]
+    assert pending is not None
+    mark_all_unresolved_roster_slots_fix_resolved(pending.payload)
+    pending_repo.update_payload(parent_interaction_id, pending.payload)  # type: ignore[attr-defined]
+
+
 def _sample_game() -> Game:
     return Game(
         id=1,
@@ -729,7 +743,7 @@ def test_deliver_extraction_preview_replies_on_input_not_reports() -> None:
     reports_channel.send.assert_not_awaited()
 
 
-def test_handle_confirm_extraction_routes_to_commit_staged() -> None:
+def test_handle_confirm_extraction_routes_to_continue_review() -> None:
     reports_channel = MagicMock()
     reports_channel.send = AsyncMock()
     adapter = _adapter_with_channels(reports_channel=reports_channel)
@@ -743,7 +757,7 @@ def test_handle_confirm_extraction_routes_to_commit_staged() -> None:
             bot_count=0,
         ),
     )
-    adapter._ingest_service.commit_staged.return_value = committed
+    adapter._ingest_service.continue_review.return_value = committed
 
     interaction = MagicMock()
     interaction.user.id = 42
@@ -752,7 +766,7 @@ def test_handle_confirm_extraction_routes_to_commit_staged() -> None:
 
     asyncio.run(adapter._handle_confirm_extraction(interaction, parsed))
 
-    adapter._ingest_service.commit_staged.assert_called_once_with(
+    adapter._ingest_service.continue_review.assert_called_once_with(
         10,
         confirmer_discord_id="42",
     )
@@ -799,7 +813,7 @@ def test_confirm_extraction_unauthorized_user_gets_ephemeral_message() -> None:
         "not your confirmation",
         ephemeral=True,
     )
-    adapter._ingest_service.commit_staged.assert_not_called()
+    adapter._ingest_service.continue_review.assert_not_called()
 
 
 def test_game_basics_upload_preview_confirm_posts_to_reports_channel(
@@ -828,7 +842,7 @@ def test_game_basics_upload_preview_confirm_posts_to_reports_channel(
     ingest_service.prepare_stored_path.return_value = stored_path
     ingest_service.extract_stored_screenshot.return_value = extraction
     ingest_service.stage_screenshot.return_value = staged
-    ingest_service.commit_staged.return_value = committed
+    ingest_service.continue_review.return_value = committed
 
     reports_channel = MagicMock()
     reports_channel.send = AsyncMock()
@@ -980,7 +994,7 @@ def test_handle_confirm_extraction_delivers_player_link_spelling_ui() -> None:
     adapter = _adapter_with_channels(reports_channel=reports_channel)
     adapter._staged_uploader_id = MagicMock(return_value="42")
     player_link = _player_link_needs_confirmation()
-    adapter._ingest_service.commit_staged.return_value = player_link
+    adapter._ingest_service.continue_review.return_value = player_link
 
     interaction = MagicMock()
     interaction.user.id = 42
@@ -1208,6 +1222,7 @@ def test_adapter_identity_flow_starts_game_after_remote_confirm(
         staged = pending_repo.list_open_by_kind("confirm_extraction")
         assert len(staged) == 1
         parent_id = staged[0].id
+        _fix_resolve_unresolved_roster_slots_for_tests(pending_repo, parent_id)
 
         confirm_extraction = MagicMock()
         confirm_extraction.user.id = 100
@@ -1326,6 +1341,7 @@ def test_adapter_spelling_correction_flow_resumes_commit(
             asyncio.run(adapter._handle_screenshot_upload(message, attachment))
 
         parent_id = pending_repo.list_open_by_kind("confirm_extraction")[0].id
+        _fix_resolve_unresolved_roster_slots_for_tests(pending_repo, parent_id)
 
         confirm_extraction = MagicMock()
         confirm_extraction.user.id = 100

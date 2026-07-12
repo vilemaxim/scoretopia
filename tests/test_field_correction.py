@@ -280,7 +280,7 @@ def test_reject_extraction_opens_field_correction_pending_not_bare_resolve(
         extraction=extraction,
     )
 
-    result = ingest_service.reject_staged(
+    result = ingest_service.open_fix(
         staged.interaction_id,
         confirmer_discord_id="rejecter-fc-1",
     )
@@ -511,7 +511,7 @@ def test_final_summary_confirm_required_for_mod_uploader_before_domain_commit(
         extraction=extraction,
     )
 
-    paused = ingest_service.commit_staged(
+    paused = ingest_service.continue_review(
         staged.interaction_id,
         confirmer_discord_id=mod_id,
     )
@@ -571,7 +571,7 @@ def test_integration_reject_correct_game_name_mod_approve_final_summary_commit(
         extraction=extraction,
     )
 
-    rejected = ingest_service.reject_staged(
+    rejected = ingest_service.open_fix(
         staged.interaction_id,
         confirmer_discord_id=uploader_id,
     )
@@ -603,7 +603,7 @@ def test_integration_reject_correct_game_name_mod_approve_final_summary_commit(
     assert isinstance(corrected, GameBasicsExtraction)
     assert corrected.game_name == "Good Game Name"
 
-    paused = ingest_service.commit_staged(
+    paused = ingest_service.continue_review(
         staged.interaction_id,
         confirmer_discord_id=uploader_id,
     )
