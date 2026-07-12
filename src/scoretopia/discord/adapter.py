@@ -60,6 +60,7 @@ from scoretopia.discord.views import (
 )
 from scoretopia.domain.actions import (
     ExtractionNeedsConfirmation,
+    ExtractionPreview,
     FieldCorrectionNeedsInput,
     FinalSummaryNeedsConfirmation,
     GameEndNeedsConfirmation,
@@ -118,6 +119,12 @@ _FIELD_CORRECTION_PROMPT = (
 )
 _FIELD_CORRECTION_APPLIED = "Updated staged extraction. Continue when ready."
 _ROSTER_SLOT_RESOLVED = "Player slot resolved. Continue when ready."
+_DIAGNOSIS_PREVIEW_REFRESH_FAILED = (
+    "Player slot was resolved, but the diagnosis preview could not be updated. "
+    "Try Fix again or re-upload if Continue stays locked."
+)
+_DIAGNOSIS_CHANNEL_ID_KEY = "diagnosis_channel_id"
+_DIAGNOSIS_MESSAGE_ID_KEY = "diagnosis_message_id"
 _REUPLOAD_GUIDANCE = (
     "This screenshot type is not fully correctable here — please re-upload "
     "a clearer shot."
@@ -529,25 +536,16 @@ class DiscordBotAdapter(BotPort):
             if plan.kind == "extraction_confirm_view" and isinstance(
                 result, ExtractionNeedsConfirmation
             ):
-                extraction = self._staged_extraction(result.interaction_id)
-                (
-                    resolved_roster,
-                    slot_confirmations,
-                    fix_resolved,
-                ) = self._staged_roster_resolution(result.interaction_id)
-                embed = build_extraction_preview_embed(
-                    result.preview,
-                    extraction=extraction,
-                    resolved_roster=resolved_roster,
-                )
-                view = ExtractionConfirmView(
-                    interaction_id=result.interaction_id,
+                embed, view = self._diagnosis_embed_and_view(
+                    result.interaction_id,
+                    preview=result.preview,
                     uploader_discord_id=str(message.author.id),
-                    resolved_roster=resolved_roster,
-                    slot_confirmations=slot_confirmations,
-                    fix_resolved_roster_slots=fix_resolved,
                 )
-                await message.reply(embed=embed, view=view)
+                reply = await message.reply(embed=embed, view=view)
+                self._persist_diagnosis_message(
+                    result.interaction_id,
+                    reply,
+                )
                 return
 
             if plan.kind == "field_correction_view" and isinstance(
@@ -1254,10 +1252,7 @@ class DiscordBotAdapter(BotPort):
                 player_slot_index=parsed.player_slot,
             )
             pending_repo.update_payload(parent_id, parent.payload)
-        await interaction.response.send_message(
-            _ROSTER_SLOT_RESOLVED,
-            ephemeral=True,
-        )
+        await self._ack_roster_slot_resolved(interaction, parent_id)
 
     async def _handle_pick_roster_known_player(
         self,
@@ -1327,10 +1322,7 @@ class DiscordBotAdapter(BotPort):
             new=player.polytopia_name,
             slot_index=parsed.player_slot,
         )
-        await interaction.response.send_message(
-            _ROSTER_SLOT_RESOLVED,
-            ephemeral=True,
-        )
+        await self._ack_roster_slot_resolved(interaction, parent_id)
 
     async def _handle_override_roster_name(
         self,
@@ -1381,10 +1373,7 @@ class DiscordBotAdapter(BotPort):
             new=raw_value.strip(),
             slot_index=parsed.player_slot,
         )
-        await interaction.response.send_message(
-            _ROSTER_SLOT_RESOLVED,
-            ephemeral=True,
-        )
+        await self._ack_roster_slot_resolved(interaction, parent_id)
 
     async def _require_fix_actor(
         self,
@@ -1425,6 +1414,111 @@ class DiscordBotAdapter(BotPort):
         if repo is None:
             return None
         return repo.get_by_id(interaction_id)
+
+    def _diagnosis_embed_and_view(
+        self,
+        parent_id: int,
+        *,
+        preview: ExtractionPreview,
+        uploader_discord_id: str,
+    ) -> tuple[discord.Embed, ExtractionConfirmView]:
+        extraction = self._staged_extraction(parent_id)
+        (
+            resolved_roster,
+            slot_confirmations,
+            fix_resolved,
+        ) = self._staged_roster_resolution(parent_id)
+        embed = build_extraction_preview_embed(
+            preview,
+            extraction=extraction,
+            resolved_roster=resolved_roster,
+        )
+        view = ExtractionConfirmView(
+            interaction_id=parent_id,
+            uploader_discord_id=uploader_discord_id,
+            resolved_roster=resolved_roster,
+            slot_confirmations=slot_confirmations,
+            fix_resolved_roster_slots=fix_resolved,
+        )
+        return embed, view
+
+    def _persist_diagnosis_message(
+        self,
+        parent_id: int,
+        reply: discord.Message | object,
+    ) -> None:
+        pending_repo = getattr(self._ingest_service, "_pending_repo", None)
+        if pending_repo is None:
+            return
+        pending = pending_repo.get_by_id(parent_id)
+        if pending is None or pending.kind != _CONFIRM_EXTRACTION_KIND:
+            return
+        channel = getattr(reply, "channel", None)
+        channel_id = getattr(channel, "id", None)
+        message_id = getattr(reply, "id", None)
+        if not isinstance(channel_id, int) or not isinstance(message_id, int):
+            return
+        pending.payload[_DIAGNOSIS_CHANNEL_ID_KEY] = channel_id
+        pending.payload[_DIAGNOSIS_MESSAGE_ID_KEY] = message_id
+        pending_repo.update_payload(parent_id, pending.payload)
+
+    def _preview_from_pending(self, pending: object) -> ExtractionPreview:
+        payload = getattr(pending, "payload", {}) or {}
+        screenshot_type = str(payload.get("screenshot_type") or "")
+        game_name: str | None = None
+        extraction = payload.get("extraction")
+        if isinstance(extraction, dict):
+            raw_name = extraction.get("game_name")
+            if isinstance(raw_name, str):
+                game_name = raw_name
+        return ExtractionPreview(
+            screenshot_type=screenshot_type,
+            game_name=game_name,
+        )
+
+    async def _refresh_diagnosis_preview(self, parent_id: int) -> bool:
+        pending = self._pending_by_id(parent_id)
+        if pending is None or pending.kind != _CONFIRM_EXTRACTION_KIND:
+            return False
+        channel_id = pending.payload.get(_DIAGNOSIS_CHANNEL_ID_KEY)
+        message_id = pending.payload.get(_DIAGNOSIS_MESSAGE_ID_KEY)
+        if not isinstance(channel_id, int) or not isinstance(message_id, int):
+            return False
+        channel = self._channels_by_id.get(channel_id)
+        if channel is None:
+            return False
+        preview = self._preview_from_pending(pending)
+        embed, view = self._diagnosis_embed_and_view(
+            parent_id,
+            preview=preview,
+            uploader_discord_id=str(pending.discord_user_id),
+        )
+        try:
+            diagnosis_msg = await channel.fetch_message(message_id)
+            await diagnosis_msg.edit(embed=embed, view=view)
+        except Exception:
+            logger.exception(
+                "Failed to refresh diagnosis preview for pending %s",
+                parent_id,
+            )
+            return False
+        return True
+
+    async def _ack_roster_slot_resolved(
+        self,
+        interaction: discord.Interaction,
+        parent_id: int,
+    ) -> None:
+        refreshed = await self._refresh_diagnosis_preview(parent_id)
+        content = (
+            _ROSTER_SLOT_RESOLVED
+            if refreshed
+            else _DIAGNOSIS_PREVIEW_REFRESH_FAILED
+        )
+        if self._response_is_done(interaction):
+            await interaction.followup.send(content, ephemeral=True)
+        else:
+            await interaction.response.send_message(content, ephemeral=True)
 
     def _staged_field_value(self, parent_id: int, field: str) -> str:
         pending = self._pending_by_id(parent_id)
