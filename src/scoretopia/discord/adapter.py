@@ -32,6 +32,7 @@ from scoretopia.discord.embeds import (
 from scoretopia.discord.publisher import DiscordReportPublisher, report_to_embed
 from scoretopia.discord.views import (
     ExtractionConfirmView,
+    FieldCorrectionView,
     FinalSummaryView,
     GameEndConfirmView,
     GameEndPickView,
@@ -43,11 +44,11 @@ from scoretopia.discord.views import (
     PlayerSpellingConfirmView,
     WinRatioConfirmView,
     can_approve_mod_batch,
-    can_confirm_extraction,
     can_confirm_final_summary,
     can_confirm_game_end,
     can_confirm_player_link,
     can_confirm_win_ratio,
+    can_review_staged,
     parse_custom_id,
     unauthorized_confirmation_message,
 )
@@ -91,10 +92,16 @@ _FAILURE_REACTION = "❌"
 
 ScreenshotUploadResult = IngestResult | ExtractionNeedsConfirmation
 
-_FINAL_SUMMARY_PROMPT = "Please confirm the final game summary."
-_REJECT_EXTRACTION_MESSAGE = (
-    "Extraction rejected — use the field correction controls to fix values, "
-    "or re-upload if this screenshot type is not supported for correction."
+_FINAL_SUMMARY_PROMPT = (
+    "Please Confirm the final game summary (commit gate). "
+    "Use Fix to correct values, or Abandon to discard."
+)
+_ABANDON_STAGED_MESSAGE = (
+    "Staged ingest abandoned — upload a new screenshot to start over."
+)
+_FIELD_CORRECTION_PROMPT = (
+    "Fix the extracted values below. Continue from the diagnosis preview "
+    "when ready; Confirm only appears on the final summary."
 )
 _UNREGISTERED_UPLOADER_MESSAGE = (
     "Please run `/register` first to link your Discord account to a "
@@ -121,6 +128,16 @@ class ResponsePlan:
     channel: str
     kind: str
     body: str = ""
+
+
+def _payload_bool_map(
+    payload: dict[str, object],
+    key: str,
+) -> dict[str, bool] | None:
+    raw = payload.get(key)
+    if not isinstance(raw, dict):
+        return None
+    return {str(index): bool(flag) for index, flag in raw.items()}
 
 
 def load_discord_token() -> str:
@@ -488,9 +505,11 @@ class DiscordBotAdapter(BotPort):
                 result, ExtractionNeedsConfirmation
             ):
                 extraction = self._staged_extraction(result.interaction_id)
-                resolved_roster, slot_confirmations = self._staged_roster_resolution(
-                    result.interaction_id
-                )
+                (
+                    resolved_roster,
+                    slot_confirmations,
+                    fix_resolved,
+                ) = self._staged_roster_resolution(result.interaction_id)
                 embed = build_extraction_preview_embed(
                     result.preview,
                     extraction=extraction,
@@ -501,8 +520,15 @@ class DiscordBotAdapter(BotPort):
                     uploader_discord_id=str(message.author.id),
                     resolved_roster=resolved_roster,
                     slot_confirmations=slot_confirmations,
+                    fix_resolved_roster_slots=fix_resolved,
                 )
                 await message.reply(embed=embed, view=view)
+                return
+
+            if plan.kind == "field_correction_view" and isinstance(
+                result, FieldCorrectionNeedsInput
+            ):
+                await self._post_field_correction(result)
                 return
 
             if plan.kind == "game_end_confirm_view" and isinstance(
@@ -583,14 +609,27 @@ class DiscordBotAdapter(BotPort):
             await self._handle_confirm_win_ratio(interaction, parsed)
         elif parsed.action == "reject_win_ratio":
             await self._handle_reject_win_ratio(interaction, parsed)
+        elif parsed.action == "continue_review":
+            await self._handle_continue_review(interaction, parsed)
+        elif parsed.action == "fix_extraction":
+            await self._handle_fix_extraction(interaction, parsed)
+        elif parsed.action == "abandon_staged":
+            await self._handle_abandon_staged(interaction, parsed)
         elif parsed.action == "confirm_extraction":
-            await self._handle_confirm_extraction(interaction, parsed)
+            # Legacy custom_id — route to Continue (ADR 005).
+            await self._handle_continue_review(interaction, parsed)
         elif parsed.action == "reject_extraction":
-            await self._handle_reject_extraction(interaction, parsed)
+            # Legacy custom_id — route to Fix (ADR 005).
+            await self._handle_fix_extraction(interaction, parsed)
         elif parsed.action == "confirm_final_summary":
             await self._handle_confirm_final_summary(interaction, parsed)
+        elif parsed.action == "fix_final_summary":
+            await self._handle_fix_final_summary(interaction, parsed)
+        elif parsed.action == "abandon_final_summary":
+            await self._handle_abandon_final_summary(interaction, parsed)
         elif parsed.action == "reject_final_summary":
-            await self._handle_reject_final_summary(interaction, parsed)
+            # Legacy custom_id — route to Fix from final summary.
+            await self._handle_fix_final_summary(interaction, parsed)
         elif parsed.action == "confirm_player_spelling":
             await self._handle_confirm_player_spelling(interaction, parsed)
         elif parsed.action == "reject_player_spelling":
@@ -748,17 +787,47 @@ class DiscordBotAdapter(BotPort):
             ephemeral=True,
         )
 
-    async def _handle_confirm_extraction(
+    async def _require_staged_uploader(
         self,
         interaction: discord.Interaction,
-        parsed: ParsedCustomId,
-    ) -> None:
-        pending = self._staged_uploader_id(parsed.interaction_id)
-        if pending is None or not can_confirm_extraction(
+        interaction_id: int,
+    ) -> str | None:
+        pending = self._staged_uploader_id(interaction_id)
+        if pending is None or not can_review_staged(
             uploader_discord_id=pending,
             actor_discord_id=str(interaction.user.id),
         ):
             await self._reply_unauthorized(interaction)
+            return None
+        return pending
+
+    async def _require_final_summary_actor(
+        self,
+        interaction: discord.Interaction,
+        interaction_id: int,
+    ) -> tuple[str, int] | None:
+        uploader = self._final_summary_uploader_id(interaction_id)
+        if uploader is None or not can_confirm_final_summary(
+            uploader_discord_id=uploader,
+            actor_discord_id=str(interaction.user.id),
+        ):
+            await self._reply_unauthorized(interaction)
+            return None
+        parent_id = self._final_summary_parent_id(interaction_id)
+        if parent_id is None:
+            await self._reply_unauthorized(interaction)
+            return None
+        return uploader, parent_id
+
+    async def _handle_continue_review(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        if (
+            await self._require_staged_uploader(interaction, parsed.interaction_id)
+            is None
+        ):
             return
         result = self._ingest_service.continue_review(
             parsed.interaction_id,
@@ -781,27 +850,60 @@ class DiscordBotAdapter(BotPort):
             return
         await self._deliver_committed_ingest_result(interaction, result)
 
+    async def _handle_confirm_extraction(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        """Legacy handler name — delegates to Continue (ADR 005)."""
+        await self._handle_continue_review(interaction, parsed)
+
+    async def _handle_fix_extraction(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        if (
+            await self._require_staged_uploader(interaction, parsed.interaction_id)
+            is None
+        ):
+            return
+        fix_result = self._ingest_service.open_fix(
+            parsed.interaction_id,
+            confirmer_discord_id=str(interaction.user.id),
+        )
+        if isinstance(fix_result, StagedIngestNotAuthorized):
+            await self._reply_unauthorized(interaction)
+            return
+        await self._deliver_field_correction_response(interaction, fix_result)
+
     async def _handle_reject_extraction(
         self,
         interaction: discord.Interaction,
         parsed: ParsedCustomId,
     ) -> None:
-        pending = self._staged_uploader_id(parsed.interaction_id)
-        if pending is None or not can_confirm_extraction(
-            uploader_discord_id=pending,
-            actor_discord_id=str(interaction.user.id),
+        """Legacy handler name — delegates to Fix (ADR 005)."""
+        await self._handle_fix_extraction(interaction, parsed)
+
+    async def _handle_abandon_staged(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        if (
+            await self._require_staged_uploader(interaction, parsed.interaction_id)
+            is None
         ):
-            await self._reply_unauthorized(interaction)
             return
-        reject_result = self._ingest_service.reject_staged(
+        result = self._ingest_service.abandon_staged(
             parsed.interaction_id,
             confirmer_discord_id=str(interaction.user.id),
         )
-        if isinstance(reject_result, StagedIngestNotAuthorized):
+        if isinstance(result, StagedIngestNotAuthorized):
             await self._reply_unauthorized(interaction)
             return
         await interaction.response.send_message(
-            _REJECT_EXTRACTION_MESSAGE,
+            _ABANDON_STAGED_MESSAGE,
             ephemeral=True,
         )
 
@@ -840,35 +942,105 @@ class DiscordBotAdapter(BotPort):
             return
         await self._deliver_committed_ingest_result(interaction, result)
 
+    async def _handle_fix_final_summary(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        actor = await self._require_final_summary_actor(
+            interaction,
+            parsed.interaction_id,
+        )
+        if actor is None:
+            return
+        uploader, parent_id = actor
+        pending_repo = getattr(self._ingest_service, "_pending_repo", None)
+        if pending_repo is not None:
+            pending_repo.resolve(parsed.interaction_id)
+        fix_result = self._ingest_service.open_fix(
+            parent_id,
+            confirmer_discord_id=uploader,
+        )
+        if isinstance(fix_result, StagedIngestNotAuthorized):
+            await self._reply_unauthorized(interaction)
+            return
+        await self._deliver_field_correction_response(interaction, fix_result)
+
     async def _handle_reject_final_summary(
         self,
         interaction: discord.Interaction,
         parsed: ParsedCustomId,
     ) -> None:
-        uploader = self._final_summary_uploader_id(parsed.interaction_id)
-        if uploader is None or not can_confirm_final_summary(
-            uploader_discord_id=uploader,
-            actor_discord_id=str(interaction.user.id),
-        ):
-            await self._reply_unauthorized(interaction)
+        """Legacy handler name — delegates to Fix from final summary."""
+        await self._handle_fix_final_summary(interaction, parsed)
+
+    async def _handle_abandon_final_summary(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        actor = await self._require_final_summary_actor(
+            interaction,
+            parsed.interaction_id,
+        )
+        if actor is None:
             return
-        parent_id = self._final_summary_parent_id(parsed.interaction_id)
-        if parent_id is None:
-            await self._reply_unauthorized(interaction)
-            return
-        pending_repo = getattr(self._ingest_service, "_pending_repo", None)
-        if pending_repo is not None:
-            pending_repo.resolve(parsed.interaction_id)
-        reject_result = self._ingest_service.reject_staged(
+        uploader, parent_id = actor
+        result = self._ingest_service.abandon_staged(
             parent_id,
             confirmer_discord_id=uploader,
         )
-        if isinstance(reject_result, StagedIngestNotAuthorized):
+        if isinstance(result, StagedIngestNotAuthorized):
             await self._reply_unauthorized(interaction)
             return
         await interaction.response.send_message(
-            _REJECT_EXTRACTION_MESSAGE,
+            _ABANDON_STAGED_MESSAGE,
             ephemeral=True,
+        )
+
+    async def _post_field_correction(
+        self,
+        result: FieldCorrectionNeedsInput,
+        *,
+        uploader_discord_id: str | None = None,
+    ) -> None:
+        input_channel = self._channel("input")
+        if input_channel is None:
+            return
+        uploader = uploader_discord_id or self._staged_uploader_id(
+            result.parent_extraction_interaction_id
+        ) or ""
+        view = FieldCorrectionView(
+            interaction_id=result.interaction_id,
+            screenshot_type=result.screenshot_type,
+            uploader_discord_id=uploader,
+        )
+        await input_channel.send(
+            _FIELD_CORRECTION_PROMPT,
+            view=view,
+        )
+
+    async def _deliver_field_correction_response(
+        self,
+        interaction: discord.Interaction,
+        result: FieldCorrectionNeedsInput,
+    ) -> None:
+        view = FieldCorrectionView(
+            interaction_id=result.interaction_id,
+            screenshot_type=result.screenshot_type,
+            uploader_discord_id=str(interaction.user.id),
+        )
+        if self._response_is_done(interaction):
+            await interaction.followup.send(
+                _FIELD_CORRECTION_PROMPT,
+                view=view,
+                ephemeral=False,
+            )
+            return
+        await interaction.response.send_message(
+            _FIELD_CORRECTION_PROMPT,
+            view=view,
+            ephemeral=False,
         )
 
     def _final_summary_uploader_id(self, interaction_id: int) -> str | None:
@@ -1105,26 +1277,28 @@ class DiscordBotAdapter(BotPort):
     def _staged_roster_resolution(
         self,
         interaction_id: int,
-    ) -> tuple[list[dict[str, object]] | None, dict[str, bool] | None]:
+    ) -> tuple[
+        list[dict[str, object]] | None,
+        dict[str, bool] | None,
+        dict[str, bool] | None,
+    ]:
         repo = getattr(self._ingest_service, "_pending_repo", None)
         if repo is None:
-            return None, None
+            return None, None, None
         pending = repo.get_by_id(interaction_id)
         if pending is None:
-            return None, None
+            return None, None, None
         raw_roster = pending.payload.get("resolved_roster")
         resolved_roster: list[dict[str, object]] | None = None
         if isinstance(raw_roster, list):
             resolved_roster = [
                 entry for entry in raw_roster if isinstance(entry, dict)
             ]
-        raw_confirmations = pending.payload.get("slot_confirmations")
-        slot_confirmations: dict[str, bool] | None = None
-        if isinstance(raw_confirmations, dict):
-            slot_confirmations = {
-                str(index): bool(flag) for index, flag in raw_confirmations.items()
-            }
-        return resolved_roster, slot_confirmations
+        return (
+            resolved_roster,
+            _payload_bool_map(pending.payload, "slot_confirmations"),
+            _payload_bool_map(pending.payload, "fix_resolved_roster_slots"),
+        )
 
     def _other_player_discord_id(self, other_player_id: int) -> str | None:
         if self._player_repo is None:
@@ -1217,7 +1391,7 @@ class DiscordBotAdapter(BotPort):
         interaction_id: int,
     ) -> str | None:
         uploader = self._player_link_uploader_id(interaction_id)
-        if uploader is None or not can_confirm_extraction(
+        if uploader is None or not can_review_staged(
             uploader_discord_id=uploader,
             actor_discord_id=str(interaction.user.id),
         ):

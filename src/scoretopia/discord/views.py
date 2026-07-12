@@ -45,7 +45,18 @@ def can_confirm_win_ratio(
 def can_confirm_extraction(
     *, uploader_discord_id: str, actor_discord_id: str
 ) -> bool:
+    """Uploader-only gate for diagnosis Continue/Fix/Abandon (legacy name)."""
     return uploader_discord_id == actor_discord_id
+
+
+def can_review_staged(
+    *, uploader_discord_id: str, actor_discord_id: str
+) -> bool:
+    """Preferred alias for diagnosis-review authorization (ADR 005)."""
+    return can_confirm_extraction(
+        uploader_discord_id=uploader_discord_id,
+        actor_discord_id=actor_discord_id,
+    )
 
 
 def can_confirm_final_summary(
@@ -76,6 +87,10 @@ _PLAYER_LINK_ACTIONS = frozenset(
         "confirm_player_link",
         "reject_player_link",
         "select_player_discord_user",
+        "accept_roster_suggestion",
+        "pick_roster_known_player",
+        "override_roster_name",
+        "pick_field_correction",
     }
 )
 
@@ -222,6 +237,8 @@ class WinRatioConfirmView(discord.ui.View):
 
 
 class ExtractionConfirmView(discord.ui.View):
+    """Diagnosis preview: Continue / Fix / Abandon (no Confirm — ADR 005)."""
+
     def __init__(
         self,
         *,
@@ -229,54 +246,78 @@ class ExtractionConfirmView(discord.ui.View):
         uploader_discord_id: str,
         resolved_roster: Sequence[Mapping[str, object]] | None = None,
         slot_confirmations: Mapping[int, bool] | Mapping[str, bool] | None = None,
+        fix_resolved_roster_slots: (
+            Mapping[int, bool] | Mapping[str, bool] | None
+        ) = None,
     ) -> None:
         super().__init__(timeout=None)
-        del uploader_discord_id
+        del uploader_discord_id, slot_confirmations
         self.interaction_id = interaction_id
-        confirm_disabled = _extraction_confirm_disabled(
+        continue_disabled = _continue_review_disabled(
             resolved_roster=resolved_roster,
-            slot_confirmations=slot_confirmations,
+            fix_resolved_roster_slots=fix_resolved_roster_slots,
         )
         self.add_item(
             discord.ui.Button(
-                label="Confirm",
+                label="Continue",
                 style=discord.ButtonStyle.success,
                 custom_id=encode_custom_id(
-                    "confirm_extraction",
+                    "continue_review",
                     interaction_id=interaction_id,
                 ),
-                disabled=confirm_disabled,
+                disabled=continue_disabled,
             )
         )
         self.add_item(
             discord.ui.Button(
-                label="Reject",
+                label="Fix",
                 style=discord.ButtonStyle.secondary,
                 custom_id=encode_custom_id(
-                    "reject_extraction",
+                    "fix_extraction",
+                    interaction_id=interaction_id,
+                ),
+            )
+        )
+        self.add_item(
+            discord.ui.Button(
+                label="Abandon",
+                style=discord.ButtonStyle.danger,
+                custom_id=encode_custom_id(
+                    "abandon_staged",
                     interaction_id=interaction_id,
                 ),
             )
         )
 
 
-def _extraction_confirm_disabled(
+# Alias preferred by ADR 005 naming; same class.
+DiagnosisPreviewView = ExtractionConfirmView
+
+
+def _continue_review_disabled(
     *,
     resolved_roster: Sequence[Mapping[str, object]] | None,
-    slot_confirmations: Mapping[int, bool] | Mapping[str, bool] | None,
+    fix_resolved_roster_slots: Mapping[int, bool] | Mapping[str, bool] | None,
 ) -> bool:
+    """Continue stays disabled until fuzzy/new slots are Fix-resolved."""
     if not resolved_roster:
         return False
-    confirmations = slot_confirmations or {}
+    fix_resolved = fix_resolved_roster_slots or {}
     for index, slot in enumerate(resolved_roster):
         if str(slot.get("match_type", "")) not in {"fuzzy", "new"}:
             continue
-        confirmed = confirmations.get(index)
-        if confirmed is None:
-            confirmed = confirmations.get(str(index))
-        if not confirmed:
+        if not _mapping_flag(fix_resolved, index):
             return True
     return False
+
+
+def _mapping_flag(
+    mapping: Mapping[int, bool] | Mapping[str, bool],
+    index: int,
+) -> bool:
+    as_object = dict(mapping)
+    value = as_object.get(index, as_object.get(str(index)))
+    return bool(value)
 
 
 class PlayerSpellingConfirmView(discord.ui.View):
@@ -434,7 +475,7 @@ class FinalSummaryView(discord.ui.View):
         self.interaction_id = interaction_id
         self.add_item(
             discord.ui.Button(
-                label="Confirm all correct",
+                label="Confirm",
                 style=discord.ButtonStyle.success,
                 custom_id=encode_custom_id(
                     "confirm_final_summary",
@@ -444,11 +485,138 @@ class FinalSummaryView(discord.ui.View):
         )
         self.add_item(
             discord.ui.Button(
-                label="Reject — back to correction",
+                label="Fix",
                 style=discord.ButtonStyle.secondary,
                 custom_id=encode_custom_id(
-                    "reject_final_summary",
+                    "fix_final_summary",
                     interaction_id=interaction_id,
+                ),
+            )
+        )
+        self.add_item(
+            discord.ui.Button(
+                label="Abandon",
+                style=discord.ButtonStyle.danger,
+                custom_id=encode_custom_id(
+                    "abandon_final_summary",
+                    interaction_id=interaction_id,
+                ),
+            )
+        )
+
+
+_GAME_BASICS_CORRECTION_FIELDS = (
+    ("game_name", "Game name"),
+    ("map_size", "Map size"),
+    ("terrain", "Terrain"),
+    ("game_timer", "Game timer"),
+    ("target_score", "Target score"),
+    ("game_type", "Game type"),
+    ("players", "Player names"),
+)
+
+_GAME_END_CORRECTION_FIELDS = (
+    ("game_name", "Game name"),
+    ("winner", "Winner"),
+    ("players", "Player names / scores"),
+)
+
+
+class FieldCorrectionView(discord.ui.View):
+    """Visible field-correction controls posted by Fix (ADR 005)."""
+
+    def __init__(
+        self,
+        *,
+        interaction_id: int,
+        screenshot_type: str,
+        uploader_discord_id: str,
+    ) -> None:
+        super().__init__(timeout=None)
+        del uploader_discord_id
+        self.interaction_id = interaction_id
+        self.screenshot_type = screenshot_type
+        field_options = _correction_field_options(screenshot_type)
+        select = discord.ui.Select(
+            placeholder="Choose a field to correct",
+            options=field_options,
+            custom_id=encode_custom_id(
+                "pick_field_correction",
+                interaction_id=interaction_id,
+            ),
+            min_values=1,
+            max_values=1,
+        )
+        self.add_item(select)
+
+
+def _correction_field_options(
+    screenshot_type: str,
+) -> list[discord.SelectOption]:
+    if screenshot_type == "game_end":
+        fields = _GAME_END_CORRECTION_FIELDS
+    elif screenshot_type in {"friend_profile", "win_ratio"}:
+        fields = (("reupload", "Re-upload (type not fully correctable)"),)
+    else:
+        fields = _GAME_BASICS_CORRECTION_FIELDS
+    return [
+        discord.SelectOption(label=label, value=field)
+        for field, label in fields
+    ]
+
+
+class RosterSlotFixView(discord.ui.View):
+    """Per-slot Fix controls for fuzzy/new roster matches (ADR 005)."""
+
+    def __init__(
+        self,
+        *,
+        interaction_id: int,
+        player_slot: int,
+        raw_ocr: str,
+        suggested_name: str | None,
+        uploader_discord_id: str,
+    ) -> None:
+        super().__init__(timeout=None)
+        del uploader_discord_id, raw_ocr
+        self.interaction_id = interaction_id
+        self.player_slot = player_slot
+        accept_label = (
+            f"Accept suggestion ({suggested_name})"
+            if suggested_name
+            else "Accept OCR name"
+        )
+        self.add_item(
+            discord.ui.Button(
+                label=accept_label[:80],
+                style=discord.ButtonStyle.success,
+                custom_id=encode_custom_id(
+                    "accept_roster_suggestion",
+                    interaction_id=interaction_id,
+                    player_slot=player_slot,
+                ),
+                disabled=suggested_name is None,
+            )
+        )
+        self.add_item(
+            discord.ui.Button(
+                label="Pick known player",
+                style=discord.ButtonStyle.secondary,
+                custom_id=encode_custom_id(
+                    "pick_roster_known_player",
+                    interaction_id=interaction_id,
+                    player_slot=player_slot,
+                ),
+            )
+        )
+        self.add_item(
+            discord.ui.Button(
+                label="Override name",
+                style=discord.ButtonStyle.secondary,
+                custom_id=encode_custom_id(
+                    "override_roster_name",
+                    interaction_id=interaction_id,
+                    player_slot=player_slot,
                 ),
             )
         )
