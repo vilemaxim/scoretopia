@@ -32,6 +32,8 @@ def discover_golden_pairs(samples_dir: Path) -> list[tuple[Path, Path]]:
 GOLDEN_PAIRS = discover_golden_pairs(SAMPLES_DIR)
 FIXIOOOIAN_SAMPLE = SAMPLES_DIR / "fixioooian_butte-start.png"
 FIXIOOOIAN_GOLDEN = FIXIOOOIAN_SAMPLE.with_suffix(".json")
+LOBBY_SAMPLE = SAMPLES_DIR / "game start error.png"
+LOBBY_GOLDEN = LOBBY_SAMPLE.with_suffix(".json")
 
 
 def test_discover_golden_pairs_only_includes_matching_json(tmp_path: Path) -> None:
@@ -98,3 +100,15 @@ def test_fixioooian_in_golden_pairs_when_both_files_present() -> None:
 
     pair_names = {image.name for image, _golden in GOLDEN_PAIRS}
     assert "fixioooian_butte-start.png" in pair_names
+
+
+def test_lobby_strait_in_golden_pairs_when_both_files_present() -> None:
+    """Task 036: dense lobby sample participates in discovery-based goldens."""
+    if not LOBBY_SAMPLE.is_file():
+        pytest.skip("Local lobby sample not present")
+    assert LOBBY_GOLDEN.is_file(), (
+        "Missing 'game start error.json' for Strait of Uhlsii lobby golden pair"
+    )
+
+    pair_names = {image.name for image, _golden in GOLDEN_PAIRS}
+    assert "game start error.png" in pair_names
