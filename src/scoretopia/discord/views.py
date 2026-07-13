@@ -88,6 +88,8 @@ _PLAYER_LINK_ACTIONS = frozenset(
         "confirm_player_link",
         "reject_player_link",
         "select_player_discord_user",
+        "override_player_link",
+        "cancel_player_link_override",
         "accept_roster_suggestion",
         "pick_roster_known_player",
         "override_roster_name",
@@ -406,6 +408,8 @@ class PlayerCorrectionPickView(discord.ui.View):
 
 
 class PlayerLinkRemoteConfirmView(discord.ui.View):
+    """Legacy remote Confirm/Not me view (superseded by ADR 006 mod confirm)."""
+
     def __init__(
         self,
         *,
@@ -434,6 +438,40 @@ class PlayerLinkRemoteConfirmView(discord.ui.View):
                 style=discord.ButtonStyle.danger,
                 custom_id=encode_custom_id(
                     "reject_player_link",
+                    interaction_id=interaction_id,
+                    player_slot=player_slot,
+                ),
+            )
+        )
+
+
+class PlayerLinkOverrideView(discord.ui.View):
+    def __init__(
+        self,
+        *,
+        interaction_id: int,
+        player_slot: int,
+    ) -> None:
+        super().__init__(timeout=None)
+        self.interaction_id = interaction_id
+        self.player_slot = player_slot
+        self.add_item(
+            discord.ui.Button(
+                label="Override",
+                style=discord.ButtonStyle.danger,
+                custom_id=encode_custom_id(
+                    "override_player_link",
+                    interaction_id=interaction_id,
+                    player_slot=player_slot,
+                ),
+            )
+        )
+        self.add_item(
+            discord.ui.Button(
+                label="Cancel",
+                style=discord.ButtonStyle.secondary,
+                custom_id=encode_custom_id(
+                    "cancel_player_link_override",
                     interaction_id=interaction_id,
                     player_slot=player_slot,
                 ),

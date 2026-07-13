@@ -139,6 +139,20 @@ def test_player_update_discord_link(player_repo: PlayerRepo) -> None:
     assert player_repo.get_by_discord_id("333") is not None
 
 
+def test_player_clear_discord_link(player_repo: PlayerRepo) -> None:
+    created = player_repo.create(
+        polytopia_name="Dana",
+        discord_user_id="444",
+        discord_display_name="dana-discord",
+    )
+
+    cleared = player_repo.clear_discord_link(created.id)
+
+    assert cleared.discord_user_id is None
+    assert cleared.discord_display_name is None
+    assert player_repo.get_by_discord_id("444") is None
+
+
 def test_player_create_duplicate_polytopia_name_raises(
     player_repo: PlayerRepo,
 ) -> None:

@@ -1441,6 +1441,420 @@ def test_adapter_spelling_correction_flow_resumes_commit(
         conn.close()
 
 
+def test_adapter_bot_mod_select_links_without_remote_confirm(
+    tmp_path: Path,
+) -> None:
+    (
+        adapter,
+        ingest_service,
+        player_repo,
+        pending_repo,
+        _identity_service,
+        reports_channel,
+        conn,
+    ) = _build_identity_adapter_stack(tmp_path)
+    try:
+        adapter._config.bot_mods.discord_user_ids = ("100",)
+        player_repo.create(polytopia_name="Uploader", discord_user_id="100")
+        extraction = GameBasicsExtraction(
+            game_name="Mod Immediate Link Game",
+            players=(
+                GameBasicsPlayer(name="Uploader", is_you=True),
+                GameBasicsPlayer(name="NewBob"),
+            ),
+        )
+        ingest_service.prepare_stored_path = MagicMock(side_effect=lambda path: path)
+        with patch.object(
+            ingest_service,
+            "extract_stored_screenshot",
+            return_value=extraction,
+        ):
+            message = _upload_message(message_id=4001)
+            message.author.id = 100
+            message.reply = AsyncMock()
+            asyncio.run(
+                adapter._handle_screenshot_upload(
+                    message,
+                    _upload_attachment("mod-link.png"),
+                )
+            )
+
+        parent_id = pending_repo.list_open_by_kind("confirm_extraction")[0].id
+        _fix_resolve_unresolved_roster_slots_for_tests(pending_repo, parent_id)
+        confirm_extraction = MagicMock()
+        confirm_extraction.user.id = 100
+        confirm_extraction.response.send_message = AsyncMock()
+        asyncio.run(
+            adapter._handle_confirm_extraction(
+                confirm_extraction,
+                ParsedCustomId(action="confirm_extraction", interaction_id=parent_id),
+            )
+        )
+        identity_id = pending_repo.list_open_by_kind("confirm_player_link")[0].id
+
+        confirm_spelling = MagicMock()
+        confirm_spelling.user.id = 100
+        confirm_spelling.response.send_message = AsyncMock()
+        asyncio.run(
+            adapter._handle_component(
+                confirm_spelling,
+                ParsedCustomId(
+                    action="confirm_player_spelling",
+                    interaction_id=identity_id,
+                    player_slot=1,
+                ),
+            )
+        )
+
+        select = MagicMock()
+        select.user.id = 100
+        select.response.send_message = AsyncMock()
+        select.response.is_done = MagicMock(return_value=False)
+        select.followup.send = AsyncMock()
+        select.channel = None
+        select.data = {"values": ["200"]}
+        asyncio.run(
+            adapter._handle_component(
+                select,
+                ParsedCustomId(
+                    action="select_player_discord_user",
+                    interaction_id=identity_id,
+                    player_slot=1,
+                ),
+            )
+        )
+
+        linked = player_repo.get_by_polytopia_name("NewBob")
+        assert linked is not None
+        assert linked.discord_user_id == "200"
+        pending = pending_repo.get_by_id(identity_id)
+        assert pending is not None
+        assert pending.status != "open"
+        # Response may be the link ack or a follow-on final-summary prompt
+        # (MagicMock is_done stays False). Either way, never remote-confirm.
+        sent = " ".join(
+            str(call.args[0]) if call.args else ""
+            for call in select.response.send_message.await_args_list
+        )
+        assert "please confirm or reject" not in sent.lower()
+        assert player_repo.get_by_discord_id("200") is not None
+    finally:
+        conn.close()
+
+
+def test_adapter_non_mod_select_requests_mod_slash_confirm(
+    tmp_path: Path,
+) -> None:
+    (
+        adapter,
+        ingest_service,
+        player_repo,
+        pending_repo,
+        _identity_service,
+        _reports_channel,
+        conn,
+    ) = _build_identity_adapter_stack(tmp_path)
+    try:
+        adapter._config.bot_mods.discord_user_ids = ("999",)
+        player_repo.create(polytopia_name="Uploader", discord_user_id="100")
+        extraction = GameBasicsExtraction(
+            game_name="Nonmod Link Game",
+            players=(
+                GameBasicsPlayer(name="Uploader", is_you=True),
+                GameBasicsPlayer(name="NewBob"),
+            ),
+        )
+        ingest_service.prepare_stored_path = MagicMock(side_effect=lambda path: path)
+        with patch.object(
+            ingest_service,
+            "extract_stored_screenshot",
+            return_value=extraction,
+        ):
+            message = _upload_message(message_id=5001)
+            message.author.id = 100
+            message.reply = AsyncMock()
+            asyncio.run(
+                adapter._handle_screenshot_upload(
+                    message,
+                    _upload_attachment("nonmod-link.png"),
+                )
+            )
+
+        parent_id = pending_repo.list_open_by_kind("confirm_extraction")[0].id
+        _fix_resolve_unresolved_roster_slots_for_tests(pending_repo, parent_id)
+        confirm_extraction = MagicMock()
+        confirm_extraction.user.id = 100
+        confirm_extraction.response.send_message = AsyncMock()
+        asyncio.run(
+            adapter._handle_confirm_extraction(
+                confirm_extraction,
+                ParsedCustomId(action="confirm_extraction", interaction_id=parent_id),
+            )
+        )
+        identity_id = pending_repo.list_open_by_kind("confirm_player_link")[0].id
+
+        confirm_spelling = MagicMock()
+        confirm_spelling.user.id = 100
+        confirm_spelling.response.send_message = AsyncMock()
+        asyncio.run(
+            adapter._handle_component(
+                confirm_spelling,
+                ParsedCustomId(
+                    action="confirm_player_spelling",
+                    interaction_id=identity_id,
+                    player_slot=1,
+                ),
+            )
+        )
+
+        channel = MagicMock()
+        channel.send = AsyncMock()
+        select = MagicMock()
+        select.user.id = 100
+        select.response.send_message = AsyncMock()
+        select.response.is_done = MagicMock(return_value=False)
+        select.followup.send = AsyncMock()
+        select.channel = channel
+        select.data = {"values": ["200"]}
+        asyncio.run(
+            adapter._handle_component(
+                select,
+                ParsedCustomId(
+                    action="select_player_discord_user",
+                    interaction_id=identity_id,
+                    player_slot=1,
+                ),
+            )
+        )
+
+        assert player_repo.get_by_polytopia_name("NewBob") is None
+        pending = pending_repo.get_by_id(identity_id)
+        assert pending is not None
+        assert pending.status == "open"
+        slots = pending.payload["slots"]
+        bob_slot = next(s for s in slots if s["polytopia_name"] == "NewBob")
+        assert bob_slot["selected_discord_user_id"] == "200"
+        assert bob_slot["resolved"] is False
+
+        channel.send.assert_awaited_once()
+        channel_content = channel.send.await_args.args[0]
+        assert "<@999>" in channel_content
+        assert f"/confirm-player-link interaction_id:{identity_id} slot:1" in (
+            channel_content
+        )
+        assert "please confirm or reject" not in channel_content.lower()
+    finally:
+        conn.close()
+
+
+def test_confirm_player_link_slash_succeeds_for_bot_mod(
+    tmp_path: Path,
+) -> None:
+    (
+        adapter,
+        _ingest_service,
+        player_repo,
+        pending_repo,
+        identity_service,
+        _reports_channel,
+        conn,
+    ) = _build_identity_adapter_stack(tmp_path)
+    try:
+        adapter._config.bot_mods.discord_user_ids = ("999",)
+        player_repo.create(polytopia_name="Uploader", discord_user_id="100")
+        extraction = GameBasicsExtraction(
+            game_name="Slash Confirm Game",
+            players=(GameBasicsPlayer(name="NewBob"),),
+        )
+        parent = pending_repo.create(
+            kind="confirm_extraction",
+            discord_user_id="100",
+            payload={
+                "screenshot_type": "game_basics",
+                "screenshot_path": str(tmp_path / "slash.png"),
+                "uploader_discord_id": "100",
+                "extraction": {
+                    "screenshot_type": "game_basics",
+                    "game_name": extraction.game_name,
+                    "players": [
+                        {
+                            "name": "NewBob",
+                            "is_you": False,
+                            "is_eliminated": False,
+                        }
+                    ],
+                },
+            },
+        )
+        identity = identity_service.begin_identity_check(
+            parent_interaction_id=parent.id,
+            uploader_discord_id="100",
+            extraction=extraction,
+            unresolved=identity_service.list_unresolved_humans(extraction),
+        )
+        identity_service.confirm_spelling(
+            identity.interaction_id,
+            slot_index=0,
+            confirmer_discord_id="100",
+        )
+        identity_service.select_discord_user(
+            identity.interaction_id,
+            slot_index=0,
+            selected_discord_user_id="200",
+            confirmer_discord_id="100",
+        )
+
+        interaction = MagicMock()
+        interaction.user.id = 999
+        interaction.response.send_message = AsyncMock()
+        interaction.response.is_done = MagicMock(return_value=False)
+        interaction.followup.send = AsyncMock()
+        asyncio.run(
+            adapter._handle_confirm_player_link_slash(
+                interaction,
+                interaction_id=identity.interaction_id,
+                slot=0,
+            )
+        )
+
+        linked = player_repo.get_by_polytopia_name("NewBob")
+        assert linked is not None
+        assert linked.discord_user_id == "200"
+        interaction.response.send_message.assert_awaited()
+    finally:
+        conn.close()
+
+
+def test_confirm_player_link_slash_rejects_non_mod(
+    tmp_path: Path,
+) -> None:
+    (
+        adapter,
+        _ingest_service,
+        _player_repo,
+        _pending_repo,
+        _identity_service,
+        _reports_channel,
+        conn,
+    ) = _build_identity_adapter_stack(tmp_path)
+    try:
+        adapter._config.bot_mods.discord_user_ids = ("999",)
+        interaction = MagicMock()
+        interaction.user.id = 100
+        interaction.response.send_message = AsyncMock()
+        asyncio.run(
+            adapter._handle_confirm_player_link_slash(
+                interaction,
+                interaction_id=1,
+                slot=0,
+            )
+        )
+        interaction.response.send_message.assert_awaited_once_with(
+            "not your confirmation",
+            ephemeral=True,
+        )
+    finally:
+        conn.close()
+
+
+def test_adapter_mod_select_conflict_shows_override_not_integrity_error(
+    tmp_path: Path,
+) -> None:
+    (
+        adapter,
+        ingest_service,
+        player_repo,
+        pending_repo,
+        _identity_service,
+        _reports_channel,
+        conn,
+    ) = _build_identity_adapter_stack(tmp_path)
+    try:
+        adapter._config.bot_mods.discord_user_ids = ("100",)
+        # Discord ID already on RegisteredAs (/register); slot is vilemaxim1.
+        player_repo.create(
+            polytopia_name="RegisteredAs",
+            discord_user_id="100",
+        )
+        extraction = GameBasicsExtraction(
+            game_name="Override Prompt Game",
+            players=(
+                GameBasicsPlayer(name="RegisteredAs", is_you=True),
+                GameBasicsPlayer(name="vilemaxim1"),
+            ),
+        )
+        ingest_service.prepare_stored_path = MagicMock(side_effect=lambda path: path)
+        with patch.object(
+            ingest_service,
+            "extract_stored_screenshot",
+            return_value=extraction,
+        ):
+            message = _upload_message(message_id=6001)
+            message.author.id = 100
+            message.reply = AsyncMock()
+            asyncio.run(
+                adapter._handle_screenshot_upload(
+                    message,
+                    _upload_attachment("override.png"),
+                )
+            )
+
+        parent_id = pending_repo.list_open_by_kind("confirm_extraction")[0].id
+        _fix_resolve_unresolved_roster_slots_for_tests(pending_repo, parent_id)
+        confirm_extraction = MagicMock()
+        confirm_extraction.user.id = 100
+        confirm_extraction.response.send_message = AsyncMock()
+        asyncio.run(
+            adapter._handle_confirm_extraction(
+                confirm_extraction,
+                ParsedCustomId(action="confirm_extraction", interaction_id=parent_id),
+            )
+        )
+        identity_id = pending_repo.list_open_by_kind("confirm_player_link")[0].id
+
+        confirm_spelling = MagicMock()
+        confirm_spelling.user.id = 100
+        confirm_spelling.response.send_message = AsyncMock()
+        asyncio.run(
+            adapter._handle_component(
+                confirm_spelling,
+                ParsedCustomId(
+                    action="confirm_player_spelling",
+                    interaction_id=identity_id,
+                    player_slot=1,
+                ),
+            )
+        )
+
+        select = MagicMock()
+        select.user.id = 100
+        select.response.send_message = AsyncMock()
+        select.response.is_done = MagicMock(return_value=False)
+        select.followup.send = AsyncMock()
+        select.channel = None
+        select.data = {"values": ["100"]}
+        asyncio.run(
+            adapter._handle_component(
+                select,
+                ParsedCustomId(
+                    action="select_player_discord_user",
+                    interaction_id=identity_id,
+                    player_slot=1,
+                ),
+            )
+        )
+
+        select.response.send_message.assert_awaited()
+        kwargs = select.response.send_message.await_args.kwargs
+        assert "embed" in kwargs
+        assert "view" in kwargs
+        assert "RegisteredAs" in (kwargs["embed"].description or "")
+        assert "vilemaxim1" in (kwargs["embed"].description or "")
+        assert player_repo.get_by_polytopia_name("vilemaxim1") is None
+    finally:
+        conn.close()
+
+
 # --- Bot mod approval (Task 029) ---
 
 

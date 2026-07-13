@@ -343,6 +343,29 @@ def test_can_confirm_player_link_allows_selected_user_only() -> None:
     )
 
 
+def test_player_link_override_view_encodes_override_and_cancel() -> None:
+    from scoretopia.discord.views import PlayerLinkOverrideView, encode_custom_id
+
+    view = PlayerLinkOverrideView(interaction_id=11, player_slot=2)
+    custom_ids = {child.custom_id for child in view.children}
+    assert (
+        encode_custom_id(
+            "override_player_link",
+            interaction_id=11,
+            player_slot=2,
+        )
+        in custom_ids
+    )
+    assert (
+        encode_custom_id(
+            "cancel_player_link_override",
+            interaction_id=11,
+            player_slot=2,
+        )
+        in custom_ids
+    )
+
+
 # --- Wrong OCR spelling — player correction pick (Task 019) ---
 
 
