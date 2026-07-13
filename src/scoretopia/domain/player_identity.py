@@ -113,6 +113,14 @@ class PlayerIdentityService:
                 )
         return None
 
+    def has_completed_identity_for_parent(self, parent_interaction_id: int) -> bool:
+        """True when a prior identity check for this staged ingest is fully resolved."""
+        for pending in self._pending_repo.list_by_kind(_CONFIRM_PLAYER_LINK_KIND):
+            parent_id = pending.payload.get("parent_extraction_interaction_id")
+            if parent_id == parent_interaction_id and pending.status == "resolved":
+                return True
+        return False
+
     def begin_identity_check(
         self,
         *,
@@ -228,6 +236,37 @@ class PlayerIdentityService:
         slot = self._slot_for_index(pending.payload, slot_index)
         slot["selected_discord_user_id"] = selected_discord_user_id
         self._save_slots(interaction_id, pending.payload)
+
+    def skip_discord_link(
+        self,
+        interaction_id: int,
+        *,
+        slot_index: int,
+        confirmer_discord_id: str,
+    ) -> ConfirmPlayerLinkResult:
+        """Resolve a slot without linking Discord (Polytopia-only player)."""
+        pending = self._require_open_pending(interaction_id)
+        if pending.discord_user_id != confirmer_discord_id:
+            return ConfirmPlayerLinkResult(
+                outcome=ConfirmPlayerLinkOutcome.NOT_AUTHORIZED,
+            )
+        slot = self._slot_for_index(pending.payload, slot_index)
+        player = self._ensure_polytopia_only_player(slot)
+        return self._mark_slot_resolved(
+            interaction_id,
+            pending.payload,
+            slot,
+            player=player,
+        )
+
+    def _ensure_polytopia_only_player(self, slot: dict[str, object]) -> Player:
+        """Return the slot's player row without clearing an existing Discord link."""
+        polytopia_name = str(slot["polytopia_name"])
+        existing = self._player_repo.get_by_polytopia_name(polytopia_name)
+        target = self._resolve_target_player(slot, existing)
+        if target is not None:
+            return target
+        return self._player_repo.create(polytopia_name=polytopia_name)
 
     def link_selected_discord_user(
         self,

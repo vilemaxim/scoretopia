@@ -456,6 +456,13 @@ class PendingInteractionRepo:
         ).fetchall()
         return [_pending_from_row(row) for row in rows]
 
+    def list_by_kind(self, kind: str) -> list[PendingInteraction]:
+        rows = self._conn.execute(
+            f"{_PENDING_SELECT} WHERE kind = ? ORDER BY id",
+            (kind,),
+        ).fetchall()
+        return [_pending_from_row(row) for row in rows]
+
     def update_payload(
         self,
         interaction_id: int,

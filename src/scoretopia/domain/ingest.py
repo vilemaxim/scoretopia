@@ -470,6 +470,13 @@ class IngestService:
         if existing is not None:
             return existing
 
+        # Identity already finished for this staged ingest (e.g. Skip left
+        # discord_user_id null). Do not re-prompt until a later game.
+        if self._player_identity_service.has_completed_identity_for_parent(
+            parent_interaction_id
+        ):
+            return None
+
         return self._player_identity_service.begin_identity_check(
             parent_interaction_id=parent_interaction_id,
             uploader_discord_id=uploader_discord_id,

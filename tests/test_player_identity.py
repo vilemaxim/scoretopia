@@ -722,3 +722,276 @@ def test_link_idempotent_when_discord_already_on_same_player(
     assert result.outcome == module.ConfirmPlayerLinkOutcome.SUCCESS
     slot = _slot_for_index(pending_repo, interaction_id, slot_index)
     assert slot["resolved"] is True
+
+
+# --- Skip Discord link during identity check (Task 001) ---
+
+
+def _begin_identity_after_spelling(
+    player_identity_service,
+    pending_repo: PendingInteractionRepo,
+    *,
+    names: tuple[str, ...],
+    uploader_discord_id: str = "uploader-1",
+    confirm_slot_indexes: tuple[int, ...] | None = None,
+) -> tuple[int, int]:
+    """Begin identity check and optionally confirm spelling on slots.
+
+    Returns ``(identity_interaction_id, parent_interaction_id)``.
+    """
+    extraction = _game_basics(*names)
+    unresolved = player_identity_service.list_unresolved_humans(extraction)
+    parent = pending_repo.create(
+        kind="confirm_extraction",
+        discord_user_id=uploader_discord_id,
+        payload={"screenshot_type": "game_basics"},
+    )
+    identity = player_identity_service.begin_identity_check(
+        parent_interaction_id=parent.id,
+        uploader_discord_id=uploader_discord_id,
+        extraction=extraction,
+        unresolved=unresolved,
+    )
+    slots_to_confirm = (
+        confirm_slot_indexes
+        if confirm_slot_indexes is not None
+        else tuple(entry.slot_index for entry in unresolved)
+    )
+    for slot_index in slots_to_confirm:
+        player_identity_service.confirm_spelling(
+            identity.interaction_id,
+            slot_index=slot_index,
+            confirmer_discord_id=uploader_discord_id,
+        )
+    return identity.interaction_id, parent.id
+
+
+def test_skip_discord_resolves_last_slot_creates_unlinked_player(
+    player_repo: PlayerRepo,
+    pending_repo: PendingInteractionRepo,
+) -> None:
+    player_identity_service = _player_identity_service(player_repo, pending_repo)
+    module = _require_player_identity_module()
+    interaction_id, _parent_id = _begin_identity_after_spelling(
+        player_identity_service,
+        pending_repo,
+        names=("SkipOnlyBob",),
+    )
+
+    result = player_identity_service.skip_discord_link(
+        interaction_id,
+        slot_index=0,
+        confirmer_discord_id="uploader-1",
+    )
+
+    assert result.outcome == module.ConfirmPlayerLinkOutcome.SUCCESS
+    slot = _slot_for_index(pending_repo, interaction_id, slot_index=0)
+    assert slot["resolved"] is True
+    assert slot.get("selected_discord_user_id") in (None, "")
+    player = player_repo.get_by_polytopia_name("SkipOnlyBob")
+    assert player is not None
+    assert player.discord_user_id is None
+    pending = pending_repo.get_by_id(interaction_id)
+    assert pending is not None
+    assert pending.status == "resolved"
+
+
+def test_skip_discord_keeps_existing_unlinked_player_row(
+    player_repo: PlayerRepo,
+    pending_repo: PendingInteractionRepo,
+) -> None:
+    player_identity_service = _player_identity_service(player_repo, pending_repo)
+    module = _require_player_identity_module()
+    existing = player_repo.create(polytopia_name="AlreadyThere")
+    interaction_id, _parent_id = _begin_identity_after_spelling(
+        player_identity_service,
+        pending_repo,
+        names=("AlreadyThere",),
+    )
+
+    result = player_identity_service.skip_discord_link(
+        interaction_id,
+        slot_index=0,
+        confirmer_discord_id="uploader-1",
+    )
+
+    assert result.outcome == module.ConfirmPlayerLinkOutcome.SUCCESS
+    player = player_repo.get_by_id(existing.id)
+    assert player is not None
+    assert player.discord_user_id is None
+    assert player.polytopia_name == "AlreadyThere"
+    slot = _slot_for_index(pending_repo, interaction_id, slot_index=0)
+    assert slot["resolved"] is True
+    assert slot["player_id"] == existing.id
+
+
+def test_skip_discord_does_not_clear_existing_discord_link(
+    player_repo: PlayerRepo,
+    pending_repo: PendingInteractionRepo,
+) -> None:
+    player_identity_service = _player_identity_service(player_repo, pending_repo)
+    module = _require_player_identity_module()
+    # Slot starts unresolved; Discord is attached after identity begins so skip
+    # must not wipe an existing link if one is somehow already set.
+    extraction = _game_basics("LinkedLater")
+    unresolved = player_identity_service.list_unresolved_humans(extraction)
+    parent = pending_repo.create(
+        kind="confirm_extraction",
+        discord_user_id="uploader-1",
+        payload={"screenshot_type": "game_basics"},
+    )
+    identity = player_identity_service.begin_identity_check(
+        parent_interaction_id=parent.id,
+        uploader_discord_id="uploader-1",
+        extraction=extraction,
+        unresolved=unresolved,
+    )
+    player_identity_service.confirm_spelling(
+        identity.interaction_id,
+        slot_index=0,
+        confirmer_discord_id="uploader-1",
+    )
+    linked = player_repo.create(
+        polytopia_name="LinkedLater",
+        discord_user_id="keep-this-discord",
+    )
+
+    result = player_identity_service.skip_discord_link(
+        identity.interaction_id,
+        slot_index=0,
+        confirmer_discord_id="uploader-1",
+    )
+
+    assert result.outcome == module.ConfirmPlayerLinkOutcome.SUCCESS
+    player = player_repo.get_by_id(linked.id)
+    assert player is not None
+    assert player.discord_user_id == "keep-this-discord"
+    slot = _slot_for_index(pending_repo, identity.interaction_id, slot_index=0)
+    assert slot["resolved"] is True
+
+
+def test_skip_discord_with_remaining_slots_leaves_pending_open(
+    player_repo: PlayerRepo,
+    pending_repo: PendingInteractionRepo,
+) -> None:
+    player_identity_service = _player_identity_service(player_repo, pending_repo)
+    module = _require_player_identity_module()
+    interaction_id, _parent_id = _begin_identity_after_spelling(
+        player_identity_service,
+        pending_repo,
+        names=("SkipAlice", "LaterBob"),
+        confirm_slot_indexes=(0,),
+    )
+
+    result = player_identity_service.skip_discord_link(
+        interaction_id,
+        slot_index=0,
+        confirmer_discord_id="uploader-1",
+    )
+
+    assert result.outcome == module.ConfirmPlayerLinkOutcome.SUCCESS
+    pending = pending_repo.get_by_id(interaction_id)
+    assert pending is not None
+    assert pending.status == "open"
+    skipped = _slot_for_index(pending_repo, interaction_id, slot_index=0)
+    remaining = _slot_for_index(pending_repo, interaction_id, slot_index=1)
+    assert skipped["resolved"] is True
+    assert remaining["resolved"] is False
+    still_open = player_identity_service.find_pending_for_parent(_parent_id)
+    assert still_open is not None
+    assert len(still_open.unresolved) == 1
+    assert still_open.unresolved[0].polytopia_name == "LaterBob"
+
+
+def test_skip_discord_unauthorized_confirmer_does_not_resolve(
+    player_repo: PlayerRepo,
+    pending_repo: PendingInteractionRepo,
+) -> None:
+    player_identity_service = _player_identity_service(player_repo, pending_repo)
+    module = _require_player_identity_module()
+    interaction_id, _parent_id = _begin_identity_after_spelling(
+        player_identity_service,
+        pending_repo,
+        names=("GuardedName",),
+    )
+
+    result = player_identity_service.skip_discord_link(
+        interaction_id,
+        slot_index=0,
+        confirmer_discord_id="intruder-99",
+    )
+
+    assert result.outcome == module.ConfirmPlayerLinkOutcome.NOT_AUTHORIZED
+    slot = _slot_for_index(pending_repo, interaction_id, slot_index=0)
+    assert slot["resolved"] is False
+    assert player_repo.get_by_polytopia_name("GuardedName") is None
+    pending = pending_repo.get_by_id(interaction_id)
+    assert pending is not None
+    assert pending.status == "open"
+
+
+def test_skip_discord_then_continue_review_completes_with_unlinked_player(
+    player_repo: PlayerRepo,
+    pending_repo: PendingInteractionRepo,
+    player_service: PlayerService,
+    game_service: GameService,
+    win_ratio_service: WinRatioService,
+    inbox_path: Path,
+) -> None:
+    player_identity_service = _player_identity_service(player_repo, pending_repo)
+    module = _require_player_identity_module()
+    player_repo.create(
+        polytopia_name="Uploader",
+        discord_user_id="uploader-1",
+    )
+    extraction = _game_basics("Uploader", "NoDiscordCarol", is_you_index=0)
+    unresolved = player_identity_service.list_unresolved_humans(extraction)
+    parent_id = _parent_with_staged_extraction(
+        pending_repo,
+        uploader_discord_id="uploader-1",
+        extraction=extraction,
+        inbox_path=inbox_path,
+    )
+    identity = player_identity_service.begin_identity_check(
+        parent_interaction_id=parent_id,
+        uploader_discord_id="uploader-1",
+        extraction=extraction,
+        unresolved=unresolved,
+    )
+    player_identity_service.confirm_spelling(
+        identity.interaction_id,
+        slot_index=1,
+        confirmer_discord_id="uploader-1",
+    )
+
+    result = player_identity_service.skip_discord_link(
+        identity.interaction_id,
+        slot_index=1,
+        confirmer_discord_id="uploader-1",
+    )
+    assert result.outcome == module.ConfirmPlayerLinkOutcome.SUCCESS
+
+    ingest = IngestService(
+        player_service=player_service,
+        game_service=game_service,
+        win_ratio_service=win_ratio_service,
+        pending_repo=pending_repo,
+        inbox_path=inbox_path,
+        player_identity_service=player_identity_service,
+    )
+    continued = ingest.continue_review(
+        parent_id,
+        confirmer_discord_id="uploader-1",
+    )
+    from scoretopia.domain.actions import FinalSummaryNeedsConfirmation, GameStarted
+
+    if isinstance(continued, FinalSummaryNeedsConfirmation):
+        continued = ingest.confirm_final_summary(
+            continued.interaction_id,
+            confirmer_discord_id="uploader-1",
+        )
+
+    assert isinstance(continued, GameStarted)
+    carol = player_repo.get_by_polytopia_name("NoDiscordCarol")
+    assert carol is not None
+    assert carol.discord_user_id is None

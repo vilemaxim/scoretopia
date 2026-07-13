@@ -2015,3 +2015,390 @@ def test_final_summary_unauthorized_user_cannot_confirm() -> None:
         ephemeral=True,
     )
     adapter._ingest_service.confirm_final_summary.assert_not_called()
+
+
+# --- Skip Discord link during identity check (Task 001) ---
+
+
+def test_skip_player_discord_component_calls_identity_service() -> None:
+    from scoretopia.domain.player_identity import (
+        ConfirmPlayerLinkOutcome,
+        ConfirmPlayerLinkResult,
+    )
+
+    identity_service = MagicMock()
+    identity_service.skip_discord_link.return_value = ConfirmPlayerLinkResult(
+        outcome=ConfirmPlayerLinkOutcome.SUCCESS,
+    )
+    adapter = _player_link_adapter(
+        identity_service=identity_service,
+        uploader_discord_id="42",
+    )
+    adapter._all_player_link_slots_resolved = MagicMock(return_value=True)
+    adapter._maybe_resume_parent_commit = AsyncMock()
+
+    interaction = _player_link_interaction(42)
+    parsed = ParsedCustomId(
+        action="skip_player_discord",
+        interaction_id=20,
+        player_slot=1,
+    )
+
+    asyncio.run(adapter._handle_component(interaction, parsed))
+
+    identity_service.skip_discord_link.assert_called_once_with(
+        20,
+        slot_index=1,
+        confirmer_discord_id="42",
+    )
+
+
+def test_skip_player_discord_unauthorized_non_uploader() -> None:
+    identity_service = MagicMock()
+    adapter = _player_link_adapter(
+        identity_service=identity_service,
+        uploader_discord_id="42",
+    )
+
+    interaction = _player_link_interaction(999)
+    parsed = ParsedCustomId(
+        action="skip_player_discord",
+        interaction_id=20,
+        player_slot=1,
+    )
+
+    asyncio.run(adapter._handle_component(interaction, parsed))
+
+    identity_service.skip_discord_link.assert_not_called()
+    interaction.response.send_message.assert_awaited_once_with(
+        "not your confirmation",
+        ephemeral=True,
+    )
+
+
+def test_after_skip_with_remaining_slots_delivers_next_spelling_ui(
+    tmp_path: Path,
+) -> None:
+    from scoretopia.discord.views import PlayerSpellingConfirmView
+    from scoretopia.domain.player_identity import PlayerIdentityService
+
+    (
+        adapter,
+        ingest_service,
+        player_repo,
+        pending_repo,
+        identity_service,
+        _reports_channel,
+        conn,
+    ) = _build_identity_adapter_stack(tmp_path)
+    try:
+        adapter._config.bot_mods.discord_user_ids = ("100",)
+        player_repo.create(polytopia_name="Uploader", discord_user_id="100")
+        extraction = GameBasicsExtraction(
+            game_name="Skip Then Next Slot",
+            players=(
+                GameBasicsPlayer(name="Uploader", is_you=True),
+                GameBasicsPlayer(name="SkipAlice"),
+                GameBasicsPlayer(name="LaterBob"),
+            ),
+        )
+        ingest_service.prepare_stored_path = MagicMock(side_effect=lambda path: path)
+        with patch.object(
+            ingest_service,
+            "extract_stored_screenshot",
+            return_value=extraction,
+        ):
+            message = _upload_message(message_id=5001)
+            message.author.id = 100
+            message.reply = AsyncMock()
+            asyncio.run(
+                adapter._handle_screenshot_upload(
+                    message,
+                    _upload_attachment("skip-next.png"),
+                )
+            )
+
+        parent_id = pending_repo.list_open_by_kind("confirm_extraction")[0].id
+        _fix_resolve_unresolved_roster_slots_for_tests(pending_repo, parent_id)
+        confirm_extraction = MagicMock()
+        confirm_extraction.user.id = 100
+        confirm_extraction.response.send_message = AsyncMock()
+        asyncio.run(
+            adapter._handle_confirm_extraction(
+                confirm_extraction,
+                ParsedCustomId(action="confirm_extraction", interaction_id=parent_id),
+            )
+        )
+        identity_id = pending_repo.list_open_by_kind("confirm_player_link")[0].id
+
+        # Confirm spelling for first unresolved human (SkipAlice at slot 1),
+        # then skip Discord — LaterBob should get the next spelling prompt.
+        confirm_spelling = MagicMock()
+        confirm_spelling.user.id = 100
+        confirm_spelling.response.send_message = AsyncMock()
+        asyncio.run(
+            adapter._handle_component(
+                confirm_spelling,
+                ParsedCustomId(
+                    action="confirm_player_spelling",
+                    interaction_id=identity_id,
+                    player_slot=1,
+                ),
+            )
+        )
+
+        skip = MagicMock()
+        skip.user.id = 100
+        skip.response.send_message = AsyncMock()
+        skip.response.is_done = MagicMock(return_value=False)
+        skip.followup.send = AsyncMock()
+        skip.channel = None
+        asyncio.run(
+            adapter._handle_component(
+                skip,
+                ParsedCustomId(
+                    action="skip_player_discord",
+                    interaction_id=identity_id,
+                    player_slot=1,
+                ),
+            )
+        )
+
+        send_calls = [
+            call
+            for call in (
+                *skip.response.send_message.await_args_list,
+                *skip.followup.send.await_args_list,
+            )
+        ]
+        assert send_calls, "expected a follow-up identity prompt after skip"
+        views = [
+            call.kwargs["view"]
+            for call in send_calls
+            if call.kwargs.get("view") is not None
+        ]
+        spelling_views = [
+            view for view in views if isinstance(view, PlayerSpellingConfirmView)
+        ]
+        assert spelling_views, "next unresolved slot must show spelling UI"
+        assert spelling_views[-1].player_slot == 2
+        pending = pending_repo.get_by_id(identity_id)
+        assert pending is not None
+        assert pending.status == "open"
+        assert isinstance(identity_service, PlayerIdentityService)
+        remaining = identity_service.find_pending_for_parent(parent_id)
+        assert remaining is not None
+        assert [u.polytopia_name for u in remaining.unresolved] == ["LaterBob"]
+    finally:
+        conn.close()
+
+
+def test_after_successful_link_with_remaining_slots_delivers_next_spelling_ui(
+    tmp_path: Path,
+) -> None:
+    from scoretopia.discord.views import PlayerSpellingConfirmView
+
+    (
+        adapter,
+        ingest_service,
+        player_repo,
+        pending_repo,
+        identity_service,
+        _reports_channel,
+        conn,
+    ) = _build_identity_adapter_stack(tmp_path)
+    try:
+        adapter._config.bot_mods.discord_user_ids = ("100",)
+        player_repo.create(polytopia_name="Uploader", discord_user_id="100")
+        extraction = GameBasicsExtraction(
+            game_name="Link Then Next Slot",
+            players=(
+                GameBasicsPlayer(name="Uploader", is_you=True),
+                GameBasicsPlayer(name="LinkAlice"),
+                GameBasicsPlayer(name="LaterBob"),
+            ),
+        )
+        ingest_service.prepare_stored_path = MagicMock(side_effect=lambda path: path)
+        with patch.object(
+            ingest_service,
+            "extract_stored_screenshot",
+            return_value=extraction,
+        ):
+            message = _upload_message(message_id=5002)
+            message.author.id = 100
+            message.reply = AsyncMock()
+            asyncio.run(
+                adapter._handle_screenshot_upload(
+                    message,
+                    _upload_attachment("link-next.png"),
+                )
+            )
+
+        parent_id = pending_repo.list_open_by_kind("confirm_extraction")[0].id
+        _fix_resolve_unresolved_roster_slots_for_tests(pending_repo, parent_id)
+        confirm_extraction = MagicMock()
+        confirm_extraction.user.id = 100
+        confirm_extraction.response.send_message = AsyncMock()
+        asyncio.run(
+            adapter._handle_confirm_extraction(
+                confirm_extraction,
+                ParsedCustomId(action="confirm_extraction", interaction_id=parent_id),
+            )
+        )
+        identity_id = pending_repo.list_open_by_kind("confirm_player_link")[0].id
+
+        confirm_spelling = MagicMock()
+        confirm_spelling.user.id = 100
+        confirm_spelling.response.send_message = AsyncMock()
+        asyncio.run(
+            adapter._handle_component(
+                confirm_spelling,
+                ParsedCustomId(
+                    action="confirm_player_spelling",
+                    interaction_id=identity_id,
+                    player_slot=1,
+                ),
+            )
+        )
+
+        select = MagicMock()
+        select.user.id = 100
+        select.response.send_message = AsyncMock()
+        select.response.is_done = MagicMock(return_value=False)
+        select.followup.send = AsyncMock()
+        select.channel = None
+        select.data = {"values": ["200"]}
+        asyncio.run(
+            adapter._handle_component(
+                select,
+                ParsedCustomId(
+                    action="select_player_discord_user",
+                    interaction_id=identity_id,
+                    player_slot=1,
+                ),
+            )
+        )
+
+        send_calls = [
+            *select.response.send_message.await_args_list,
+            *select.followup.send.await_args_list,
+        ]
+        views = [
+            call.kwargs["view"]
+            for call in send_calls
+            if call.kwargs.get("view") is not None
+        ]
+        spelling_views = [
+            view for view in views if isinstance(view, PlayerSpellingConfirmView)
+        ]
+        assert spelling_views, (
+            "after linking one of several slots, next spelling UI must be delivered"
+        )
+        assert spelling_views[-1].player_slot == 2
+        pending = pending_repo.get_by_id(identity_id)
+        assert pending is not None
+        assert pending.status == "open"
+        remaining = identity_service.find_pending_for_parent(parent_id)
+        assert remaining is not None
+        assert [u.polytopia_name for u in remaining.unresolved] == ["LaterBob"]
+    finally:
+        conn.close()
+
+
+def test_adapter_skip_last_slot_resumes_final_summary(
+    tmp_path: Path,
+) -> None:
+    from scoretopia.discord.views import FinalSummaryView
+
+    (
+        adapter,
+        ingest_service,
+        player_repo,
+        pending_repo,
+        _identity_service,
+        _reports_channel,
+        conn,
+    ) = _build_identity_adapter_stack(tmp_path)
+    try:
+        input_channel = MagicMock()
+        input_channel.send = AsyncMock()
+        adapter._channels_by_id[100] = input_channel
+        adapter._config.bot_mods.discord_user_ids = ("100",)
+        player_repo.create(polytopia_name="Uploader", discord_user_id="100")
+        extraction = GameBasicsExtraction(
+            game_name="Skip Last Slot Game",
+            players=(
+                GameBasicsPlayer(name="Uploader", is_you=True),
+                GameBasicsPlayer(name="SkipOnly"),
+            ),
+        )
+        ingest_service.prepare_stored_path = MagicMock(side_effect=lambda path: path)
+        with patch.object(
+            ingest_service,
+            "extract_stored_screenshot",
+            return_value=extraction,
+        ):
+            message = _upload_message(message_id=5003)
+            message.author.id = 100
+            message.reply = AsyncMock()
+            asyncio.run(
+                adapter._handle_screenshot_upload(
+                    message,
+                    _upload_attachment("skip-last.png"),
+                )
+            )
+
+        parent_id = pending_repo.list_open_by_kind("confirm_extraction")[0].id
+        _fix_resolve_unresolved_roster_slots_for_tests(pending_repo, parent_id)
+        confirm_extraction = MagicMock()
+        confirm_extraction.user.id = 100
+        confirm_extraction.response.send_message = AsyncMock()
+        asyncio.run(
+            adapter._handle_confirm_extraction(
+                confirm_extraction,
+                ParsedCustomId(action="confirm_extraction", interaction_id=parent_id),
+            )
+        )
+        identity_id = pending_repo.list_open_by_kind("confirm_player_link")[0].id
+
+        confirm_spelling = MagicMock()
+        confirm_spelling.user.id = 100
+        confirm_spelling.response.send_message = AsyncMock()
+        asyncio.run(
+            adapter._handle_component(
+                confirm_spelling,
+                ParsedCustomId(
+                    action="confirm_player_spelling",
+                    interaction_id=identity_id,
+                    player_slot=1,
+                ),
+            )
+        )
+
+        skip = MagicMock()
+        skip.user.id = 100
+        skip.response.send_message = AsyncMock()
+        skip.response.is_done = MagicMock(return_value=False)
+        skip.followup.send = AsyncMock()
+        skip.channel = None
+        asyncio.run(
+            adapter._handle_component(
+                skip,
+                ParsedCustomId(
+                    action="skip_player_discord",
+                    interaction_id=identity_id,
+                    player_slot=1,
+                ),
+            )
+        )
+
+        input_channel.send.assert_awaited()
+        posted_view = input_channel.send.await_args.kwargs.get("view")
+        assert isinstance(posted_view, FinalSummaryView)
+        skipped = player_repo.get_by_polytopia_name("SkipOnly")
+        assert skipped is not None
+        assert skipped.discord_user_id is None
+        assert pending_repo.list_open_by_kind("confirm_player_link") == []
+        assert len(pending_repo.list_open_by_kind("confirm_final_summary")) == 1
+    finally:
+        conn.close()

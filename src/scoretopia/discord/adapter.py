@@ -691,6 +691,8 @@ class DiscordBotAdapter(BotPort):
             await self._handle_pick_player_correction(interaction, parsed)
         elif parsed.action == "select_player_discord_user":
             await self._handle_select_player_discord_user(interaction, parsed)
+        elif parsed.action == "skip_player_discord":
+            await self._handle_skip_player_discord(interaction, parsed)
         elif parsed.action == "confirm_player_link":
             await self._handle_confirm_player_link(interaction, parsed)
         elif parsed.action == "reject_player_link":
@@ -2278,6 +2280,31 @@ class DiscordBotAdapter(BotPort):
             uploader_discord_id=uploader,
         )
 
+    async def _handle_skip_player_discord(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        assert parsed.player_slot is not None
+        uploader = await self._require_player_link_uploader(
+            interaction,
+            parsed.interaction_id,
+        )
+        if uploader is None:
+            return
+        result = self._player_identity_service.skip_discord_link(
+            parsed.interaction_id,
+            slot_index=parsed.player_slot,
+            confirmer_discord_id=str(interaction.user.id),
+        )
+        await self._respond_to_player_link_result(
+            interaction,
+            parsed.interaction_id,
+            parsed.player_slot,
+            result,
+            success_message="Skipped Discord link for this player.",
+        )
+
     async def _handle_confirm_player_link(
         self,
         interaction: discord.Interaction,
@@ -2529,6 +2556,8 @@ class DiscordBotAdapter(BotPort):
         identity_interaction_id: int,
         slot_index: int,
         result: ConfirmPlayerLinkResult,
+        *,
+        success_message: str = "Player link confirmed.",
     ) -> None:
         if result.outcome == ConfirmPlayerLinkOutcome.NOT_AUTHORIZED:
             await self._reply_unauthorized(interaction)
@@ -2573,7 +2602,7 @@ class DiscordBotAdapter(BotPort):
             return
         await self._reply_or_followup(
             interaction,
-            "Player link confirmed.",
+            success_message,
             ephemeral=True,
         )
         await self._maybe_resume_parent_commit(interaction, identity_interaction_id)
@@ -2627,6 +2656,10 @@ class DiscordBotAdapter(BotPort):
         identity_interaction_id: int,
     ) -> None:
         if not self._all_player_link_slots_resolved(identity_interaction_id):
+            await self._deliver_next_unresolved_player_link_prompt(
+                interaction,
+                identity_interaction_id,
+            )
             return
         parent_id = self._player_link_parent_id(identity_interaction_id)
         uploader = self._player_link_uploader_id(identity_interaction_id)
@@ -2637,18 +2670,43 @@ class DiscordBotAdapter(BotPort):
             confirmer_discord_id=uploader,
         )
         if isinstance(result, PlayerLinkNeedsConfirmation):
-            if self._response_is_done(interaction):
-                await self._deliver_player_link_spelling_ui_followup(
-                    interaction,
-                    result,
-                )
-            else:
-                await self._deliver_player_link_spelling_ui(interaction, result)
+            await self._deliver_player_link_spelling_for_interaction(
+                interaction,
+                result,
+            )
             return
         if isinstance(result, FinalSummaryNeedsConfirmation):
             await self._deliver_final_summary_prompt(interaction, result)
             return
         await self._deliver_committed_ingest_result(interaction, result)
+
+    async def _deliver_next_unresolved_player_link_prompt(
+        self,
+        interaction: discord.Interaction,
+        identity_interaction_id: int,
+    ) -> None:
+        parent_id = self._player_link_parent_id(identity_interaction_id)
+        if parent_id is None:
+            return
+        pending_result = self._player_identity_service.find_pending_for_parent(
+            parent_id
+        )
+        if pending_result is None or not pending_result.unresolved:
+            return
+        await self._deliver_player_link_spelling_for_interaction(
+            interaction,
+            pending_result,
+        )
+
+    async def _deliver_player_link_spelling_for_interaction(
+        self,
+        interaction: discord.Interaction,
+        result: PlayerLinkNeedsConfirmation,
+    ) -> None:
+        if self._response_is_done(interaction):
+            await self._deliver_player_link_spelling_ui_followup(interaction, result)
+        else:
+            await self._deliver_player_link_spelling_ui(interaction, result)
 
     async def _deliver_player_link_spelling_ui_followup(
         self,
