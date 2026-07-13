@@ -152,6 +152,20 @@ class PlayerRepo:
         assert player is not None
         return player
 
+    def clear_discord_link(self, player_id: int) -> Player:
+        self._conn.execute(
+            """
+            UPDATE players
+            SET discord_user_id = NULL, discord_display_name = NULL
+            WHERE id = ?
+            """,
+            (player_id,),
+        )
+        self._conn.commit()
+        player = self.get_by_id(player_id)
+        assert player is not None
+        return player
+
     def list_all(self) -> list[Player]:
         rows = self._conn.execute(
             f"{_PLAYER_SELECT} ORDER BY polytopia_name"

@@ -270,6 +270,23 @@ def build_player_remote_confirm_embed(polytopia_name: str) -> discord.Embed:
     )
 
 
+def build_player_link_override_embed(
+    *,
+    selected_discord_user_id: str,
+    current_owner_polytopia_name: str,
+    target_polytopia_name: str,
+) -> discord.Embed:
+    return build_embed(
+        ReportKind.dispute,
+        title="Override Discord link?",
+        description=(
+            f"<@{selected_discord_user_id}> is currently linked as "
+            f"**{current_owner_polytopia_name}**. Override to "
+            f"**{target_polytopia_name}**?"
+        ),
+    )
+
+
 def build_mod_approval_embed(*, summary: str) -> discord.Embed:
     return build_embed(
         ReportKind.dispute,

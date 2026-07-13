@@ -564,3 +564,161 @@ def test_pick_unlinked_player_requires_uploader_discord_then_remote_confirm(
     linked = player_repo.get_by_polytopia_name("Carol")
     assert linked is not None
     assert linked.discord_user_id == "carol-discord"
+
+
+def _begin_slot_with_selected_discord(
+    player_identity_service,
+    pending_repo: PendingInteractionRepo,
+    *,
+    polytopia_name: str,
+    selected_discord_user_id: str,
+    uploader_discord_id: str = "uploader-1",
+) -> tuple[int, int]:
+    extraction = _game_basics(polytopia_name)
+    unresolved = player_identity_service.list_unresolved_humans(extraction)
+    parent = pending_repo.create(
+        kind="confirm_extraction",
+        discord_user_id=uploader_discord_id,
+        payload={"screenshot_type": "game_basics"},
+    )
+    identity = player_identity_service.begin_identity_check(
+        parent_interaction_id=parent.id,
+        uploader_discord_id=uploader_discord_id,
+        extraction=extraction,
+        unresolved=unresolved,
+    )
+    slot_index = unresolved[0].slot_index
+    player_identity_service.confirm_spelling(
+        identity.interaction_id,
+        slot_index=slot_index,
+        confirmer_discord_id=uploader_discord_id,
+    )
+    player_identity_service.select_discord_user(
+        identity.interaction_id,
+        slot_index=slot_index,
+        selected_discord_user_id=selected_discord_user_id,
+        confirmer_discord_id=uploader_discord_id,
+    )
+    return identity.interaction_id, slot_index
+
+
+def test_link_discord_already_on_other_player_returns_needs_override(
+    player_repo: PlayerRepo,
+    pending_repo: PendingInteractionRepo,
+) -> None:
+    player_identity_service = _player_identity_service(player_repo, pending_repo)
+    module = _require_player_identity_module()
+    owner = player_repo.create(
+        polytopia_name="RegisteredName",
+        discord_user_id="shared-discord",
+    )
+    interaction_id, slot_index = _begin_slot_with_selected_discord(
+        player_identity_service,
+        pending_repo,
+        polytopia_name="vilemaxim1",
+        selected_discord_user_id="shared-discord",
+    )
+
+    result = player_identity_service.link_selected_discord_user(
+        interaction_id,
+        slot_index=slot_index,
+        override=False,
+    )
+
+    assert result.outcome == module.ConfirmPlayerLinkOutcome.NEEDS_OVERRIDE
+    assert result.current_owner_polytopia_name == "RegisteredName"
+    assert result.current_owner_player_id == owner.id
+    assert player_repo.get_by_discord_id("shared-discord") is not None
+    assert player_repo.get_by_discord_id("shared-discord").id == owner.id
+    slot = _slot_for_index(pending_repo, interaction_id, slot_index)
+    assert slot["resolved"] is False
+
+
+def test_override_clears_old_discord_link_and_attaches_to_target(
+    player_repo: PlayerRepo,
+    pending_repo: PendingInteractionRepo,
+) -> None:
+    player_identity_service = _player_identity_service(player_repo, pending_repo)
+    module = _require_player_identity_module()
+    owner = player_repo.create(
+        polytopia_name="RegisteredName",
+        discord_user_id="shared-discord",
+    )
+    interaction_id, slot_index = _begin_slot_with_selected_discord(
+        player_identity_service,
+        pending_repo,
+        polytopia_name="vilemaxim1",
+        selected_discord_user_id="shared-discord",
+    )
+
+    result = player_identity_service.link_selected_discord_user(
+        interaction_id,
+        slot_index=slot_index,
+        override=True,
+    )
+
+    assert result.outcome == module.ConfirmPlayerLinkOutcome.SUCCESS
+    cleared = player_repo.get_by_id(owner.id)
+    assert cleared is not None
+    assert cleared.discord_user_id is None
+    linked = player_repo.get_by_polytopia_name("vilemaxim1")
+    assert linked is not None
+    assert linked.discord_user_id == "shared-discord"
+    assert linked.id != owner.id
+
+
+def test_confirm_remote_link_discord_conflict_needs_override_not_integrity_error(
+    player_repo: PlayerRepo,
+    pending_repo: PendingInteractionRepo,
+) -> None:
+    player_identity_service = _player_identity_service(player_repo, pending_repo)
+    module = _require_player_identity_module()
+    player_repo.create(
+        polytopia_name="OtherRow",
+        discord_user_id="bob-discord",
+    )
+    interaction_id, slot_index = _begin_slot_with_selected_discord(
+        player_identity_service,
+        pending_repo,
+        polytopia_name="NewBob",
+        selected_discord_user_id="bob-discord",
+    )
+
+    result = player_identity_service.confirm_remote_link(
+        interaction_id,
+        slot_index=slot_index,
+        confirmer_discord_id="bob-discord",
+    )
+
+    assert result.outcome == module.ConfirmPlayerLinkOutcome.NEEDS_OVERRIDE
+    assert result.current_owner_polytopia_name == "OtherRow"
+
+
+def test_link_idempotent_when_discord_already_on_same_player(
+    player_repo: PlayerRepo,
+    pending_repo: PendingInteractionRepo,
+) -> None:
+    player_identity_service = _player_identity_service(player_repo, pending_repo)
+    module = _require_player_identity_module()
+    existing = player_repo.create(polytopia_name="SamePlayer")
+    interaction_id, slot_index = _begin_slot_with_selected_discord(
+        player_identity_service,
+        pending_repo,
+        polytopia_name="SamePlayer",
+        selected_discord_user_id="same-discord",
+    )
+    player_repo.update_discord_link(
+        existing.id,
+        discord_user_id="same-discord",
+        discord_display_name=None,
+    )
+
+    result = player_identity_service.link_selected_discord_user(
+        interaction_id,
+        slot_index=slot_index,
+        override=False,
+    )
+
+    assert result.outcome == module.ConfirmPlayerLinkOutcome.SUCCESS
+    slot = _slot_for_index(pending_repo, interaction_id, slot_index)
+    assert slot["resolved"] is True

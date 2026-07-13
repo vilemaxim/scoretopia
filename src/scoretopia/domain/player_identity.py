@@ -12,6 +12,7 @@ from scoretopia.domain.actions import (
 )
 from scoretopia.domain.matching import is_bot_name
 from scoretopia.screenshot.models import ExtractionResult, GameBasicsExtraction
+from scoretopia.storage.models import Player
 from scoretopia.storage.repos import PendingInteractionRepo, PlayerRepo
 
 logger = logging.getLogger(__name__)
@@ -23,12 +24,16 @@ class ConfirmPlayerLinkOutcome(Enum):
     SUCCESS = "success"
     NOT_AUTHORIZED = "not_authorized"
     BLOCKED = "blocked"
+    NEEDS_OVERRIDE = "needs_override"
+    MISSING_SELECTION = "missing_selection"
 
 
 @dataclass(frozen=True)
 class ConfirmPlayerLinkResult:
     outcome: ConfirmPlayerLinkOutcome
     blocked_owner_discord_id: str | None = None
+    current_owner_polytopia_name: str | None = None
+    current_owner_player_id: int | None = None
 
 
 def _slot_payload(unresolved: UnresolvedPlayerPreview) -> dict[str, object]:
@@ -224,6 +229,33 @@ class PlayerIdentityService:
         slot["selected_discord_user_id"] = selected_discord_user_id
         self._save_slots(interaction_id, pending.payload)
 
+    def link_selected_discord_user(
+        self,
+        interaction_id: int,
+        *,
+        slot_index: int,
+        override: bool = False,
+    ) -> ConfirmPlayerLinkResult:
+        """Link the slot's selected Discord user to the Polytopia player.
+
+        Used by bot-mod immediate linking and ``/confirm-player-link``.
+        Caller is responsible for authorization (bot mod).
+        """
+        pending = self._require_open_pending(interaction_id)
+        slot = self._slot_for_index(pending.payload, slot_index)
+        selected = slot.get("selected_discord_user_id")
+        if not isinstance(selected, str) or not selected:
+            return ConfirmPlayerLinkResult(
+                outcome=ConfirmPlayerLinkOutcome.MISSING_SELECTION,
+            )
+        return self._apply_discord_link(
+            pending_id=interaction_id,
+            payload=pending.payload,
+            slot=slot,
+            discord_user_id=selected,
+            override=override,
+        )
+
     def confirm_remote_link(
         self,
         interaction_id: int,
@@ -238,30 +270,87 @@ class PlayerIdentityService:
             return ConfirmPlayerLinkResult(
                 outcome=ConfirmPlayerLinkOutcome.NOT_AUTHORIZED,
             )
+        return self._apply_discord_link(
+            pending_id=interaction_id,
+            payload=pending.payload,
+            slot=slot,
+            discord_user_id=confirmer_discord_id,
+            override=False,
+        )
 
+    def _apply_discord_link(
+        self,
+        *,
+        pending_id: int,
+        payload: dict[str, object],
+        slot: dict[str, object],
+        discord_user_id: str,
+        override: bool,
+    ) -> ConfirmPlayerLinkResult:
         polytopia_name = str(slot["polytopia_name"])
         existing = self._player_repo.get_by_polytopia_name(polytopia_name)
-        if self._polytopia_claimed_by_other(existing, confirmer_discord_id):
+        target = self._resolve_target_player(slot, existing)
+
+        by_discord = self._player_repo.get_by_discord_id(discord_user_id)
+        if by_discord is not None:
+            if target is not None and by_discord.id == target.id:
+                return self._mark_slot_resolved(
+                    pending_id,
+                    payload,
+                    slot,
+                    player=by_discord,
+                )
+            if not override:
+                return ConfirmPlayerLinkResult(
+                    outcome=ConfirmPlayerLinkOutcome.NEEDS_OVERRIDE,
+                    current_owner_polytopia_name=by_discord.polytopia_name,
+                    current_owner_player_id=by_discord.id,
+                )
+            self._player_repo.clear_discord_link(by_discord.id)
+
+        if self._polytopia_claimed_by_other(existing, discord_user_id):
+            # Re-read after possible clear; claim check uses existing row.
             owner_id = existing.discord_user_id if existing is not None else None
-            return ConfirmPlayerLinkResult(
-                outcome=ConfirmPlayerLinkOutcome.BLOCKED,
-                blocked_owner_discord_id=owner_id,
-            )
+            if owner_id is not None and owner_id != discord_user_id:
+                return ConfirmPlayerLinkResult(
+                    outcome=ConfirmPlayerLinkOutcome.BLOCKED,
+                    blocked_owner_discord_id=owner_id,
+                )
 
         player = self._link_player(
             polytopia_name=polytopia_name,
             player_id=slot.get("player_id"),
             existing=existing,
-            discord_user_id=confirmer_discord_id,
+            discord_user_id=discord_user_id,
         )
+        return self._mark_slot_resolved(pending_id, payload, slot, player=player)
+
+    def _resolve_target_player(
+        self,
+        slot: dict[str, object],
+        existing: Player | None,
+    ) -> Player | None:
+        player_id = slot.get("player_id")
+        if isinstance(player_id, int):
+            return self._player_repo.get_by_id(player_id)
+        return existing
+
+    def _mark_slot_resolved(
+        self,
+        pending_id: int,
+        payload: dict[str, object],
+        slot: dict[str, object],
+        *,
+        player: Player,
+    ) -> ConfirmPlayerLinkResult:
         slot["player_id"] = player.id
         slot["resolved"] = True
-        self._save_slots(interaction_id, pending.payload)
+        self._save_slots(pending_id, payload)
 
-        slots = pending.payload.get("slots")
+        slots = payload.get("slots")
         slot_list = slots if isinstance(slots, list) else []
         if all(bool(entry.get("resolved")) for entry in slot_list):
-            self._pending_repo.resolve(interaction_id)
+            self._pending_repo.resolve(pending_id)
 
         return ConfirmPlayerLinkResult(outcome=ConfirmPlayerLinkOutcome.SUCCESS)
 
@@ -270,9 +359,9 @@ class PlayerIdentityService:
         *,
         polytopia_name: str,
         player_id: object,
-        existing,
+        existing: Player | None,
         discord_user_id: str,
-    ):
+    ) -> Player:
         if isinstance(player_id, int):
             return self._player_repo.update_discord_link(
                 player_id,
@@ -347,7 +436,7 @@ class PlayerIdentityService:
 
     def _polytopia_claimed_by_other(
         self,
-        player,
+        player: Player | None,
         discord_user_id: str,
     ) -> bool:
         return (

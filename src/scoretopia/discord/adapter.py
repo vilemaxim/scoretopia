@@ -18,7 +18,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from scoretopia.config import ChannelsConfig, ScoretopiaConfig
+from scoretopia.config import ChannelsConfig, ScoretopiaConfig, is_bot_mod
 from scoretopia.discord.embeds import (
     build_dispute_embed,
     build_extraction_preview_embed,
@@ -26,7 +26,7 @@ from scoretopia.discord.embeds import (
     build_game_completed_embed,
     build_game_started_embed,
     build_mod_approval_embed,
-    build_player_remote_confirm_embed,
+    build_player_link_override_embed,
     build_player_spelling_confirm_embed,
 )
 from scoretopia.discord.publisher import DiscordReportPublisher, report_to_embed
@@ -40,7 +40,7 @@ from scoretopia.discord.views import (
     ParsedCustomId,
     PlayerCorrectionPickView,
     PlayerDiscordUserSelectView,
-    PlayerLinkRemoteConfirmView,
+    PlayerLinkOverrideView,
     PlayerSpellingConfirmView,
     RosterHumanShapeView,
     RosterKnownPlayerPickView,
@@ -86,6 +86,7 @@ from scoretopia.domain.matching import is_bot_name
 from scoretopia.domain.mod_approval import ModApprovalService
 from scoretopia.domain.player_identity import (
     ConfirmPlayerLinkOutcome,
+    ConfirmPlayerLinkResult,
     PlayerIdentityService,
 )
 from scoretopia.domain.player_resolution import (
@@ -416,6 +417,25 @@ class DiscordBotAdapter(BotPort):
                 ephemeral=True,
             )
 
+        @self._bot.tree.command(
+            name="confirm-player-link",
+            description="Confirm a pending Discord ↔ Polytopia player link",
+        )
+        @app_commands.describe(
+            interaction_id="Pending player-link interaction id",
+            slot="Player slot index",
+        )
+        async def confirm_player_link_cmd(
+            interaction: discord.Interaction,
+            interaction_id: int,
+            slot: int,
+        ) -> None:
+            await self._handle_confirm_player_link_slash(
+                interaction,
+                interaction_id=interaction_id,
+                slot=slot,
+            )
+
     async def _handle_screenshot_upload(
         self,
         message: discord.Message,
@@ -675,6 +695,10 @@ class DiscordBotAdapter(BotPort):
             await self._handle_confirm_player_link(interaction, parsed)
         elif parsed.action == "reject_player_link":
             await self._handle_reject_player_link(interaction, parsed)
+        elif parsed.action == "override_player_link":
+            await self._handle_override_player_link(interaction, parsed)
+        elif parsed.action == "cancel_player_link_override":
+            await self._handle_cancel_player_link_override(interaction, parsed)
         elif parsed.action == "approve_mod_batch":
             await self._handle_approve_mod_batch(interaction, parsed)
         elif parsed.action == "reject_mod_batch":
@@ -2247,11 +2271,11 @@ class DiscordBotAdapter(BotPort):
             selected_discord_user_id=selected_discord_id,
             confirmer_discord_id=str(interaction.user.id),
         )
-        await self._send_player_remote_confirm(
+        await self._after_discord_user_selected(
             interaction,
-            parsed.interaction_id,
-            parsed.player_slot,
-            selected_discord_id,
+            identity_interaction_id=parsed.interaction_id,
+            slot_index=parsed.player_slot,
+            uploader_discord_id=uploader,
         )
 
     async def _handle_confirm_player_link(
@@ -2259,6 +2283,7 @@ class DiscordBotAdapter(BotPort):
         interaction: discord.Interaction,
         parsed: ParsedCustomId,
     ) -> None:
+        """Legacy remote Confirm button — still safe against IntegrityError."""
         assert parsed.player_slot is not None
         selected = self._player_link_selected_discord_id(
             parsed.interaction_id,
@@ -2275,22 +2300,96 @@ class DiscordBotAdapter(BotPort):
             slot_index=parsed.player_slot,
             confirmer_discord_id=str(interaction.user.id),
         )
-        if result.outcome == ConfirmPlayerLinkOutcome.NOT_AUTHORIZED:
+        await self._respond_to_player_link_result(
+            interaction,
+            parsed.interaction_id,
+            parsed.player_slot,
+            result,
+        )
+
+    async def _handle_confirm_player_link_slash(
+        self,
+        interaction: discord.Interaction,
+        *,
+        interaction_id: int,
+        slot: int,
+    ) -> None:
+        actor_id = str(interaction.user.id)
+        if not can_approve_mod_batch(
+            bot_mod_discord_ids=self._bot_mod_discord_ids(),
+            actor_discord_id=actor_id,
+        ):
             await self._reply_unauthorized(interaction)
             return
-        if result.outcome == ConfirmPlayerLinkOutcome.BLOCKED:
-            owner = result.blocked_owner_discord_id
-            mention = f"<@{owner}>" if owner is not None else "another user"
-            await interaction.response.send_message(
-                f"That Polytopia name is already linked to {mention}.",
-                ephemeral=True,
-            )
+        result = self._player_identity_service.link_selected_discord_user(
+            interaction_id,
+            slot_index=slot,
+            override=False,
+        )
+        await self._respond_to_player_link_result(
+            interaction,
+            interaction_id,
+            slot,
+            result,
+        )
+
+    async def _handle_override_player_link(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        assert parsed.player_slot is not None
+        actor_id = str(interaction.user.id)
+        if not can_approve_mod_batch(
+            bot_mod_discord_ids=self._bot_mod_discord_ids(),
+            actor_discord_id=actor_id,
+        ):
+            await self._reply_unauthorized(interaction)
             return
+        result = self._player_identity_service.link_selected_discord_user(
+            parsed.interaction_id,
+            slot_index=parsed.player_slot,
+            override=True,
+        )
+        await self._respond_to_player_link_result(
+            interaction,
+            parsed.interaction_id,
+            parsed.player_slot,
+            result,
+        )
+
+    async def _handle_cancel_player_link_override(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        assert parsed.player_slot is not None
+        actor_id = str(interaction.user.id)
+        if not can_approve_mod_batch(
+            bot_mod_discord_ids=self._bot_mod_discord_ids(),
+            actor_discord_id=actor_id,
+        ):
+            await self._reply_unauthorized(interaction)
+            return
+        slot = self._player_link_slot(parsed.interaction_id, parsed.player_slot)
+        if slot is not None:
+            slot["selected_discord_user_id"] = None
+            repo = getattr(self._ingest_service, "_pending_repo", None)
+            if repo is not None:
+                pending = repo.get_by_id(parsed.interaction_id)
+                if pending is not None:
+                    repo.update_payload(parsed.interaction_id, pending.payload)
+        uploader = self._player_link_uploader_id(parsed.interaction_id) or ""
+        view = PlayerDiscordUserSelectView(
+            interaction_id=parsed.interaction_id,
+            player_slot=parsed.player_slot,
+            uploader_discord_id=uploader,
+        )
         await interaction.response.send_message(
-            "Player link confirmed.",
+            "Override cancelled. Pick another Discord user for this player.",
+            view=view,
             ephemeral=True,
         )
-        await self._maybe_resume_parent_commit(interaction, parsed.interaction_id)
 
     async def _handle_reject_player_link(
         self,
@@ -2344,8 +2443,8 @@ class DiscordBotAdapter(BotPort):
             parsed.interaction_id,
             parsed.player_slot,
         )
+        uploader = self._player_link_uploader_id(parsed.interaction_id) or ""
         if selected is None:
-            uploader = self._player_link_uploader_id(parsed.interaction_id) or ""
             view = PlayerDiscordUserSelectView(
                 interaction_id=parsed.interaction_id,
                 player_slot=parsed.player_slot,
@@ -2356,38 +2455,171 @@ class DiscordBotAdapter(BotPort):
                 view=view,
             )
             return
-        await self._send_player_remote_confirm(
+        await self._after_discord_user_selected(
             interaction,
-            parsed.interaction_id,
-            parsed.player_slot,
-            selected,
+            identity_interaction_id=parsed.interaction_id,
+            slot_index=parsed.player_slot,
+            uploader_discord_id=uploader,
         )
 
-    async def _send_player_remote_confirm(
+    async def _after_discord_user_selected(
+        self,
+        interaction: discord.Interaction,
+        *,
+        identity_interaction_id: int,
+        slot_index: int,
+        uploader_discord_id: str,
+    ) -> None:
+        if is_bot_mod(uploader_discord_id, self._config):
+            result = self._player_identity_service.link_selected_discord_user(
+                identity_interaction_id,
+                slot_index=slot_index,
+                override=False,
+            )
+            await self._respond_to_player_link_result(
+                interaction,
+                identity_interaction_id,
+                slot_index,
+                result,
+            )
+            return
+        await self._request_mod_player_link_confirm(
+            interaction,
+            identity_interaction_id=identity_interaction_id,
+            slot_index=slot_index,
+        )
+
+    async def _request_mod_player_link_confirm(
+        self,
+        interaction: discord.Interaction,
+        *,
+        identity_interaction_id: int,
+        slot_index: int,
+        conflict_note: str | None = None,
+    ) -> None:
+        command = (
+            f"/confirm-player-link interaction_id:{identity_interaction_id} "
+            f"slot:{slot_index}"
+        )
+        mod_ids = self._bot_mod_discord_ids()
+        if mod_ids:
+            mentions = " ".join(f"<@{mod_id}>" for mod_id in mod_ids)
+        else:
+            mentions = "bot mods"
+        preface = f"{conflict_note}\n" if conflict_note else ""
+        channel_content = (
+            f"{preface}{mentions}, a bot mod must confirm this player link.\n"
+            f"Copy-paste: `{command}`"
+        )
+        channel = interaction.channel
+        if channel is not None:
+            await channel.send(channel_content)
+        ack = (
+            "A bot mod must confirm this player link. "
+            f"Mods have been notified with `{command}`."
+        )
+        if self._response_is_done(interaction):
+            await interaction.followup.send(ack, ephemeral=True)
+        else:
+            await interaction.response.send_message(ack, ephemeral=True)
+
+    async def _respond_to_player_link_result(
         self,
         interaction: discord.Interaction,
         identity_interaction_id: int,
         slot_index: int,
-        selected_discord_id: str,
+        result: ConfirmPlayerLinkResult,
     ) -> None:
+        if result.outcome == ConfirmPlayerLinkOutcome.NOT_AUTHORIZED:
+            await self._reply_unauthorized(interaction)
+            return
+        if result.outcome == ConfirmPlayerLinkOutcome.MISSING_SELECTION:
+            await self._reply_or_followup(
+                interaction,
+                "No Discord user is selected for that slot.",
+                ephemeral=True,
+            )
+            return
+        if result.outcome == ConfirmPlayerLinkOutcome.BLOCKED:
+            owner = result.blocked_owner_discord_id
+            mention = f"<@{owner}>" if owner is not None else "another user"
+            await self._reply_or_followup(
+                interaction,
+                f"That Polytopia name is already linked to {mention}.",
+                ephemeral=True,
+            )
+            return
+        if result.outcome == ConfirmPlayerLinkOutcome.NEEDS_OVERRIDE:
+            if can_approve_mod_batch(
+                bot_mod_discord_ids=self._bot_mod_discord_ids(),
+                actor_discord_id=str(interaction.user.id),
+            ):
+                await self._send_player_link_override_prompt(
+                    interaction,
+                    identity_interaction_id,
+                    slot_index,
+                    result,
+                )
+            else:
+                owner = result.current_owner_polytopia_name or "another player"
+                await self._request_mod_player_link_confirm(
+                    interaction,
+                    identity_interaction_id=identity_interaction_id,
+                    slot_index=slot_index,
+                    conflict_note=(
+                        f"That Discord user is already linked as **{owner}**."
+                    ),
+                )
+            return
+        await self._reply_or_followup(
+            interaction,
+            "Player link confirmed.",
+            ephemeral=True,
+        )
+        await self._maybe_resume_parent_commit(interaction, identity_interaction_id)
+
+    async def _send_player_link_override_prompt(
+        self,
+        interaction: discord.Interaction,
+        identity_interaction_id: int,
+        slot_index: int,
+        result: ConfirmPlayerLinkResult,
+    ) -> None:
+        selected = self._player_link_selected_discord_id(
+            identity_interaction_id,
+            slot_index,
+        )
         slot = self._player_link_slot(identity_interaction_id, slot_index)
-        if slot is not None:
-            polytopia_name = str(slot["polytopia_name"])
-        else:
-            polytopia_name = "this player"
-        embed = build_player_remote_confirm_embed(polytopia_name)
-        view = PlayerLinkRemoteConfirmView(
+        target_name = (
+            str(slot["polytopia_name"]) if slot is not None else "this player"
+        )
+        old_name = result.current_owner_polytopia_name or "another player"
+        selected_id = selected or "unknown"
+        embed = build_player_link_override_embed(
+            selected_discord_user_id=selected_id,
+            current_owner_polytopia_name=old_name,
+            target_polytopia_name=target_name,
+        )
+        view = PlayerLinkOverrideView(
             interaction_id=identity_interaction_id,
             player_slot=slot_index,
-            selected_discord_user_id=selected_discord_id,
-        )
-        content = (
-            f"<@{selected_discord_id}>, please confirm or reject this player link."
         )
         if self._response_is_done(interaction):
-            await interaction.followup.send(content, embed=embed, view=view)
+            await interaction.followup.send(embed=embed, view=view)
         else:
-            await interaction.response.send_message(content, embed=embed, view=view)
+            await interaction.response.send_message(embed=embed, view=view)
+
+    async def _reply_or_followup(
+        self,
+        interaction: discord.Interaction,
+        content: str,
+        *,
+        ephemeral: bool = False,
+    ) -> None:
+        if self._response_is_done(interaction):
+            await interaction.followup.send(content, ephemeral=ephemeral)
+        else:
+            await interaction.response.send_message(content, ephemeral=ephemeral)
 
     async def _maybe_resume_parent_commit(
         self,
