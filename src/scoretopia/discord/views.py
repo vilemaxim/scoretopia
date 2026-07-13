@@ -88,6 +88,7 @@ _PLAYER_LINK_ACTIONS = frozenset(
         "confirm_player_link",
         "reject_player_link",
         "select_player_discord_user",
+        "skip_player_discord",
         "override_player_link",
         "cancel_player_link_override",
         "accept_roster_suggestion",
@@ -502,6 +503,17 @@ class PlayerDiscordUserSelectView(discord.ui.View):
             max_values=1,
         )
         self.add_item(select)
+        self.add_item(
+            discord.ui.Button(
+                label="Skip / no Discord",
+                style=discord.ButtonStyle.secondary,
+                custom_id=encode_custom_id(
+                    "skip_player_discord",
+                    interaction_id=interaction_id,
+                    player_slot=player_slot,
+                ),
+            )
+        )
 
 
 class ModApprovalView(discord.ui.View):

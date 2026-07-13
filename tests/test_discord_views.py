@@ -366,6 +366,50 @@ def test_player_link_override_view_encodes_override_and_cancel() -> None:
     )
 
 
+def test_player_discord_user_select_view_includes_skip_button() -> None:
+    from scoretopia.discord.views import PlayerDiscordUserSelectView, encode_custom_id
+
+    view = PlayerDiscordUserSelectView(
+        interaction_id=15,
+        player_slot=2,
+        uploader_discord_id="111",
+    )
+
+    custom_ids = {child.custom_id for child in view.children}
+    labels = {
+        getattr(child, "label", None)
+        for child in view.children
+        if getattr(child, "label", None) is not None
+    }
+    assert (
+        encode_custom_id(
+            "skip_player_discord",
+            interaction_id=15,
+            player_slot=2,
+        )
+        in custom_ids
+    )
+    assert (
+        encode_custom_id(
+            "select_player_discord_user",
+            interaction_id=15,
+            player_slot=2,
+        )
+        in custom_ids
+    )
+    assert any("skip" in label.lower() for label in labels if isinstance(label, str))
+    parsed = parse_custom_id(
+        encode_custom_id(
+            "skip_player_discord",
+            interaction_id=15,
+            player_slot=2,
+        )
+    )
+    assert parsed.action == "skip_player_discord"
+    assert parsed.interaction_id == 15
+    assert parsed.player_slot == 2
+
+
 # --- Wrong OCR spelling — player correction pick (Task 019) ---
 
 
