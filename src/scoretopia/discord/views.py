@@ -93,6 +93,9 @@ _PLAYER_LINK_ACTIONS = frozenset(
         "override_roster_name",
         "select_roster_known_player",
         "submit_roster_override",
+        "remove_roster_player",
+        "move_roster_player_up",
+        "move_roster_player_down",
     }
 )
 
@@ -100,6 +103,8 @@ _FIX_FIELD_ACTIONS = frozenset(
     {
         "pick_field_correction",
         "submit_field_correction",
+        "add_roster_player",
+        "submit_add_roster_player",
     }
 )
 
@@ -728,6 +733,101 @@ class RosterSlotFixView(discord.ui.View):
                 ),
             )
         )
+
+
+class RosterShapeEditView(discord.ui.View):
+    """Add-player control posted with Fix (Task 039)."""
+
+    def __init__(
+        self,
+        *,
+        interaction_id: int,
+        uploader_discord_id: str,
+    ) -> None:
+        super().__init__(timeout=None)
+        del uploader_discord_id
+        self.interaction_id = interaction_id
+        self.add_item(
+            discord.ui.Button(
+                label="Add player",
+                style=discord.ButtonStyle.primary,
+                custom_id=encode_custom_id(
+                    "add_roster_player",
+                    interaction_id=interaction_id,
+                ),
+            )
+        )
+
+
+class RosterHumanShapeView(discord.ui.View):
+    """Per-human remove / reorder controls on Fix (Task 039)."""
+
+    def __init__(
+        self,
+        *,
+        interaction_id: int,
+        player_slot: int,
+        player_name: str,
+        uploader_discord_id: str,
+    ) -> None:
+        super().__init__(timeout=None)
+        del uploader_discord_id
+        self.interaction_id = interaction_id
+        self.player_slot = player_slot
+        name_bit = player_name[:24] if player_name else f"slot {player_slot}"
+        self.add_item(
+            discord.ui.Button(
+                label=f"Remove ({name_bit})"[:80],
+                style=discord.ButtonStyle.danger,
+                custom_id=encode_custom_id(
+                    "remove_roster_player",
+                    interaction_id=interaction_id,
+                    player_slot=player_slot,
+                ),
+            )
+        )
+        self.add_item(
+            discord.ui.Button(
+                label="Move up",
+                style=discord.ButtonStyle.secondary,
+                custom_id=encode_custom_id(
+                    "move_roster_player_up",
+                    interaction_id=interaction_id,
+                    player_slot=player_slot,
+                ),
+            )
+        )
+        self.add_item(
+            discord.ui.Button(
+                label="Move down",
+                style=discord.ButtonStyle.secondary,
+                custom_id=encode_custom_id(
+                    "move_roster_player_down",
+                    interaction_id=interaction_id,
+                    player_slot=player_slot,
+                ),
+            )
+        )
+
+
+def build_add_roster_player_modal(*, interaction_id: int) -> discord.ui.Modal:
+    modal = discord.ui.Modal(
+        title="Add player",
+        custom_id=encode_custom_id(
+            "submit_add_roster_player",
+            interaction_id=interaction_id,
+        ),
+    )
+    modal.add_item(
+        discord.ui.TextInput(
+            label="Player name",
+            custom_id="new_value",
+            required=True,
+            max_length=100,
+            style=discord.TextStyle.short,
+        )
+    )
+    return modal
 
 
 class RosterKnownPlayerPickView(discord.ui.View):

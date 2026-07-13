@@ -621,6 +621,11 @@ def test_component_router_wires_fix_child_actions() -> None:
     adapter._handle_select_roster_known_player = AsyncMock()
     adapter._handle_override_roster_name = AsyncMock()
     adapter._handle_submit_roster_override = AsyncMock()
+    adapter._handle_add_roster_player = AsyncMock()
+    adapter._handle_submit_add_roster_player = AsyncMock()
+    adapter._handle_remove_roster_player = AsyncMock()
+    adapter._handle_move_roster_player_up = AsyncMock()
+    adapter._handle_move_roster_player_down = AsyncMock()
 
     interaction = MagicMock()
     cases = [
@@ -657,6 +662,31 @@ def test_component_router_wires_fix_child_actions() -> None:
         (
             "submit_roster_override",
             "_handle_submit_roster_override",
+            {"player_slot": 1},
+        ),
+        (
+            "add_roster_player",
+            "_handle_add_roster_player",
+            {},
+        ),
+        (
+            "submit_add_roster_player",
+            "_handle_submit_add_roster_player",
+            {},
+        ),
+        (
+            "remove_roster_player",
+            "_handle_remove_roster_player",
+            {"player_slot": 1},
+        ),
+        (
+            "move_roster_player_up",
+            "_handle_move_roster_player_up",
+            {"player_slot": 1},
+        ),
+        (
+            "move_roster_player_down",
+            "_handle_move_roster_player_down",
             {"player_slot": 1},
         ),
     ]
@@ -1064,3 +1094,425 @@ def test_handle_fix_extraction_posts_roster_slot_views_for_fuzzy() -> None:
     assert roster_views, (
         "Fix must post RosterSlotFixView for unresolved fuzzy/new slots"
     )
+
+
+def test_roster_shape_edit_view_exposes_add_player() -> None:
+    try:
+        from scoretopia.discord.views import RosterShapeEditView
+    except ImportError as exc:
+        pytest.fail(f"RosterShapeEditView not implemented: {exc}")
+
+    view = RosterShapeEditView(
+        interaction_id=20,
+        uploader_discord_id="111",
+    )
+    labels = {getattr(child, "label", None) for child in view.children}
+    custom_ids = {getattr(child, "custom_id", "") for child in view.children}
+    assert any(label and "add" in label.lower() for label in labels if label)
+    assert encode_custom_id("add_roster_player", interaction_id=20) in custom_ids
+    assert view.timeout is None
+
+
+def test_roster_human_shape_view_exposes_remove_and_reorder() -> None:
+    try:
+        from scoretopia.discord.views import RosterHumanShapeView
+    except ImportError as exc:
+        pytest.fail(f"RosterHumanShapeView not implemented: {exc}")
+
+    view = RosterHumanShapeView(
+        interaction_id=20,
+        player_slot=1,
+        player_name="Bob",
+        uploader_discord_id="111",
+    )
+    labels = {
+        (getattr(child, "label", None) or "").lower() for child in view.children
+    }
+    custom_ids = {getattr(child, "custom_id", "") for child in view.children}
+    assert any("remove" in label for label in labels)
+    assert any("up" in label for label in labels)
+    assert any("down" in label for label in labels)
+    assert (
+        encode_custom_id(
+            "remove_roster_player",
+            interaction_id=20,
+            player_slot=1,
+        )
+        in custom_ids
+    )
+    assert (
+        encode_custom_id(
+            "move_roster_player_up",
+            interaction_id=20,
+            player_slot=1,
+        )
+        in custom_ids
+    )
+    assert (
+        encode_custom_id(
+            "move_roster_player_down",
+            interaction_id=20,
+            player_slot=1,
+        )
+        in custom_ids
+    )
+    assert view.timeout is None
+
+
+def test_add_roster_player_opens_modal_for_uploader() -> None:
+    from scoretopia.discord.views import ParsedCustomId
+
+    adapter = _adapter_with_channels()
+    repo = _fix_pending_repo()
+    adapter._ingest_service._pending_repo = repo
+
+    interaction = MagicMock()
+    interaction.user.id = 42
+    interaction.response.send_modal = AsyncMock()
+    interaction.response.send_message = AsyncMock()
+
+    handler = getattr(adapter, "_handle_add_roster_player", None)
+    assert callable(handler), "Adapter must expose _handle_add_roster_player"
+    asyncio.run(
+        handler(
+            interaction,
+            ParsedCustomId(action="add_roster_player", interaction_id=20),
+        )
+    )
+    interaction.response.send_modal.assert_awaited_once()
+
+
+def test_submit_add_roster_player_updates_parent_and_refreshes_diagnosis() -> None:
+    from scoretopia.discord.views import ParsedCustomId
+
+    input_channel = MagicMock()
+    input_channel.id = 100
+    input_channel.send = AsyncMock()
+    diagnosis_message = MagicMock()
+    diagnosis_message.edit = AsyncMock()
+    input_channel.fetch_message = AsyncMock(return_value=diagnosis_message)
+    adapter = _adapter_with_channels(input_channel=input_channel)
+    repo = _fix_pending_repo()
+    adapter._ingest_service._pending_repo = repo
+    player_repo = MagicMock()
+    player_repo.list_all.return_value = []
+    adapter._player_repo = player_repo
+    adapter._player_service.player_repo = player_repo
+
+    interaction = MagicMock()
+    interaction.user.id = 42
+    interaction.response.send_message = AsyncMock()
+    interaction.response.is_done = MagicMock(return_value=False)
+    interaction.data = {
+        "custom_id": encode_custom_id(
+            "submit_add_roster_player",
+            interaction_id=20,
+        ),
+        "components": [
+            {
+                "components": [
+                    {"custom_id": "new_value", "value": "Carol"},
+                ]
+            }
+        ],
+    }
+
+    handler = getattr(adapter, "_handle_submit_add_roster_player", None)
+    assert callable(handler), "Adapter must expose _handle_submit_add_roster_player"
+    asyncio.run(
+        handler(
+            interaction,
+            ParsedCustomId(action="submit_add_roster_player", interaction_id=20),
+        )
+    )
+
+    parent = repo.get_by_id(10)
+    names = [p["name"] for p in parent.payload["extraction"]["players"]]
+    assert "Carol" in names
+    assert len(parent.payload["resolved_roster"]) == 3
+    input_channel.fetch_message.assert_awaited_once_with(9999)
+    diagnosis_message.edit.assert_awaited_once()
+    edit_kwargs = diagnosis_message.edit.await_args.kwargs
+    assert "embed" in edit_kwargs
+    assert "view" in edit_kwargs
+    interaction.response.send_message.assert_awaited()
+    assert interaction.response.send_message.await_args.kwargs.get("ephemeral") is True
+
+
+def test_remove_roster_player_updates_parent_and_refreshes_diagnosis() -> None:
+    from scoretopia.discord.views import ParsedCustomId
+
+    input_channel = MagicMock()
+    input_channel.id = 100
+    diagnosis_message = MagicMock()
+    diagnosis_message.edit = AsyncMock()
+    input_channel.fetch_message = AsyncMock(return_value=diagnosis_message)
+    adapter = _adapter_with_channels(input_channel=input_channel)
+    repo = _fix_pending_repo(
+        extraction={
+            "screenshot_type": "game_basics",
+            "game_name": "Typo Game",
+            "map_size": 12,
+            "terrain": "Drylands",
+            "game_timer": "Blitz",
+            "target_score": 10000,
+            "game_type": "Domination",
+            "players": [
+                {"name": "Alice", "tribe": "Xin-xi", "is_you": True},
+                {"name": "JunkName", "tribe": "Imperius", "is_you": False},
+                {"name": "Bob", "tribe": "Bardur", "is_you": False},
+            ],
+        },
+        resolved_roster=[
+            {
+                "raw_ocr": "Alice",
+                "suggested_name": "Alice",
+                "confidence": 1.0,
+                "match_type": "exact",
+            },
+            {
+                "raw_ocr": "JunkName",
+                "suggested_name": None,
+                "confidence": 0.0,
+                "match_type": "new",
+            },
+            {
+                "raw_ocr": "Bob",
+                "suggested_name": "Bob",
+                "confidence": 1.0,
+                "match_type": "exact",
+            },
+        ],
+    )
+    adapter._ingest_service._pending_repo = repo
+
+    interaction = MagicMock()
+    interaction.user.id = 42
+    interaction.response.send_message = AsyncMock()
+    interaction.response.is_done = MagicMock(return_value=False)
+
+    handler = getattr(adapter, "_handle_remove_roster_player", None)
+    assert callable(handler), "Adapter must expose _handle_remove_roster_player"
+    asyncio.run(
+        handler(
+            interaction,
+            ParsedCustomId(
+                action="remove_roster_player",
+                interaction_id=20,
+                player_slot=1,
+            ),
+        )
+    )
+
+    parent = repo.get_by_id(10)
+    names = [p["name"] for p in parent.payload["extraction"]["players"]]
+    assert names == ["Alice", "Bob"]
+    assert [r["raw_ocr"] for r in parent.payload["resolved_roster"]] == [
+        "Alice",
+        "Bob",
+    ]
+    diagnosis_message.edit.assert_awaited_once()
+    interaction.response.send_message.assert_awaited()
+
+
+def test_move_roster_player_up_updates_order_and_refreshes_diagnosis() -> None:
+    from scoretopia.discord.views import ParsedCustomId
+
+    input_channel = MagicMock()
+    input_channel.id = 100
+    diagnosis_message = MagicMock()
+    diagnosis_message.edit = AsyncMock()
+    input_channel.fetch_message = AsyncMock(return_value=diagnosis_message)
+    adapter = _adapter_with_channels(input_channel=input_channel)
+    repo = _fix_pending_repo(
+        extraction={
+            "screenshot_type": "game_basics",
+            "game_name": "Typo Game",
+            "map_size": 12,
+            "terrain": "Drylands",
+            "game_timer": "Blitz",
+            "target_score": 10000,
+            "game_type": "Domination",
+            "players": [
+                {"name": "Alice", "is_you": True},
+                {"name": "Bob", "is_you": False},
+                {"name": "Carol", "is_you": False},
+            ],
+        },
+        resolved_roster=[
+            {
+                "raw_ocr": "Alice",
+                "suggested_name": "Alice",
+                "confidence": 1.0,
+                "match_type": "exact",
+            },
+            {
+                "raw_ocr": "Bob",
+                "suggested_name": "Bob",
+                "confidence": 1.0,
+                "match_type": "exact",
+            },
+            {
+                "raw_ocr": "Carol",
+                "suggested_name": "Carol",
+                "confidence": 1.0,
+                "match_type": "exact",
+            },
+        ],
+    )
+    adapter._ingest_service._pending_repo = repo
+
+    interaction = MagicMock()
+    interaction.user.id = 42
+    interaction.response.send_message = AsyncMock()
+    interaction.response.is_done = MagicMock(return_value=False)
+
+    handler = getattr(adapter, "_handle_move_roster_player_up", None)
+    assert callable(handler), "Adapter must expose _handle_move_roster_player_up"
+    asyncio.run(
+        handler(
+            interaction,
+            ParsedCustomId(
+                action="move_roster_player_up",
+                interaction_id=20,
+                player_slot=2,
+            ),
+        )
+    )
+
+    parent = repo.get_by_id(10)
+    assert [p["name"] for p in parent.payload["extraction"]["players"]] == [
+        "Alice",
+        "Carol",
+        "Bob",
+    ]
+    assert [r["raw_ocr"] for r in parent.payload["resolved_roster"]] == [
+        "Alice",
+        "Carol",
+        "Bob",
+    ]
+    diagnosis_message.edit.assert_awaited_once()
+
+
+def test_roster_shape_edit_unauthorized_non_uploader_is_acked() -> None:
+    from scoretopia.discord.views import ParsedCustomId
+
+    adapter = _adapter_with_channels()
+    repo = _fix_pending_repo()
+    adapter._ingest_service._pending_repo = repo
+
+    interaction = MagicMock()
+    interaction.user.id = 99
+    interaction.response.send_message = AsyncMock()
+    interaction.response.send_modal = AsyncMock()
+
+    for action, extra in (
+        ("add_roster_player", {}),
+        ("remove_roster_player", {"player_slot": 1}),
+        ("move_roster_player_up", {"player_slot": 1}),
+        ("move_roster_player_down", {"player_slot": 0}),
+    ):
+        handler_name = f"_handle_{action}"
+        handler = getattr(adapter, handler_name, None)
+        assert callable(handler), f"Adapter must expose {handler_name}"
+        interaction.response.send_message.reset_mock()
+        interaction.response.send_modal.reset_mock()
+        asyncio.run(
+            handler(
+                interaction,
+                ParsedCustomId(action=action, interaction_id=20, **extra),
+            )
+        )
+        interaction.response.send_message.assert_awaited()
+        msg = interaction.response.send_message.await_args.args[0].lower()
+        assert "not your" in msg
+        assert interaction.response.send_modal.await_count == 0
+
+
+def test_roster_shape_refresh_failure_sends_distinct_ephemeral() -> None:
+    from scoretopia.discord.adapter import _DIAGNOSIS_PREVIEW_REFRESH_FAILED
+    from scoretopia.discord.views import ParsedCustomId
+
+    adapter = _adapter_with_channels()
+    repo = _fix_pending_repo()
+    parent = repo.get_by_id(10)
+    del parent.payload["diagnosis_message_id"]
+    adapter._ingest_service._pending_repo = repo
+
+    interaction = MagicMock()
+    interaction.user.id = 42
+    interaction.response.send_message = AsyncMock()
+    interaction.response.is_done = MagicMock(return_value=False)
+
+    handler = getattr(adapter, "_handle_remove_roster_player", None)
+    assert callable(handler), "Adapter must expose _handle_remove_roster_player"
+    asyncio.run(
+        handler(
+            interaction,
+            ParsedCustomId(
+                action="remove_roster_player",
+                interaction_id=20,
+                player_slot=1,
+            ),
+        )
+    )
+    parent = repo.get_by_id(10)
+    assert len(parent.payload["extraction"]["players"]) == 1
+    interaction.response.send_message.assert_awaited_once_with(
+        _DIAGNOSIS_PREVIEW_REFRESH_FAILED,
+        ephemeral=True,
+    )
+
+
+def test_fix_delivery_posts_roster_shape_controls() -> None:
+    """Fix delivery must include add/remove/reorder controls (Task 039)."""
+    input_channel = MagicMock()
+    input_channel.send = AsyncMock()
+    adapter = _adapter_with_channels(input_channel=input_channel)
+    repo = _fix_pending_repo()
+    adapter._ingest_service._pending_repo = repo
+    adapter._staged_uploader_id = MagicMock(return_value="42")
+
+    interaction = MagicMock()
+    interaction.user.id = 42
+    interaction.response.send_message = AsyncMock()
+    interaction.response.is_done = MagicMock(return_value=False)
+    interaction.followup.send = AsyncMock()
+    interaction.channel = input_channel
+
+    asyncio.run(
+        adapter._deliver_field_correction_response(
+            interaction,
+            FieldCorrectionNeedsInput(
+                interaction_id=20,
+                parent_extraction_interaction_id=10,
+                screenshot_type="game_basics",
+            ),
+        )
+    )
+
+    posted_custom_ids: set[str] = set()
+    for mock in (
+        interaction.response.send_message,
+        interaction.followup.send,
+        input_channel.send,
+    ):
+        for call in mock.await_args_list:
+            view = call.kwargs.get("view")
+            if view is None:
+                continue
+            for child in getattr(view, "children", []):
+                cid = getattr(child, "custom_id", None)
+                if cid:
+                    posted_custom_ids.add(cid)
+
+    assert any("add_roster_player" in cid for cid in posted_custom_ids), (
+        "Fix must expose Add player control"
+    )
+    assert any("remove_roster_player" in cid for cid in posted_custom_ids), (
+        "Fix must expose Remove player control"
+    )
+    assert any(
+        "move_roster_player_up" in cid or "move_roster_player_down" in cid
+        for cid in posted_custom_ids
+    ), "Fix must expose reorder controls"

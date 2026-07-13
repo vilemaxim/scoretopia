@@ -42,9 +42,12 @@ from scoretopia.discord.views import (
     PlayerDiscordUserSelectView,
     PlayerLinkRemoteConfirmView,
     PlayerSpellingConfirmView,
+    RosterHumanShapeView,
     RosterKnownPlayerPickView,
+    RosterShapeEditView,
     RosterSlotFixView,
     WinRatioConfirmView,
+    build_add_roster_player_modal,
     build_field_correction_modal,
     build_roster_override_modal,
     can_approve_mod_batch,
@@ -79,6 +82,7 @@ from scoretopia.domain.actions import (
 from scoretopia.domain.field_correction import apply_field_correction_to_parent
 from scoretopia.domain.games import GameService
 from scoretopia.domain.ingest import IngestService, deserialize_staged_extraction
+from scoretopia.domain.matching import is_bot_name
 from scoretopia.domain.mod_approval import ModApprovalService
 from scoretopia.domain.player_identity import (
     ConfirmPlayerLinkOutcome,
@@ -92,6 +96,11 @@ from scoretopia.domain.player_resolution import (
 )
 from scoretopia.domain.players import PlayerService
 from scoretopia.domain.results import RegisterOutcome
+from scoretopia.domain.roster_edit import (
+    add_human_to_staged_roster,
+    move_human_in_staged_roster,
+    remove_human_from_staged_roster,
+)
 from scoretopia.domain.win_ratios import ConfirmOutcome, DisputeResult, WinRatioService
 from scoretopia.ports.bot import BotPort
 from scoretopia.reports.service import ReportService
@@ -119,6 +128,7 @@ _FIELD_CORRECTION_PROMPT = (
 )
 _FIELD_CORRECTION_APPLIED = "Updated staged extraction. Continue when ready."
 _ROSTER_SLOT_RESOLVED = "Player slot resolved. Continue when ready."
+_ROSTER_SHAPE_UPDATED = "Roster updated. Continue when ready."
 _DIAGNOSIS_PREVIEW_REFRESH_FAILED = (
     "Player slot was resolved, but the diagnosis preview could not be updated. "
     "Try Fix again or re-upload if Continue stays locked."
@@ -683,6 +693,16 @@ class DiscordBotAdapter(BotPort):
             await self._handle_override_roster_name(interaction, parsed)
         elif parsed.action == "submit_roster_override":
             await self._handle_submit_roster_override(interaction, parsed)
+        elif parsed.action == "add_roster_player":
+            await self._handle_add_roster_player(interaction, parsed)
+        elif parsed.action == "submit_add_roster_player":
+            await self._handle_submit_add_roster_player(interaction, parsed)
+        elif parsed.action == "remove_roster_player":
+            await self._handle_remove_roster_player(interaction, parsed)
+        elif parsed.action == "move_roster_player_up":
+            await self._handle_move_roster_player_up(interaction, parsed)
+        elif parsed.action == "move_roster_player_down":
+            await self._handle_move_roster_player_down(interaction, parsed)
 
     async def _handle_confirm_game_end(
         self,
@@ -1109,6 +1129,33 @@ class DiscordBotAdapter(BotPort):
         players = extraction.get("players")
         if not isinstance(players, list):
             return
+
+        async def _send(content: str, view: discord.ui.View) -> None:
+            if interaction is not None and self._response_is_done(interaction):
+                await interaction.followup.send(content, view=view, ephemeral=False)
+            elif channel is not None:
+                await channel.send(content, view=view)
+
+        shape_view = RosterShapeEditView(
+            interaction_id=result.interaction_id,
+            uploader_discord_id=uploader_discord_id,
+        )
+        await _send("Edit roster shape (add / remove / reorder):", shape_view)
+
+        for player_idx, entry in enumerate(players):
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name", ""))
+            if is_bot_name(name):
+                continue
+            human_view = RosterHumanShapeView(
+                interaction_id=result.interaction_id,
+                player_slot=player_idx,
+                player_name=name,
+                uploader_discord_id=uploader_discord_id,
+            )
+            await _send(f"Roster slot: **{name}**", human_view)
+
         human_to_player = player_slot_indexes_by_human_roster(players)
         resolved_roster = parent.payload.get("resolved_roster")
         if not isinstance(resolved_roster, list):
@@ -1130,11 +1177,7 @@ class DiscordBotAdapter(BotPort):
                 suggested_name=suggested_name,
                 uploader_discord_id=uploader_discord_id,
             )
-            content = f"Fix player: **{raw_ocr}**"
-            if interaction is not None and self._response_is_done(interaction):
-                await interaction.followup.send(content, view=view, ephemeral=False)
-            elif channel is not None:
-                await channel.send(content, view=view)
+            await _send(f"Fix player: **{raw_ocr}**", view)
 
     async def _handle_pick_field_correction(
         self,
@@ -1375,6 +1418,137 @@ class DiscordBotAdapter(BotPort):
         )
         await self._ack_roster_slot_resolved(interaction, parent_id)
 
+    async def _handle_add_roster_player(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        context = await self._require_fix_actor(interaction, parsed.interaction_id)
+        if context is None:
+            return
+        modal = build_add_roster_player_modal(interaction_id=parsed.interaction_id)
+        await interaction.response.send_modal(modal)
+
+    async def _handle_submit_add_roster_player(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        context = await self._require_fix_actor(interaction, parsed.interaction_id)
+        if context is None:
+            return
+        parent_id, _uploader, _screenshot_type = context
+        raw_value = modal_text_value(interaction)
+        if raw_value is None or not raw_value.strip():
+            await interaction.response.send_message(
+                "Enter a player name.",
+                ephemeral=True,
+            )
+            return
+        pending_repo = getattr(self._ingest_service, "_pending_repo", None)
+        player_repo = self._player_repo or getattr(
+            self._player_service, "player_repo", None
+        ) or getattr(self._player_service, "_player_repo", None)
+        if pending_repo is None or player_repo is None:
+            await interaction.response.send_message(
+                "Correction unavailable.",
+                ephemeral=True,
+            )
+            return
+        try:
+            add_human_to_staged_roster(
+                pending_repo,
+                parent_id,
+                name=raw_value.strip(),
+                player_repo=player_repo,
+            )
+        except ValueError:
+            await interaction.response.send_message(
+                "Could not add that player.",
+                ephemeral=True,
+            )
+            return
+        await self._ack_roster_shape_updated(interaction, parent_id)
+
+    async def _handle_remove_roster_player(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        context = await self._require_fix_actor(interaction, parsed.interaction_id)
+        if context is None:
+            return
+        parent_id, _uploader, _screenshot_type = context
+        assert parsed.player_slot is not None
+        pending_repo = getattr(self._ingest_service, "_pending_repo", None)
+        if pending_repo is None:
+            await interaction.response.send_message(
+                "Correction unavailable.",
+                ephemeral=True,
+            )
+            return
+        try:
+            remove_human_from_staged_roster(
+                pending_repo,
+                parent_id,
+                player_slot_index=parsed.player_slot,
+            )
+        except ValueError:
+            await interaction.response.send_message(
+                "Could not remove that player.",
+                ephemeral=True,
+            )
+            return
+        await self._ack_roster_shape_updated(interaction, parent_id)
+
+    async def _handle_move_roster_player_up(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        await self._move_roster_player(interaction, parsed, direction="up")
+
+    async def _handle_move_roster_player_down(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+    ) -> None:
+        await self._move_roster_player(interaction, parsed, direction="down")
+
+    async def _move_roster_player(
+        self,
+        interaction: discord.Interaction,
+        parsed: ParsedCustomId,
+        *,
+        direction: Literal["up", "down"],
+    ) -> None:
+        context = await self._require_fix_actor(interaction, parsed.interaction_id)
+        if context is None:
+            return
+        parent_id, _uploader, _screenshot_type = context
+        assert parsed.player_slot is not None
+        pending_repo = getattr(self._ingest_service, "_pending_repo", None)
+        if pending_repo is None:
+            await interaction.response.send_message(
+                "Correction unavailable.",
+                ephemeral=True,
+            )
+            return
+        try:
+            move_human_in_staged_roster(
+                pending_repo,
+                parent_id,
+                player_slot_index=parsed.player_slot,
+                direction=direction,
+            )
+        except ValueError:
+            await interaction.response.send_message(
+                "Could not reorder that player.",
+                ephemeral=True,
+            )
+            return
+        await self._ack_roster_shape_updated(interaction, parent_id)
+
     async def _require_fix_actor(
         self,
         interaction: discord.Interaction,
@@ -1509,11 +1683,33 @@ class DiscordBotAdapter(BotPort):
         interaction: discord.Interaction,
         parent_id: int,
     ) -> None:
+        await self._ack_after_diagnosis_refresh(
+            interaction,
+            parent_id,
+            success_message=_ROSTER_SLOT_RESOLVED,
+        )
+
+    async def _ack_roster_shape_updated(
+        self,
+        interaction: discord.Interaction,
+        parent_id: int,
+    ) -> None:
+        await self._ack_after_diagnosis_refresh(
+            interaction,
+            parent_id,
+            success_message=_ROSTER_SHAPE_UPDATED,
+        )
+
+    async def _ack_after_diagnosis_refresh(
+        self,
+        interaction: discord.Interaction,
+        parent_id: int,
+        *,
+        success_message: str,
+    ) -> None:
         refreshed = await self._refresh_diagnosis_preview(parent_id)
         content = (
-            _ROSTER_SLOT_RESOLVED
-            if refreshed
-            else _DIAGNOSIS_PREVIEW_REFRESH_FAILED
+            success_message if refreshed else _DIAGNOSIS_PREVIEW_REFRESH_FAILED
         )
         if self._response_is_done(interaction):
             await interaction.followup.send(content, ephemeral=True)
