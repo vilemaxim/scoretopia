@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import discord
 import pytest
 
 from scoretopia.config import ChannelsConfig
@@ -932,11 +933,22 @@ def _player_link_interaction(
 ) -> MagicMock:
     interaction = MagicMock()
     interaction.user.id = user_id
+    done = {"value": False}
+
+    def _is_done() -> bool:
+        return done["value"]
+
+    async def _defer(**_kwargs: object) -> None:
+        done["value"] = True
+
     interaction.response.send_message = AsyncMock()
-    interaction.response.is_done = MagicMock(return_value=False)
+    interaction.response.is_done = MagicMock(side_effect=_is_done)
+    interaction.response.defer = AsyncMock(side_effect=_defer)
     interaction.followup.send = AsyncMock()
     interaction.data = extra
     interaction.channel = None
+    interaction.message = MagicMock()
+    interaction.message.edit = AsyncMock()
     return interaction
 
 
@@ -1259,11 +1271,7 @@ def test_adapter_identity_flow_starts_game_after_remote_confirm(
             )
         )
 
-        remote_confirm = MagicMock()
-        remote_confirm.user.id = 200
-        remote_confirm.response.send_message = AsyncMock()
-        remote_confirm.response.is_done = MagicMock(return_value=False)
-        remote_confirm.followup.send = AsyncMock()
+        remote_confirm = _player_link_interaction(200)
         identity_service.select_discord_user(
             identity_id,
             slot_index=1,
@@ -1391,11 +1399,7 @@ def test_adapter_spelling_correction_flow_resumes_commit(
             )
         )
 
-        remote_confirm = MagicMock()
-        remote_confirm.user.id = 300
-        remote_confirm.response.send_message = AsyncMock()
-        remote_confirm.response.is_done = MagicMock(return_value=False)
-        remote_confirm.followup.send = AsyncMock()
+        remote_confirm = _player_link_interaction(300)
         identity_service.select_discord_user(
             identity_id,
             slot_index=1,
@@ -1506,13 +1510,7 @@ def test_adapter_bot_mod_select_links_without_remote_confirm(
             )
         )
 
-        select = MagicMock()
-        select.user.id = 100
-        select.response.send_message = AsyncMock()
-        select.response.is_done = MagicMock(return_value=False)
-        select.followup.send = AsyncMock()
-        select.channel = None
-        select.data = {"values": ["200"]}
+        select = _player_link_interaction(100, extra={"values": ["200"]})
         asyncio.run(
             adapter._handle_component(
                 select,
@@ -1531,13 +1529,17 @@ def test_adapter_bot_mod_select_links_without_remote_confirm(
         assert pending is not None
         assert pending.status != "open"
         # Response may be the link ack or a follow-on final-summary prompt
-        # (MagicMock is_done stays False). Either way, never remote-confirm.
+        # (deferred path uses followup). Either way, never remote-confirm.
         sent = " ".join(
             str(call.args[0]) if call.args else ""
-            for call in select.response.send_message.await_args_list
+            for call in (
+                *select.response.send_message.await_args_list,
+                *select.followup.send.await_args_list,
+            )
         )
         assert "please confirm or reject" not in sent.lower()
         assert player_repo.get_by_discord_id("200") is not None
+        select.message.edit.assert_awaited_once_with(view=None)
     finally:
         conn.close()
 
@@ -1704,11 +1706,7 @@ def test_confirm_player_link_slash_succeeds_for_bot_mod(
             confirmer_discord_id="100",
         )
 
-        interaction = MagicMock()
-        interaction.user.id = 999
-        interaction.response.send_message = AsyncMock()
-        interaction.response.is_done = MagicMock(return_value=False)
-        interaction.followup.send = AsyncMock()
+        interaction = _player_link_interaction(999)
         asyncio.run(
             adapter._handle_confirm_player_link_slash(
                 interaction,
@@ -1720,7 +1718,8 @@ def test_confirm_player_link_slash_succeeds_for_bot_mod(
         linked = player_repo.get_by_polytopia_name("NewBob")
         assert linked is not None
         assert linked.discord_user_id == "200"
-        interaction.response.send_message.assert_awaited()
+        interaction.followup.send.assert_awaited()
+        interaction.message.edit.assert_awaited_once_with(view=None)
     finally:
         conn.close()
 
@@ -1826,13 +1825,7 @@ def test_adapter_mod_select_conflict_shows_override_not_integrity_error(
             )
         )
 
-        select = MagicMock()
-        select.user.id = 100
-        select.response.send_message = AsyncMock()
-        select.response.is_done = MagicMock(return_value=False)
-        select.followup.send = AsyncMock()
-        select.channel = None
-        select.data = {"values": ["100"]}
+        select = _player_link_interaction(100, extra={"values": ["100"]})
         asyncio.run(
             adapter._handle_component(
                 select,
@@ -1844,8 +1837,8 @@ def test_adapter_mod_select_conflict_shows_override_not_integrity_error(
             )
         )
 
-        select.response.send_message.assert_awaited()
-        kwargs = select.response.send_message.await_args.kwargs
+        select.followup.send.assert_awaited()
+        kwargs = select.followup.send.await_args.kwargs
         assert "embed" in kwargs
         assert "view" in kwargs
         assert "RegisteredAs" in (kwargs["embed"].description or "")
@@ -2046,11 +2039,13 @@ def test_skip_player_discord_component_calls_identity_service() -> None:
 
     asyncio.run(adapter._handle_component(interaction, parsed))
 
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
     identity_service.skip_discord_link.assert_called_once_with(
         20,
         slot_index=1,
         confirmer_discord_id="42",
     )
+    interaction.message.edit.assert_awaited_once_with(view=None)
 
 
 def test_skip_player_discord_unauthorized_non_uploader() -> None:
@@ -2070,9 +2065,106 @@ def test_skip_player_discord_unauthorized_non_uploader() -> None:
     asyncio.run(adapter._handle_component(interaction, parsed))
 
     identity_service.skip_discord_link.assert_not_called()
-    interaction.response.send_message.assert_awaited_once_with(
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    interaction.followup.send.assert_awaited_once_with(
         "not your confirmation",
         ephemeral=True,
+    )
+
+
+def test_skip_player_discord_stale_pending_returns_already_finished() -> None:
+    from scoretopia.domain.player_identity import (
+        ConfirmPlayerLinkOutcome,
+        ConfirmPlayerLinkResult,
+    )
+
+    identity_service = MagicMock()
+    identity_service.skip_discord_link.return_value = ConfirmPlayerLinkResult(
+        outcome=ConfirmPlayerLinkOutcome.ALREADY_RESOLVED,
+    )
+    adapter = _player_link_adapter(
+        identity_service=identity_service,
+        uploader_discord_id="42",
+    )
+    adapter._maybe_resume_parent_commit = AsyncMock()
+
+    interaction = _player_link_interaction(42)
+    parsed = ParsedCustomId(
+        action="skip_player_discord",
+        interaction_id=20,
+        player_slot=1,
+    )
+
+    asyncio.run(adapter._handle_component(interaction, parsed))
+
+    identity_service.skip_discord_link.assert_called_once()
+    adapter._maybe_resume_parent_commit.assert_not_awaited()
+    interaction.message.edit.assert_awaited_once_with(view=None)
+    interaction.followup.send.assert_awaited_once_with(
+        "This player link step is already finished.",
+        ephemeral=True,
+    )
+
+
+def test_skip_player_discord_missing_pending_returns_already_finished() -> None:
+    identity_service = MagicMock()
+    adapter = _player_link_adapter(
+        identity_service=identity_service,
+        uploader_discord_id="42",
+    )
+    adapter._player_link_uploader_id = MagicMock(return_value=None)
+    adapter._maybe_resume_parent_commit = AsyncMock()
+
+    interaction = _player_link_interaction(42)
+    parsed = ParsedCustomId(
+        action="skip_player_discord",
+        interaction_id=20,
+        player_slot=1,
+    )
+
+    asyncio.run(adapter._handle_component(interaction, parsed))
+
+    identity_service.skip_discord_link.assert_not_called()
+    adapter._maybe_resume_parent_commit.assert_not_awaited()
+    interaction.message.edit.assert_awaited_once_with(view=None)
+    interaction.followup.send.assert_awaited_once_with(
+        "This player link step is already finished.",
+        ephemeral=True,
+    )
+
+
+def test_reply_or_followup_swallows_discord_not_found() -> None:
+    adapter = _adapter_with_channels()
+    interaction = MagicMock()
+    interaction.response.is_done = MagicMock(return_value=False)
+    response = MagicMock()
+    response.status = 404
+    interaction.response.send_message = AsyncMock(
+        side_effect=discord.NotFound(
+            response,
+            {"message": "Unknown interaction", "code": 10062},
+        ),
+    )
+
+    asyncio.run(
+        adapter._reply_or_followup(interaction, "hello", ephemeral=True),
+    )
+
+
+def test_reply_or_followup_swallows_http_exception_10062() -> None:
+    adapter = _adapter_with_channels()
+    interaction = MagicMock()
+    interaction.response.is_done = MagicMock(return_value=True)
+    response = MagicMock()
+    response.status = 404
+    exc = discord.HTTPException(
+        response,
+        {"message": "Unknown interaction", "code": 10062},
+    )
+    interaction.followup.send = AsyncMock(side_effect=exc)
+
+    asyncio.run(
+        adapter._reply_or_followup(interaction, "hello", ephemeral=True),
     )
 
 
@@ -2147,12 +2239,7 @@ def test_after_skip_with_remaining_slots_delivers_next_spelling_ui(
             )
         )
 
-        skip = MagicMock()
-        skip.user.id = 100
-        skip.response.send_message = AsyncMock()
-        skip.response.is_done = MagicMock(return_value=False)
-        skip.followup.send = AsyncMock()
-        skip.channel = None
+        skip = _player_link_interaction(100)
         asyncio.run(
             adapter._handle_component(
                 skip,
@@ -2172,6 +2259,8 @@ def test_after_skip_with_remaining_slots_delivers_next_spelling_ui(
             )
         ]
         assert send_calls, "expected a follow-up identity prompt after skip"
+        skip.message.edit.assert_awaited_once_with(view=None)
+        skip.response.defer.assert_awaited_once_with(ephemeral=True)
         views = [
             call.kwargs["view"]
             for call in send_calls
@@ -2261,13 +2350,7 @@ def test_after_successful_link_with_remaining_slots_delivers_next_spelling_ui(
             )
         )
 
-        select = MagicMock()
-        select.user.id = 100
-        select.response.send_message = AsyncMock()
-        select.response.is_done = MagicMock(return_value=False)
-        select.followup.send = AsyncMock()
-        select.channel = None
-        select.data = {"values": ["200"]}
+        select = _player_link_interaction(100, extra={"values": ["200"]})
         asyncio.run(
             adapter._handle_component(
                 select,
@@ -2295,6 +2378,7 @@ def test_after_successful_link_with_remaining_slots_delivers_next_spelling_ui(
             "after linking one of several slots, next spelling UI must be delivered"
         )
         assert spelling_views[-1].player_slot == 2
+        select.message.edit.assert_awaited_once_with(view=None)
         pending = pending_repo.get_by_id(identity_id)
         assert pending is not None
         assert pending.status == "open"
@@ -2375,12 +2459,7 @@ def test_adapter_skip_last_slot_resumes_final_summary(
             )
         )
 
-        skip = MagicMock()
-        skip.user.id = 100
-        skip.response.send_message = AsyncMock()
-        skip.response.is_done = MagicMock(return_value=False)
-        skip.followup.send = AsyncMock()
-        skip.channel = None
+        skip = _player_link_interaction(100)
         asyncio.run(
             adapter._handle_component(
                 skip,
@@ -2395,6 +2474,8 @@ def test_adapter_skip_last_slot_resumes_final_summary(
         input_channel.send.assert_awaited()
         posted_view = input_channel.send.await_args.kwargs.get("view")
         assert isinstance(posted_view, FinalSummaryView)
+        skip.message.edit.assert_awaited_once_with(view=None)
+        skip.response.defer.assert_awaited_once_with(ephemeral=True)
         skipped = player_repo.get_by_polytopia_name("SkipOnly")
         assert skipped is not None
         assert skipped.discord_user_id is None

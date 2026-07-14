@@ -930,6 +930,56 @@ def test_skip_discord_unauthorized_confirmer_does_not_resolve(
     assert pending.status == "open"
 
 
+def test_skip_discord_already_resolved_pending_is_idempotent(
+    player_repo: PlayerRepo,
+    pending_repo: PendingInteractionRepo,
+) -> None:
+    player_identity_service = _player_identity_service(player_repo, pending_repo)
+    module = _require_player_identity_module()
+    interaction_id, _parent_id = _begin_identity_after_spelling(
+        player_identity_service,
+        pending_repo,
+        names=("DoneAlready",),
+    )
+    first = player_identity_service.skip_discord_link(
+        interaction_id,
+        slot_index=0,
+        confirmer_discord_id="uploader-1",
+    )
+    assert first.outcome == module.ConfirmPlayerLinkOutcome.SUCCESS
+    player = player_repo.get_by_polytopia_name("DoneAlready")
+    assert player is not None
+
+    second = player_identity_service.skip_discord_link(
+        interaction_id,
+        slot_index=0,
+        confirmer_discord_id="uploader-1",
+    )
+
+    assert second.outcome == module.ConfirmPlayerLinkOutcome.ALREADY_RESOLVED
+    assert player_repo.get_by_polytopia_name("DoneAlready") is not None
+    assert player_repo.get_by_polytopia_name("DoneAlready").id == player.id
+    pending = pending_repo.get_by_id(interaction_id)
+    assert pending is not None
+    assert pending.status == "resolved"
+
+
+def test_skip_discord_missing_pending_returns_already_resolved(
+    player_repo: PlayerRepo,
+    pending_repo: PendingInteractionRepo,
+) -> None:
+    player_identity_service = _player_identity_service(player_repo, pending_repo)
+    module = _require_player_identity_module()
+
+    result = player_identity_service.skip_discord_link(
+        9_999_999,
+        slot_index=0,
+        confirmer_discord_id="uploader-1",
+    )
+
+    assert result.outcome == module.ConfirmPlayerLinkOutcome.ALREADY_RESOLVED
+
+
 def test_skip_discord_then_continue_review_completes_with_unlinked_player(
     player_repo: PlayerRepo,
     pending_repo: PendingInteractionRepo,
