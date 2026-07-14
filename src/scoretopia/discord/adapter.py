@@ -1965,7 +1965,8 @@ class DiscordBotAdapter(BotPort):
         return winner.polytopia_name if winner is not None else None
 
     async def _reply_unauthorized(self, interaction: discord.Interaction) -> None:
-        await interaction.response.send_message(
+        await self._reply_or_followup(
+            interaction,
             unauthorized_confirmation_message(),
             ephemeral=True,
         )
@@ -1975,6 +1976,38 @@ class DiscordBotAdapter(BotPort):
         if callable(is_done):
             return is_done() is True
         return False
+
+    async def _defer_ephemeral(self, interaction: discord.Interaction) -> None:
+        if self._response_is_done(interaction):
+            return
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            logger.warning(
+                "Discord interaction expired before defer (unknown interaction)",
+            )
+
+    async def _clear_interaction_components(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        message = getattr(interaction, "message", None)
+        if message is None:
+            return
+        edit = getattr(message, "edit", None)
+        if not callable(edit):
+            return
+        try:
+            await edit(view=None)
+        except discord.NotFound:
+            logger.warning(
+                "Could not clear components; Discord message or interaction missing",
+            )
+        except discord.HTTPException:
+            logger.warning(
+                "Could not clear components on player-link source message",
+                exc_info=True,
+            )
 
     def _games_for_ids(self, game_ids: tuple[int, ...]) -> list[Game]:
         if self._game_repo is None:
@@ -2286,11 +2319,21 @@ class DiscordBotAdapter(BotPort):
         parsed: ParsedCustomId,
     ) -> None:
         assert parsed.player_slot is not None
-        uploader = await self._require_player_link_uploader(
-            interaction,
-            parsed.interaction_id,
-        )
+        await self._defer_ephemeral(interaction)
+        uploader = self._player_link_uploader_id(parsed.interaction_id)
         if uploader is None:
+            await self._clear_interaction_components(interaction)
+            await self._reply_or_followup(
+                interaction,
+                "This player link step is already finished.",
+                ephemeral=True,
+            )
+            return
+        if not can_review_staged(
+            uploader_discord_id=uploader,
+            actor_discord_id=str(interaction.user.id),
+        ):
+            await self._reply_unauthorized(interaction)
             return
         result = self._player_identity_service.skip_discord_link(
             parsed.interaction_id,
@@ -2312,6 +2355,7 @@ class DiscordBotAdapter(BotPort):
     ) -> None:
         """Legacy remote Confirm button — still safe against IntegrityError."""
         assert parsed.player_slot is not None
+        await self._defer_ephemeral(interaction)
         selected = self._player_link_selected_discord_id(
             parsed.interaction_id,
             parsed.player_slot,
@@ -2348,6 +2392,7 @@ class DiscordBotAdapter(BotPort):
         ):
             await self._reply_unauthorized(interaction)
             return
+        await self._defer_ephemeral(interaction)
         result = self._player_identity_service.link_selected_discord_user(
             interaction_id,
             slot_index=slot,
@@ -2373,6 +2418,7 @@ class DiscordBotAdapter(BotPort):
         ):
             await self._reply_unauthorized(interaction)
             return
+        await self._defer_ephemeral(interaction)
         result = self._player_identity_service.link_selected_discord_user(
             parsed.interaction_id,
             slot_index=parsed.player_slot,
@@ -2498,6 +2544,7 @@ class DiscordBotAdapter(BotPort):
         uploader_discord_id: str,
     ) -> None:
         if is_bot_mod(uploader_discord_id, self._config):
+            await self._defer_ephemeral(interaction)
             result = self._player_identity_service.link_selected_discord_user(
                 identity_interaction_id,
                 slot_index=slot_index,
@@ -2562,6 +2609,14 @@ class DiscordBotAdapter(BotPort):
         if result.outcome == ConfirmPlayerLinkOutcome.NOT_AUTHORIZED:
             await self._reply_unauthorized(interaction)
             return
+        if result.outcome == ConfirmPlayerLinkOutcome.ALREADY_RESOLVED:
+            await self._clear_interaction_components(interaction)
+            await self._reply_or_followup(
+                interaction,
+                "This player link step is already finished.",
+                ephemeral=True,
+            )
+            return
         if result.outcome == ConfirmPlayerLinkOutcome.MISSING_SELECTION:
             await self._reply_or_followup(
                 interaction,
@@ -2600,6 +2655,7 @@ class DiscordBotAdapter(BotPort):
                     ),
                 )
             return
+        await self._clear_interaction_components(interaction)
         await self._reply_or_followup(
             interaction,
             success_message,
@@ -2645,10 +2701,22 @@ class DiscordBotAdapter(BotPort):
         *,
         ephemeral: bool = False,
     ) -> None:
-        if self._response_is_done(interaction):
-            await interaction.followup.send(content, ephemeral=ephemeral)
-        else:
-            await interaction.response.send_message(content, ephemeral=ephemeral)
+        try:
+            if self._response_is_done(interaction):
+                await interaction.followup.send(content, ephemeral=ephemeral)
+            else:
+                await interaction.response.send_message(content, ephemeral=ephemeral)
+        except discord.NotFound:
+            logger.warning(
+                "Discord unknown interaction (10062) while replying; ignoring",
+            )
+        except discord.HTTPException as exc:
+            if getattr(exc, "code", None) == 10062:
+                logger.warning(
+                    "Discord unknown interaction (10062) while replying; ignoring",
+                )
+                return
+            raise
 
     async def _maybe_resume_parent_commit(
         self,

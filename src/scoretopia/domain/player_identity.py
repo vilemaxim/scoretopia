@@ -26,6 +26,7 @@ class ConfirmPlayerLinkOutcome(Enum):
     BLOCKED = "blocked"
     NEEDS_OVERRIDE = "needs_override"
     MISSING_SELECTION = "missing_selection"
+    ALREADY_RESOLVED = "already_resolved"
 
 
 @dataclass(frozen=True)
@@ -245,12 +246,20 @@ class PlayerIdentityService:
         confirmer_discord_id: str,
     ) -> ConfirmPlayerLinkResult:
         """Resolve a slot without linking Discord (Polytopia-only player)."""
-        pending = self._require_open_pending(interaction_id)
+        pending = self._open_player_link_pending(interaction_id)
+        if pending is None:
+            return ConfirmPlayerLinkResult(
+                outcome=ConfirmPlayerLinkOutcome.ALREADY_RESOLVED,
+            )
         if pending.discord_user_id != confirmer_discord_id:
             return ConfirmPlayerLinkResult(
                 outcome=ConfirmPlayerLinkOutcome.NOT_AUTHORIZED,
             )
-        slot = self._slot_for_index(pending.payload, slot_index)
+        slot = self._slot_for_index_or_none(pending.payload, slot_index)
+        if slot is None or bool(slot.get("resolved")):
+            return ConfirmPlayerLinkResult(
+                outcome=ConfirmPlayerLinkOutcome.ALREADY_RESOLVED,
+            )
         player = self._ensure_polytopia_only_player(slot)
         return self._mark_slot_resolved(
             interaction_id,
@@ -280,8 +289,16 @@ class PlayerIdentityService:
         Used by bot-mod immediate linking and ``/confirm-player-link``.
         Caller is responsible for authorization (bot mod).
         """
-        pending = self._require_open_pending(interaction_id)
-        slot = self._slot_for_index(pending.payload, slot_index)
+        pending = self._open_player_link_pending(interaction_id)
+        if pending is None:
+            return ConfirmPlayerLinkResult(
+                outcome=ConfirmPlayerLinkOutcome.ALREADY_RESOLVED,
+            )
+        slot = self._slot_for_index_or_none(pending.payload, slot_index)
+        if slot is None or bool(slot.get("resolved")):
+            return ConfirmPlayerLinkResult(
+                outcome=ConfirmPlayerLinkOutcome.ALREADY_RESOLVED,
+            )
         selected = slot.get("selected_discord_user_id")
         if not isinstance(selected, str) or not selected:
             return ConfirmPlayerLinkResult(
@@ -302,8 +319,16 @@ class PlayerIdentityService:
         slot_index: int,
         confirmer_discord_id: str,
     ) -> ConfirmPlayerLinkResult:
-        pending = self._require_open_pending(interaction_id)
-        slot = self._slot_for_index(pending.payload, slot_index)
+        pending = self._open_player_link_pending(interaction_id)
+        if pending is None:
+            return ConfirmPlayerLinkResult(
+                outcome=ConfirmPlayerLinkOutcome.ALREADY_RESOLVED,
+            )
+        slot = self._slot_for_index_or_none(pending.payload, slot_index)
+        if slot is None or bool(slot.get("resolved")):
+            return ConfirmPlayerLinkResult(
+                outcome=ConfirmPlayerLinkOutcome.ALREADY_RESOLVED,
+            )
         selected = slot.get("selected_discord_user_id")
         if not isinstance(selected, str) or selected != confirmer_discord_id:
             return ConfirmPlayerLinkResult(
@@ -419,13 +444,22 @@ class PlayerIdentityService:
         )
 
     def _require_open_pending(self, interaction_id: int):
-        pending = self._pending_repo.get_by_id(interaction_id)
-        if pending is None or pending.kind != _CONFIRM_PLAYER_LINK_KIND:
-            msg = f"Missing player-link pending interaction: {interaction_id}"
-            raise ValueError(msg)
-        if pending.status != "open":
+        pending = self._open_player_link_pending(interaction_id)
+        if pending is None:
+            existing = self._pending_repo.get_by_id(interaction_id)
+            if existing is None or existing.kind != _CONFIRM_PLAYER_LINK_KIND:
+                msg = f"Missing player-link pending interaction: {interaction_id}"
+                raise ValueError(msg)
             msg = f"Player-link pending interaction is not open: {interaction_id}"
             raise ValueError(msg)
+        return pending
+
+    def _open_player_link_pending(self, interaction_id: int):
+        pending = self._pending_repo.get_by_id(interaction_id)
+        if pending is None or pending.kind != _CONFIRM_PLAYER_LINK_KIND:
+            return None
+        if pending.status != "open":
+            return None
         return pending
 
     def _slot_for_index(
@@ -433,15 +467,28 @@ class PlayerIdentityService:
         payload: dict[str, object],
         slot_index: int,
     ) -> dict[str, object]:
+        slot = self._slot_for_index_or_none(payload, slot_index)
+        if slot is None:
+            slots = payload.get("slots")
+            if not isinstance(slots, list):
+                msg = "Missing player-link slot payload"
+                raise ValueError(msg)
+            msg = f"Unknown player slot: {slot_index}"
+            raise ValueError(msg)
+        return slot
+
+    def _slot_for_index_or_none(
+        self,
+        payload: dict[str, object],
+        slot_index: int,
+    ) -> dict[str, object] | None:
         slots = payload.get("slots")
         if not isinstance(slots, list):
-            msg = "Missing player-link slot payload"
-            raise ValueError(msg)
+            return None
         for slot in slots:
             if isinstance(slot, dict) and slot.get("slot_index") == slot_index:
                 return slot
-        msg = f"Unknown player slot: {slot_index}"
-        raise ValueError(msg)
+        return None
 
     def _save_slots(self, interaction_id: int, payload: dict[str, object]) -> None:
         self._pending_repo.update_payload(interaction_id, payload)
