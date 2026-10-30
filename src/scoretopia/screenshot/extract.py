@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 from difflib import unified_diff
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import easyocr
 
+from scoretopia.screenshot import steam
 from scoretopia.screenshot.game_basics import parse_game_basics
+from scoretopia.screenshot.icons import is_skull_avatar
 from scoretopia.screenshot.models import ExtractionResult
 from scoretopia.screenshot.name_matching import player_names_match
 from scoretopia.screenshot.parsers import (
@@ -28,6 +31,19 @@ if TYPE_CHECKING:
     )
 
 DEFAULT_MODEL_DIR = Path(".easyocr_models")
+# Half the side of the avatar's inner square on a Steam card (avatar ~44 px).
+_STEAM_AVATAR_HALF = 10
+
+
+@lru_cache(maxsize=2)
+def _ocr_reader(model_dir: str) -> easyocr.Reader:
+    """Build the EasyOCR reader once per model dir; loading it costs seconds."""
+    return easyocr.Reader(
+        ["en"],
+        gpu=False,
+        verbose=False,
+        model_storage_directory=model_dir,
+    )
 
 
 def extract_screenshot(
@@ -40,13 +56,7 @@ def extract_screenshot(
     if not path.is_file():
         raise FileNotFoundError(f"Screenshot not found: {path}")
 
-    reader = easyocr.Reader(
-        ["en"],
-        gpu=False,
-        verbose=False,
-        model_storage_directory=str(model_dir),
-    )
-    raw_results = reader.readtext(str(path))
+    raw_results = _ocr_reader(str(model_dir)).readtext(str(path))
     ocr_results = [
         OCRLine(
             text=text,
@@ -57,12 +67,64 @@ def extract_screenshot(
         for bbox, text, confidence in raw_results
     ]
 
+    steam_result = _extract_steam(path, ocr_results, model_dir)
+    if steam_result is not None:
+        return steam_result
+
     screenshot_type = detect_screenshot_type(ocr_results)
     if screenshot_type == "game_end":
         return parse_game_end(ocr_results)
     if screenshot_type == "game_basics":
         return parse_game_basics(ocr_results, path)
     return parse_friend_profile(ocr_results)
+
+
+def _extract_steam(
+    path: Path,
+    ocr_results: list[OCRLine],
+    model_dir: str | Path,
+) -> ExtractionResult | None:
+    """Parse a Steam (landscape) frame, or return None to use the phone parsers."""
+    import numpy as np
+    from PIL import Image
+
+    with Image.open(path) as opened:
+        if not steam.is_steam_frame(opened.size):
+            return None
+        rgb = np.asarray(opened.convert("RGB"))
+
+    screenshot_type = steam.detect_steam_screenshot_type(ocr_results)
+    if screenshot_type is None:
+        return None
+    reader = _ocr_reader(str(model_dir))
+
+    def read(array: np.ndarray, allowlist: str | None) -> list[OCRLine]:
+        return [
+            OCRLine(
+                text=text,
+                confidence=confidence,
+                y=(bbox[0][1] + bbox[2][1]) / 2,
+                x=(bbox[0][0] + bbox[2][0]) / 2,
+            )
+            for bbox, text, confidence in reader.readtext(array, allowlist=allowlist)
+        ]
+
+    if screenshot_type == "game_end":
+        return steam.parse_steam_game_end(
+            steam.refine_steam_game_end(ocr_results, rgb, read)
+        )
+
+    def is_skull(x: float, y: float) -> bool:
+        half = _STEAM_AVATAR_HALF
+        avatar = Image.fromarray(rgb).crop(
+            (int(x - half), int(y - half), int(x + half), int(y + half))
+        )
+        return is_skull_avatar(avatar)
+
+    return steam.parse_steam_game_basics(
+        steam.refine_steam_game_basics(ocr_results, rgb, read),
+        is_skull=is_skull,
+    )
 
 
 def format_extraction(result: ExtractionResult) -> str:

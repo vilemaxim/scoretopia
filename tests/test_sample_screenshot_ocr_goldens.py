@@ -7,29 +7,18 @@ from pathlib import Path
 
 import pytest
 
+from scoretopia.screenshot.accuracy import (
+    discover_golden_pairs,
+    resolve_extraction_names,
+    roster_from_goldens,
+)
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SAMPLES_DIR = PROJECT_ROOT / "samples" / "screenshots"
 MODEL_DIR = PROJECT_ROOT / ".easyocr_models"
-IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
-
-
-def discover_golden_pairs(samples_dir: Path) -> list[tuple[Path, Path]]:
-    """Return (image, json) pairs where both files exist under samples_dir."""
-    if not samples_dir.is_dir():
-        return []
-    pairs: list[tuple[Path, Path]] = []
-    for path in sorted(samples_dir.iterdir()):
-        if not path.is_file():
-            continue
-        if path.suffix.lower() not in IMAGE_SUFFIXES:
-            continue
-        golden = path.with_suffix(".json")
-        if golden.is_file():
-            pairs.append((path, golden))
-    return pairs
-
 
 GOLDEN_PAIRS = discover_golden_pairs(SAMPLES_DIR)
+ROSTER = roster_from_goldens(GOLDEN_PAIRS)
 FIXIOOOIAN_SAMPLE = SAMPLES_DIR / "fixioooian_butte-start.png"
 FIXIOOOIAN_GOLDEN = FIXIOOOIAN_SAMPLE.with_suffix(".json")
 LOBBY_SAMPLE = SAMPLES_DIR / "game start error.png"
@@ -70,18 +59,25 @@ def test_discover_golden_pairs_empty_when_no_json(tmp_path: Path) -> None:
     GOLDEN_PAIRS,
     ids=[p[0].name for p in GOLDEN_PAIRS],
 )
-def test_sample_screenshot_matches_golden_player_names(
+def test_sample_screenshot_matches_golden_every_field(
     image_path: Path,
     golden_path: Path,
 ) -> None:
+    """Every field in the golden must match, not player names only.
+
+    Names are resolved against every golden's names first, as production
+    resolves them against the players table.
+    """
     from scoretopia.screenshot.extract import (
-        compare_extraction_player_names,
+        compare_extraction_to_expected,
         extract_screenshot,
     )
 
     expected = json.loads(golden_path.read_text(encoding="utf-8"))
-    result = extract_screenshot(image_path, model_dir=MODEL_DIR)
-    match, message = compare_extraction_player_names(result, expected)
+    result = resolve_extraction_names(
+        extract_screenshot(image_path, model_dir=MODEL_DIR), ROSTER
+    )
+    match, message = compare_extraction_to_expected(result, expected)
     assert match, f"{image_path.name}: {message}"
 
 

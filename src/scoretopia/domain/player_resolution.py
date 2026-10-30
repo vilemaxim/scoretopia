@@ -23,6 +23,7 @@ from scoretopia.screenshot.models import (
 )
 from scoretopia.screenshot.name_matching import (
     _FUZZY_MATCH_THRESHOLD,
+    match_known_name,
     normalize_ocr_name,
 )
 from scoretopia.storage.repos import PlayerRepo
@@ -74,6 +75,17 @@ def _resolve_one(
                 confidence=1.0,
                 match_type="exact",
             )
+
+    # Small UI text (the Steam build) loses dots and swaps 1/l: a name that
+    # differs from exactly one known player only by those glyphs is that player.
+    ocr_match = match_known_name(raw_name, (canonical for canonical, _ in known))
+    if ocr_match is not None:
+        return RosterSlotResolution(
+            raw_ocr=raw_name,
+            suggested_name=ocr_match,
+            confidence=1.0,
+            match_type="exact",
+        )
 
     best_name: str | None = None
     best_ratio = 0.0
