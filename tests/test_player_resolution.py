@@ -143,6 +143,44 @@ def test_resolve_roster_slots_fuzzy_after_ocr_normalization(
     assert records[0]["confidence"] >= 0.80
 
 
+def test_resolve_roster_slots_exact_when_only_ocr_glyphs_differ(
+    player_repo: PlayerRepo,
+) -> None:
+    _cls, resolve_roster_slots = _require_resolution_api()
+    del _cls
+    player_repo.create(polytopia_name="al.pha.one1")
+    player_repo.create(polytopia_name="Bravo")
+
+    resolved = resolve_roster_slots(
+        ["alphaonel"],
+        player_repo,
+        screenshot_type="game_basics",
+    )
+    records = _as_records(resolved)
+
+    assert records[0]["match_type"] == "exact"
+    assert records[0]["suggested_name"] == "al.pha.one1"
+    assert records[0]["confidence"] == 1.0
+
+
+def test_resolve_roster_slots_ambiguous_ocr_key_is_not_exact(
+    player_repo: PlayerRepo,
+) -> None:
+    _cls, resolve_roster_slots = _require_resolution_api()
+    del _cls
+    player_repo.create(polytopia_name="go.lf")
+    player_repo.create(polytopia_name="g.olf")
+
+    resolved = resolve_roster_slots(
+        ["golf"],
+        player_repo,
+        screenshot_type="game_basics",
+    )
+    records = _as_records(resolved)
+
+    assert records[0]["match_type"] != "exact"
+
+
 def test_resolve_roster_slots_unknown_name_is_new(player_repo: PlayerRepo) -> None:
     _cls, resolve_roster_slots = _require_resolution_api()
     del _cls

@@ -11,13 +11,16 @@ dependencies = [
     "croniter>=2.0",
     "discord.py>=2.5",
     "easyocr>=1.7",
+    "numpy>=1.24",
     "pillow>=10.0",
     "pyyaml>=6.0",
+    "scipy>=1.10",
 ]
 
 [project.scripts]
 scoretopia = "scoretopia.cli:main"
 scoretopia-extract = "scoretopia.screenshot.cli:main"
+scoretopia-ocr-accuracy = "scoretopia.screenshot.accuracy:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

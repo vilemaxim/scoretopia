@@ -242,10 +242,27 @@ On finished replay cards, `game_timer` and `turn_status` may be null; player nam
 are still required for registration.
 
 Local golden pairs under `samples/screenshots/`: place a same-stem `.json` next
-to a `.png` / `.jpg` / `.jpeg`. Pytest discovers those pairs and compares live
-OCR **player names only** (via `compare_extraction_player_names`) — scores,
-tribes, and other fields are not part of the golden gate. Images without a
-matching `.json` are skipped.
+to a `.png` / `.jpg` / `.jpeg`. Pytest discovers those pairs and compares
+**every field** of the live OCR extraction with the golden (via
+`compare_extraction_to_expected`). Player names are first resolved against the
+names in all local goldens, as production resolves them against the players
+table: a name that differs from exactly one known player only by dots or by
+`1`/`l`/`I` takes that player's spelling. Images without a matching `.json` are
+skipped.
+
+Per-field accuracy across the goldens, as counts only (no field values, so no
+player names are printed):
+
+```bash
+scoretopia-ocr-accuracy                  # samples/screenshots, names resolved
+scoretopia-ocr-accuracy --no-roster      # raw OCR names
+scoretopia-ocr-accuracy path/to/samples
+```
+
+Steam captures (landscape frames, 1280x720 from steam-test) go through
+`scoretopia.screenshot.steam`: it re-reads the small panel text from magnified
+crops and parses relative to the panel's labels. Phone screenshots use the
+original parsers unchanged.
 
 Successful ingest commits also write a local training artifact bundle under
 `data/training/` (configurable via `training.path`; gitignored). Promote curated
