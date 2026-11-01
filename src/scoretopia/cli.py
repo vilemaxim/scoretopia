@@ -12,6 +12,7 @@ from pathlib import Path
 
 from scoretopia.config import KNOWN_REPORTS, ScoretopiaConfig, load_config
 from scoretopia.discord.adapter import DiscordBotAdapter, load_discord_token
+from scoretopia.domain.captures import CaptureIngestService
 from scoretopia.domain.games import GameService
 from scoretopia.domain.ingest import IngestService
 from scoretopia.domain.players import PlayerService
@@ -25,6 +26,7 @@ from scoretopia.reports.scheduler import (
 from scoretopia.reports.service import ReportService
 from scoretopia.storage.db import open_database
 from scoretopia.storage.repos import (
+    CaptureManifestRepo,
     DisputeRepo,
     GameParticipantRepo,
     GameRepo,
@@ -75,6 +77,42 @@ def _cmd_report_schedule(args: argparse.Namespace) -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     with _report_session(args.config) as (config, service):
         run_scheduler_loop(config, service, StdoutReportPublisher())
+
+
+def _build_capture_service(
+    config: ScoretopiaConfig,
+    conn: sqlite3.Connection,
+) -> CaptureIngestService:
+    from scoretopia.screenshot.captures import OcrCaptureExtractor
+
+    game_repo = GameRepo(conn)
+    game_service = GameService(
+        game_repo,
+        GameParticipantRepo(conn),
+        PlayerRepo(conn),
+        pending_repo=PendingInteractionRepo(conn),
+        ratio_repo=PlayerPairRatioRepo(conn),
+    )
+    return CaptureIngestService(
+        captures_path=config.captures.path,
+        capture_repo=CaptureManifestRepo(conn),
+        game_repo=game_repo,
+        game_service=game_service,
+        extractor=OcrCaptureExtractor(),
+    )
+
+
+def _cmd_captures_run(args: argparse.Namespace) -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    config = load_config(args.config)
+    config.database.path.parent.mkdir(parents=True, exist_ok=True)
+    conn = open_database(str(config.database.path))
+    try:
+        service = _build_capture_service(config, conn)
+        posted = service.run_once(StdoutReportPublisher())
+    finally:
+        conn.close()
+    print(f"Captures processed: {posted} posted", file=sys.stderr)
 
 
 def _build_discord_bot(config: ScoretopiaConfig, token: str) -> DiscordBotAdapter:
@@ -128,6 +166,11 @@ def _build_discord_bot(config: ScoretopiaConfig, token: str) -> DiscordBotAdapte
         token=token,
         game_repo=game_repo,
         player_repo=player_repo,
+        capture_service=_build_capture_service(
+            config,
+            open_database(str(config.database.path), check_same_thread=False),
+        ),
+        capture_poll_seconds=config.captures.poll_seconds,
     )
 
 
@@ -180,6 +223,24 @@ def main() -> None:
         help="Long-running scheduler that runs reports when cron is due",
     )
     schedule_parser.set_defaults(handler=_cmd_report_schedule)
+
+    captures_parser = subparsers.add_parser(
+        "captures",
+        help="Process steam-test capture directories",
+    )
+    captures_sub = captures_parser.add_subparsers(
+        dest="captures_command",
+        required=True,
+    )
+    captures_run_parser = captures_sub.add_parser(
+        "run",
+        parents=[config_parent],
+        help=(
+            "Process captures.path once and print each game start and end "
+            "(no Discord); for testing"
+        ),
+    )
+    captures_run_parser.set_defaults(handler=_cmd_captures_run)
 
     bot_parser = subparsers.add_parser(
         "bot",

@@ -44,7 +44,7 @@ def _minimal_config(
     inbox_path = tmp_path / "data" / "inbox"
     inbox_path.mkdir(parents=True)
     return ScoretopiaConfig(
-        channels=ChannelsConfig(input="in", reports="out"),
+        channels=ChannelsConfig(reports="out"),
         database=DatabaseConfig(path=db_path),
         inbox=InboxConfig(path=inbox_path),
         reports={
@@ -138,7 +138,6 @@ def test_cli_report_run_name_active_games_prints_text(
         tmp_path,
         """
         channels:
-          input: in
           reports: out
         database:
           path: ../data/scoretopia.db
@@ -354,7 +353,6 @@ def test_stdout_publisher_writes_formatted_report(
 def _minimal_valid_yaml_body() -> str:
     return """
         channels:
-          input: in
           reports: out
         database:
           path: ../data/scoretopia.db

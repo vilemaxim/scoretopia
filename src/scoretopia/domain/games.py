@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
+
 from scoretopia.domain.matching import (
     is_bot_name,
     normalize_participant_name,
@@ -150,6 +153,24 @@ class GameService:
         self._pending_repo.resolve_with_payload(interaction_id, payload_updates)
         return RejectResult(interaction_id=interaction_id)
 
+    def complete_game(
+        self,
+        game_id: int,
+        extraction: GameEndExtraction,
+    ) -> CompleteResult:
+        """Complete ``game_id`` from a trusted victory read, with no pending prompt.
+
+        Records the winner, each player's end points and placement, and the
+        computed pair ratios, as a confirmed game end does.
+        """
+        if not extraction.winner:
+            raise ValueError("Game end extraction has no winner")
+        return self._complete_game_from_payload(
+            game_id,
+            json.loads(json.dumps(asdict(extraction))),
+            None,
+        )
+
     def reconcile_pending_for_game(self, game_id: int) -> list[CompleteResult]:
         assert self._pending_repo is not None
         game_names = self._participant_repo.get_participant_names(game_id)
@@ -172,10 +193,9 @@ class GameService:
         self,
         game_id: int,
         extraction_data: dict[str, object],
-        interaction_id: int,
+        interaction_id: int | None,
     ) -> CompleteResult:
         assert self._ratio_repo is not None
-        assert self._pending_repo is not None
 
         winner_name = extraction_data.get("winner")
         assert isinstance(winner_name, str)
@@ -211,7 +231,9 @@ class GameService:
                 continue
             self._ratio_repo.increment_ratio(winner.id, other_id, source="computed")
 
-        self._pending_repo.resolve(interaction_id)
+        if interaction_id is not None:
+            assert self._pending_repo is not None
+            self._pending_repo.resolve(interaction_id)
         return CompleteResult(game=game)
 
     def _resolve_player_for_game(self, game_id: int, name: str):

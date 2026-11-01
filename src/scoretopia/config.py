@@ -9,11 +9,13 @@ from typing import Any
 import yaml
 
 KNOWN_REPORTS = frozenset({"active_games", "recent_completions", "win_ratios"})
-CHANNEL_KEYS = frozenset({"input", "reports"})
+CHANNEL_KEYS = frozenset({"reports"})
 DEFAULT_CONFIG_PATH = Path("config/scoretopia.yaml")
 DEFAULT_DATABASE_PATH = Path("data/scoretopia.db")
 DEFAULT_INBOX_PATH = Path("data/inbox")
 DEFAULT_TRAINING_PATH = Path("data/training")
+DEFAULT_CAPTURES_PATH = Path("data/captures")
+DEFAULT_CAPTURES_POLL_SECONDS = 300
 
 
 class ConfigError(ValueError):
@@ -22,7 +24,6 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True)
 class ChannelsConfig:
-    input: str
     reports: str
 
 
@@ -53,6 +54,14 @@ class TrainingConfig:
 
 
 @dataclass(frozen=True)
+class CapturesConfig:
+    """Where steam-test capture directories land, and how often to poll them."""
+
+    path: Path
+    poll_seconds: int = DEFAULT_CAPTURES_POLL_SECONDS
+
+
+@dataclass(frozen=True)
 class ReportConfig:
     enabled: bool
     schedule: str
@@ -68,6 +77,7 @@ class ScoretopiaConfig:
     reports: dict[str, ReportConfig]
     bot_mods: BotModsConfig = BotModsConfig(discord_user_ids=())
     training: TrainingConfig = TrainingConfig(path=DEFAULT_TRAINING_PATH)
+    captures: CapturesConfig = CapturesConfig(path=DEFAULT_CAPTURES_PATH)
 
 
 def is_bot_mod(discord_user_id: str, config: object) -> bool:
@@ -84,9 +94,9 @@ def is_bot_mod(discord_user_id: str, config: object) -> bool:
 def load_config(path: Path | None = None) -> ScoretopiaConfig:
     """Load and validate Scoretopia YAML configuration.
 
-    Relative paths in ``database.path``, ``inbox.path``, and ``training.path``
-    resolve against the directory containing the config file (not the process
-    working directory).
+    Relative paths in ``database.path``, ``inbox.path``, ``training.path``, and
+    ``captures.path`` resolve against the directory containing the config file
+    (not the process working directory).
     """
     config_path = Path(path) if path is not None else DEFAULT_CONFIG_PATH
     if not config_path.is_file():
@@ -101,8 +111,12 @@ def load_config(path: Path | None = None) -> ScoretopiaConfig:
 
 def _parse_config(raw: dict[str, Any], base_dir: Path) -> ScoretopiaConfig:
     channels_raw = _require_mapping(raw, "channels")
+    if "input" in channels_raw:
+        raise ConfigError(
+            "channels.input was removed: results now come from steam-test "
+            "captures (see captures.path); delete the key"
+        )
     channels = ChannelsConfig(
-        input=_require_str(channels_raw, "input", "channels.input"),
         reports=_require_str(channels_raw, "reports", "channels.reports"),
     )
 
@@ -131,6 +145,7 @@ def _parse_config(raw: dict[str, Any], base_dir: Path) -> ScoretopiaConfig:
 
     bot_mods = _parse_bot_mods(raw.get("bot_mods"))
     training = _parse_training(raw.get("training"), base_dir)
+    captures = _parse_captures(raw.get("captures"), base_dir)
 
     return ScoretopiaConfig(
         channels=channels,
@@ -139,6 +154,7 @@ def _parse_config(raw: dict[str, Any], base_dir: Path) -> ScoretopiaConfig:
         reports=reports,
         bot_mods=bot_mods,
         training=training,
+        captures=captures,
     )
 
 
@@ -169,6 +185,22 @@ def _parse_training(raw: Any, base_dir: Path) -> TrainingConfig:
         raise ConfigError("training must be a mapping")
     path_value = raw.get("path", DEFAULT_TRAINING_PATH)
     return TrainingConfig(path=_resolve_path(base_dir, path_value))
+
+
+def _parse_captures(raw: Any, base_dir: Path) -> CapturesConfig:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ConfigError("captures must be a mapping")
+    path = _resolve_path(base_dir, raw.get("path", DEFAULT_CAPTURES_PATH))
+    poll_seconds = raw.get("poll_seconds", DEFAULT_CAPTURES_POLL_SECONDS)
+    if (
+        isinstance(poll_seconds, bool)
+        or not isinstance(poll_seconds, int)
+        or poll_seconds < 1
+    ):
+        raise ConfigError("captures.poll_seconds must be a positive integer")
+    return CapturesConfig(path=path, poll_seconds=poll_seconds)
 
 
 def _parse_reports(
