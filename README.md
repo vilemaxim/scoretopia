@@ -1,8 +1,9 @@
 # Scoretopia
 
 Discord bot for tracking **Polytopia** game results in your friend group's server.
-Players upload in-game screenshots; the bot reads them, records games and win
-ratios, and posts standings on request.
+The bot reads each game's setup and result screens from captures taken on a Steam
+test machine, records the game, posts when it starts and when it ends, and posts
+standings on request.
 
 This guide covers setup on **Discord** (application, bot, server channels) and on
 **your computer** (Python environment, configuration, running the bot).
@@ -15,9 +16,11 @@ For TDD agent orchestration setup, see [SETUP.md](SETUP.md).
 
 Scoretopia expects:
 
-- **One Discord server** with two text channels:
-  - **Input** — screenshot uploads and confirmation buttons
-  - **Reports** — game announcements and leaderboard output
+- **One Discord server** with one text channel:
+  - **Reports** — game started and game finished posts, and report output
+- **A captures directory** the bot can read: one directory per game per kind,
+  each with a `manifest.json`, as the steam-test capture playbook writes them
+  (see [Captures](#captures) below).
 - **A machine that stays online** while you want the bot active (laptop or VPS).
   The bot connects *outbound* to Discord; you do not need to open inbound ports or
   run a webhook server.
@@ -38,14 +41,10 @@ Scoretopia expects:
 3. Copy the **bot token** and store it somewhere safe. You will set it as an
    environment variable on your computer — **never commit it to git**.
 
-### 3. Enable required gateway intents
+### 3. Gateway intents
 
-Still on the **Bot** page, under **Privileged Gateway Intents**, turn on:
-
-- **Message Content Intent** — required so the bot can see image attachments in
-  the input channel.
-
-`Server Members Intent` is not required for Scoretopia.
+Scoretopia needs no privileged gateway intents: it reads no messages.
+`Message Content Intent` and `Server Members Intent` can stay off.
 
 ### 4. Generate an invite URL
 
@@ -57,25 +56,22 @@ Still on the **Bot** page, under **Privileged Gateway Intents**, turn on:
    - View Channels
    - Send Messages
    - Embed Links
-   - Attach Files
-   - Read Message History
-   - Add Reactions
 4. Copy the generated URL, open it in a browser, choose your server, and
    authorize the bot.
 
 The bot only supports **one guild** today; invite it to the server where your
 group plays.
 
-### 5. Create channels on your server
+### 5. Create the reports channel
 
-Create two text channels (names are configurable; these match the example config):
+Create one text channel (the name is configurable; this matches the example
+config):
 
-| Role    | Example name           | Purpose                                      |
-|---------|------------------------|----------------------------------------------|
-| Input   | `#polytopia-screenshots` | Upload screenshots; confirm/reject buttons |
-| Reports | `#polytopia-reports`     | New games and `/report` output             |
+| Role    | Example name         | Purpose                                              |
+|---------|----------------------|------------------------------------------------------|
+| Reports | `#polytopia-reports` | Game started and game finished posts, `/report` output |
 
-Make sure the bot role can **view and send messages** in both channels.
+Make sure the bot role can **view and send messages** in it.
 
 ### 6. Register players (after the bot is running)
 
@@ -85,9 +81,6 @@ Each player links their Discord account to their in-game Polytopia name:
 /register polytopia_name:YourInGameName
 ```
 
-Alternatively, uploading a **game basics** screenshot can auto-link a player when
-their Polytopia profile is marked as "you" in the game.
-
 ---
 
 ## Part 2 — Computer setup
@@ -96,8 +89,8 @@ their Polytopia profile is marked as "you" in the game.
 
 - **Python 3.12+**
 - **git**
-- Enough disk space for EasyOCR model files (downloaded automatically on first
-  screenshot; cached under `.easyocr_models/` in the project root)
+- Enough disk space for EasyOCR model files (downloaded automatically on the
+  first capture read; cached under `.easyocr_models/` in the project root)
 
 ### 1. Clone and install
 
@@ -119,7 +112,7 @@ scoretopia --help
 
 ### 2. Configuration file
 
-Copy the example config and edit channel names to match your Discord server:
+Copy the example config and edit the channel name and captures path:
 
 ```bash
 cp config/scoretopia.example.yaml config/scoretopia.yaml
@@ -129,18 +122,19 @@ Edit `config/scoretopia.yaml`:
 
 ```yaml
 channels:
-  input: polytopia-screenshots    # must match your input channel name exactly
   reports: polytopia-reports      # must match your reports channel name exactly
 
 database:
   path: data/scoretopia.db
 
-inbox:
-  path: data/inbox
+captures:
+  path: data/captures             # where capture directories arrive
+  poll_seconds: 300               # how often the bot looks for new ones
 ```
 
-Channel values are **channel names**, not IDs. The bot resolves them when it
-starts and fails fast if either channel is missing.
+The channel value is a **channel name**, not an ID. The bot resolves it when it
+starts and fails fast if the channel is missing. A config that still carries
+`channels.input` is rejected: the screenshot channel was removed.
 
 `config/scoretopia.yaml` is local configuration — do not commit secrets or
 server-specific paths if you customize them.
@@ -159,9 +153,35 @@ or any committed file.
 
 ### 4. Data directories
 
-The bot creates `data/scoretopia.db` (SQLite) and `data/inbox/` (saved
-screenshots) automatically on first run. Ensure the user running the bot can
-write under `config/`'s parent directory (or whatever paths you configured).
+The bot creates `data/scoretopia.db` (SQLite) automatically on first run. Ensure
+the user running the bot can write under `config/`'s parent directory (or
+whatever paths you configured), and can read `captures.path`.
+
+### Captures
+
+The steam-test capture playbook (homelab-playbooks
+`playbooks/steam-polytopia-capture.yml`) writes one directory per game per kind:
+
+```
+<captures.path>/setup/<key>/    card.png, info.png, manifest.json
+<captures.path>/result/<key>/   setup.png, info.png, victory.png, manifest.json
+```
+
+`manifest.json` carries `kind`, `captured_at`, `screens`, and `start`. The bot
+processes each directory once and records it in the database:
+
+- **setup** — reads the game card, creates the game, and posts **Game started**
+  (players, map size and type, Glory or Might, points needed, created or
+  invited — `unknown` until the capture can tell).
+- **result** — reads the replay's setup panel and victory screen, records the
+  winner and end points against the game, and posts **Game finished**. A result
+  for a game whose setup was never captured creates the game first, with no
+  start post.
+
+A game id read from `info.png` keeps a game captured twice from being posted
+twice; without one, each directory counts once. A capture that cannot be read
+posts nothing and is retried on the next poll. A directory with no
+`manifest.json` yet is still being written and is skipped until it has one.
 
 ---
 
@@ -186,10 +206,26 @@ Discord, slash commands `/register` and `/report` should appear within a minute
 The process must **keep running** while you want the bot online. Use `tmux`,
 `screen`, or a systemd service on a VPS for a persistent setup.
 
+The bot polls `captures.path` every `captures.poll_seconds` and posts each new
+game start and end to the reports channel.
+
+To process the captures directory once without Discord, printing each post to
+the terminal instead (for testing):
+
+```bash
+scoretopia captures run
+scoretopia captures run --config /path/to/scoretopia.yaml
+```
+
+This records what it processes in the same database the bot uses, so the bot
+will not post those games again.
+
 ### Smoke test
 
-1. In the input channel, upload a Polytopia **game basics** screenshot.
-2. Check the reports channel for a "game started" announcement.
+1. Run `scoretopia captures run` against a captures directory holding a setup
+   capture, and check it prints a "Game started" post.
+2. Start `scoretopia bot` and check the reports channel for posts from captures
+   that arrive after that.
 3. Run `/register` if a player is not linked yet.
 4. Run `/report active_games` to post a report to the reports channel.
 
@@ -231,13 +267,13 @@ scoretopia-extract path/to/screenshot.png --format json -o path/to/expected.json
 scoretopia-extract path/to/screenshot.png --expected path/to/expected.json
 ```
 
-If you missed the in-game **Game Basics** screenshot, you can still register a
-game from the multiplayer menu modal:
+The multiplayer menu cards are the fallback for the in-game Game Basics modal,
+and the steam-test captures read them; they produce the same `game_basics`
+extraction:
 
 - **Multiplayer → Ongoing** — active game card (RESIGN, Game Timer, waiting text)
 - **Multiplayer → Replays** — finished replay card (Share instead of timer)
 
-These menu cards produce the same `game_basics` extraction as the in-game modal.
 On finished replay cards, `game_timer` and `turn_status` may be null; player names
 are still required for registration.
 
@@ -286,10 +322,11 @@ scoretopia-extract path/to/screenshot.png --expected path/to/expected.json --exp
 |---------|----------------|
 | `Missing Discord bot token` | `SCORETOPIA_DISCORD_TOKEN` not set in the shell running `scoretopia bot` |
 | `Discord channel not found: …` | Channel name in `scoretopia.yaml` does not match the server exactly |
-| Bot online but ignores uploads | **Message Content Intent** not enabled in the Developer Portal |
+| `channels.input was removed` | Delete `channels.input` from `scoretopia.yaml`; games now come from captures |
 | Slash commands missing | Wait a few minutes after first start; re-invite with `applications.commands` scope |
-| `Could not recognize this screenshot` | Wrong screenshot type, or OCR could not read the image — use game basics, game end, or friend profile shots |
-| First screenshot is slow | EasyOCR is downloading models into `.easyocr_models/` |
+| No game posts | Nothing new under `captures.path`, or the directories have no `manifest.json` yet — run `scoretopia captures run` and read its log |
+| `capture extraction failed … retry next poll` in the log | OCR could not read that capture; it is retried each poll |
+| First capture is slow | EasyOCR is downloading models into `.easyocr_models/` |
 
 ---
 

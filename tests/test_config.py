@@ -24,7 +24,6 @@ def _write_config(tmp_path: Path, body: str, *, subdir: str = "") -> Path:
 def _minimal_valid_yaml(*, extra_reports: str = "") -> str:
     return f"""
         channels:
-          input: polytopia-screenshots
           reports: polytopia-reports
         reports:
           active_games:
@@ -39,7 +38,7 @@ def _minimal_valid_yaml(*, extra_reports: str = "") -> str:
           win_ratios:
             enabled: true
             schedule: "0 8 1 * *"
-            channel: input
+            channel: reports
         {extra_reports}
     """
 
@@ -49,7 +48,6 @@ def test_load_config_parses_valid_fixture(tmp_path: Path) -> None:
     config = load_config(config_file)
 
     assert isinstance(config, ScoretopiaConfig)
-    assert config.channels.input == "polytopia-screenshots"
     assert config.channels.reports == "polytopia-reports"
     expected_db = config_file.parent / "data" / "scoretopia.db"
     assert config.database.path == expected_db.resolve()
@@ -71,7 +69,7 @@ def test_load_config_parses_valid_fixture(tmp_path: Path) -> None:
     win_ratios = config.reports["win_ratios"]
     assert win_ratios.enabled is True
     assert win_ratios.schedule == "0 8 1 * *"
-    assert win_ratios.channel == "input"
+    assert win_ratios.channel == "reports"
 
 
 def test_load_config_resolves_explicit_relative_paths_from_config_dir(
@@ -81,7 +79,6 @@ def test_load_config_resolves_explicit_relative_paths_from_config_dir(
         tmp_path,
         """
         channels:
-          input: in
           reports: out
         database:
           path: data/custom.db
@@ -120,7 +117,7 @@ def test_load_config_default_path_none_uses_project_config_file(
 
     config = load_config()
 
-    assert config.channels.input == "polytopia-screenshots"
+    assert config.channels.reports == "polytopia-reports"
     expected_db = project_root / "config" / "data" / "scoretopia.db"
     assert config.database.path == expected_db.resolve()
 
@@ -130,7 +127,7 @@ def test_scoretopia_config_is_frozen(tmp_path: Path) -> None:
     config = load_config(config_file)
 
     with pytest.raises(dataclasses.FrozenInstanceError):
-        config.channels.input = "other"  # type: ignore[misc]
+        config.channels.reports = "other"  # type: ignore[misc]
 
 
 @pytest.mark.parametrize(
@@ -138,8 +135,7 @@ def test_scoretopia_config_is_frozen(tmp_path: Path) -> None:
     [
         (
             """
-            channels:
-              reports: polytopia-reports
+            channels: {}
             reports:
               active_games:
                 enabled: true
@@ -152,34 +148,13 @@ def test_scoretopia_config_is_frozen(tmp_path: Path) -> None:
               win_ratios:
                 enabled: true
                 schedule: "0 8 1 * *"
-                channel: input
-            """,
-            "channels.input",
-        ),
-        (
-            """
-            channels:
-              input: polytopia-screenshots
-            reports:
-              active_games:
-                enabled: true
-                schedule: "0 9 * * *"
                 channel: reports
-              recent_completions:
-                enabled: false
-                schedule: "0 10 * * 1"
-                channel: reports
-              win_ratios:
-                enabled: true
-                schedule: "0 8 1 * *"
-                channel: input
             """,
             "channels.reports",
         ),
         (
             """
             channels:
-              input: polytopia-screenshots
               reports: polytopia-reports
             reports:
               active_games:
@@ -192,14 +167,13 @@ def test_scoretopia_config_is_frozen(tmp_path: Path) -> None:
               win_ratios:
                 enabled: true
                 schedule: "0 8 1 * *"
-                channel: input
+                channel: reports
             """,
             "enabled",
         ),
         (
             """
             channels:
-              input: polytopia-screenshots
               reports: polytopia-reports
             reports:
               active_games:
@@ -212,14 +186,13 @@ def test_scoretopia_config_is_frozen(tmp_path: Path) -> None:
               win_ratios:
                 enabled: true
                 schedule: "0 8 1 * *"
-                channel: input
+                channel: reports
             """,
             "schedule",
         ),
         (
             """
             channels:
-              input: polytopia-screenshots
               reports: polytopia-reports
             reports:
               active_games:
@@ -232,7 +205,7 @@ def test_scoretopia_config_is_frozen(tmp_path: Path) -> None:
               win_ratios:
                 enabled: true
                 schedule: "0 8 1 * *"
-                channel: input
+                channel: reports
             """,
             "channel",
         ),
@@ -252,7 +225,6 @@ def test_load_config_unknown_report_channel_raises(tmp_path: Path) -> None:
         tmp_path,
         """
         channels:
-          input: polytopia-screenshots
           reports: polytopia-reports
         reports:
           active_games:
@@ -266,7 +238,7 @@ def test_load_config_unknown_report_channel_raises(tmp_path: Path) -> None:
           win_ratios:
             enabled: true
             schedule: "0 8 1 * *"
-            channel: input
+            channel: reports
         """,
     )
 
@@ -300,7 +272,6 @@ def test_load_config_empty_schedule_raises(tmp_path: Path, schedule: str) -> Non
         tmp_path,
         f"""
         channels:
-          input: polytopia-screenshots
           reports: polytopia-reports
         reports:
           active_games:
@@ -314,7 +285,7 @@ def test_load_config_empty_schedule_raises(tmp_path: Path, schedule: str) -> Non
           win_ratios:
             enabled: true
             schedule: "0 8 1 * *"
-            channel: input
+            channel: reports
         """,
     )
 
@@ -418,4 +389,64 @@ def test_load_config_invalid_training_path_raises(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ConfigError, match="training.path|Path"):
+        load_config(config_file)
+
+
+def test_load_config_rejects_the_removed_input_channel(tmp_path: Path) -> None:
+    body = _minimal_valid_yaml().replace(
+        "channels:\n", "channels:\n          input: polytopia-screenshots\n", 1
+    )
+    config_file = _write_config(tmp_path, body)
+
+    with pytest.raises(ConfigError, match="channels.input was removed"):
+        load_config(config_file)
+
+
+def test_load_config_rejects_a_report_on_the_input_channel(tmp_path: Path) -> None:
+    body = _minimal_valid_yaml().replace(
+        'schedule: "0 8 1 * *"\n            channel: reports',
+        'schedule: "0 8 1 * *"\n            channel: input',
+    )
+    config_file = _write_config(tmp_path, body)
+
+    with pytest.raises(ConfigError, match="unknown channel key: input"):
+        load_config(config_file)
+
+
+def test_load_config_captures_defaults(tmp_path: Path) -> None:
+    config_file = _write_config(tmp_path, _minimal_valid_yaml())
+    config = load_config(config_file)
+
+    assert config.captures.path == (config_file.parent / "data" / "captures").resolve()
+    assert config.captures.poll_seconds == 300
+
+
+def test_load_config_parses_captures(tmp_path: Path) -> None:
+    body = _minimal_valid_yaml() + """
+        captures:
+          path: /srv/captures
+          poll_seconds: 60
+    """
+    config_file = _write_config(tmp_path, body)
+    config = load_config(config_file)
+
+    assert config.captures.path == Path("/srv/captures")
+    assert config.captures.poll_seconds == 60
+
+
+@pytest.mark.parametrize(
+    ("block", "match"),
+    [
+        ("captures: []", "captures must be a mapping"),
+        ("captures:\n          poll_seconds: 0", "captures.poll_seconds"),
+        ("captures:\n          poll_seconds: soon", "captures.poll_seconds"),
+        ("captures:\n          poll_seconds: true", "captures.poll_seconds"),
+    ],
+)
+def test_load_config_rejects_bad_captures(
+    tmp_path: Path, block: str, match: str
+) -> None:
+    config_file = _write_config(tmp_path, _minimal_valid_yaml() + "\n        " + block)
+
+    with pytest.raises(ConfigError, match=match):
         load_config(config_file)

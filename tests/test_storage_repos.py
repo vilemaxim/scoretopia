@@ -11,6 +11,7 @@ from scoretopia.storage.db import open_database
 from scoretopia.storage.errors import DuplicatePolytopiaNameError
 from scoretopia.storage.models import DisputeCreate, GameParticipantInput
 from scoretopia.storage.repos import (
+    CaptureManifestRepo,
     DisputeRepo,
     GameParticipantRepo,
     GameRepo,
@@ -27,6 +28,7 @@ EXPECTED_TABLES = frozenset(
         "pending_interactions",
         "player_pair_ratios",
         "disputes",
+        "capture_manifests",
         "schema_version",
     }
 )
@@ -475,3 +477,68 @@ def test_dispute_create_and_list_open(
     assert dispute.claimed_wins_a == 5
     assert dispute.claimed_wins_b == 3
     assert [item.id for item in open_disputes] == [dispute.id]
+
+
+def test_version_1_database_gains_capture_manifests_on_open(tmp_path) -> None:
+    path = str(tmp_path / "old.db")
+    old = sqlite3.connect(path)
+    old.executescript(
+        """
+        CREATE TABLE schema_version (version INTEGER NOT NULL);
+        INSERT INTO schema_version (version) VALUES (1);
+        CREATE TABLE games (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);
+        INSERT INTO games (name) VALUES ('kept');
+        """
+    )
+    old.commit()
+    old.close()
+
+    upgraded = open_database(path)
+
+    tables = {
+        row[0]
+        for row in upgraded.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    assert "capture_manifests" in tables
+    assert upgraded.execute("SELECT name FROM games").fetchall() == [("kept",)]
+    assert upgraded.execute("SELECT version FROM schema_version").fetchall() == [(2,)]
+    upgraded.close()
+
+
+def test_capture_manifest_record_and_lookup(
+    conn: sqlite3.Connection, game_repo: GameRepo
+) -> None:
+    repo = CaptureManifestRepo(conn)
+    game = game_repo.create_active_game(name="Captured")
+
+    assert repo.is_processed("setup/k1") is False
+    repo.record(
+        directory="setup/k1",
+        kind="setup",
+        game_key="g-1",
+        game_id=game.id,
+        outcome="posted",
+    )
+
+    assert repo.is_processed("setup/k1") is True
+    assert repo.game_id_for_key("setup", "g-1") == game.id
+    assert repo.game_id_for_key("result", "g-1") is None
+    assert repo.game_id_for_key("setup", "g-2") is None
+
+
+def test_capture_manifest_duplicate_rows_do_not_shadow_the_posted_one(
+    conn: sqlite3.Connection, game_repo: GameRepo
+) -> None:
+    repo = CaptureManifestRepo(conn)
+    game = game_repo.create_active_game(name="Captured")
+    repo.record(
+        directory="setup/k1", kind="setup", game_key="g-1", game_id=game.id,
+        outcome="posted",
+    )
+    repo.record(
+        directory="setup/k2", kind="setup", game_key="g-1", game_id=None,
+        outcome="duplicate",
+    )
+
+    assert repo.game_id_for_key("setup", "g-1") == game.id
+    assert repo.is_processed("setup/k2") is True

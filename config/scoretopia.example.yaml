@@ -3,14 +3,20 @@
 # Copy to config/scoretopia.yaml and adjust for your Discord guild.
 # Relative paths resolve against the directory containing this file.
 
-# Discord channel names (not IDs — resolved by the bot adapter).
+# Discord channel name (not an ID — resolved by the bot adapter).
 channels:
-  input: polytopia-screenshots # screenshots and user interactions
-  reports: polytopia-reports # scheduled and on-demand report output
+  reports: polytopia-reports # game started/finished posts and report output
 
 # SQLite database file. Default: data/scoretopia.db (relative to this file).
 database:
   path: data/scoretopia.db
+
+# steam-test capture directories (setup/<key>/ and result/<key>/, each with a
+# manifest.json). The bot polls it every poll_seconds; `scoretopia captures run`
+# processes it once. Default path: data/captures (relative to this file).
+captures:
+  path: data/captures
+  poll_seconds: 300
 
 # Directory where screenshot attachments are saved before OCR.
 # Default: data/inbox (relative to this file).
@@ -30,7 +36,7 @@ training:
   path: data/training
 
 # Scheduled reports. Each entry must use a known report name.
-# channel references a key under channels (input or reports), not the name.
+# channel references a key under channels (reports), not the name.
 reports:
   active_games:
     enabled: true

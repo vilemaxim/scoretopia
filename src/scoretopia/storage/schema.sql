@@ -65,3 +65,18 @@ CREATE TABLE IF NOT EXISTS disputes (
     status TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- One row per steam-test capture directory processed (homelab-ops#428).
+-- directory is relative to captures.path; game_key is the game id the
+-- extraction read, when it read one.
+CREATE TABLE IF NOT EXISTS capture_manifests (
+    directory TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('setup', 'result')),
+    game_key TEXT,
+    game_id INTEGER REFERENCES games (id),
+    outcome TEXT NOT NULL CHECK (outcome IN ('posted', 'duplicate')),
+    processed_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS capture_manifests_game_key
+    ON capture_manifests (kind, game_key);

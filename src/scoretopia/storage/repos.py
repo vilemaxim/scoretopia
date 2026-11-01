@@ -611,6 +611,60 @@ class DisputeRepo:
         return [_dispute_from_row(row) for row in rows]
 
 
+class CaptureManifestRepo:
+    """Which steam-test capture directories have been processed, and into what."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+
+    def is_processed(self, directory: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM capture_manifests WHERE directory = ?",
+            (directory,),
+        ).fetchone()
+        return row is not None
+
+    def game_id_for_key(self, kind: str, game_key: str) -> int | None:
+        """The match a posted capture of ``kind`` with this game id went to."""
+        row = self._conn.execute(
+            """
+            SELECT game_id FROM capture_manifests
+            WHERE kind = ? AND game_key = ? AND outcome = 'posted'
+            ORDER BY processed_at, rowid
+            LIMIT 1
+            """,
+            (kind, game_key),
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return int(row[0])
+
+    def has_key(self, kind: str, game_key: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM capture_manifests WHERE kind = ? AND game_key = ?",
+            (kind, game_key),
+        ).fetchone()
+        return row is not None
+
+    def record(
+        self,
+        *,
+        directory: str,
+        kind: str,
+        game_key: str | None,
+        game_id: int | None,
+        outcome: str,
+    ) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO capture_manifests (directory, kind, game_key, game_id, outcome)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (directory, kind, game_key, game_id, outcome),
+        )
+        self._conn.commit()
+
+
 def _player_from_row(row: tuple[object, ...]) -> Player:
     return Player(
         id=int(row[0]),

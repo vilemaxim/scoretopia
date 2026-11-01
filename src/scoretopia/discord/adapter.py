@@ -1,9 +1,13 @@
 """Discord gateway bot adapter.
 
-Create a bot at https://discord.com/developers, invite it with the
-``attachments`` and ``applications.commands`` scopes, and set channel names in
+Create a bot at https://discord.com/developers, invite it with the ``bot`` and
+``applications.commands`` scopes, and set the reports channel name in
 ``config/scoretopia.yaml``. Set ``SCORETOPIA_DISCORD_TOKEN`` in the environment
 (never commit the token).
+
+Games reach the bot as steam-test capture directories, polled from
+``captures.path`` (:mod:`scoretopia.domain.captures`); the bot no longer reads
+screenshots posted in a channel.
 """
 
 from __future__ import annotations
@@ -79,6 +83,7 @@ from scoretopia.domain.actions import (
     UnrecognizedScreenshot,
     WinRatioNeedsConfirmation,
 )
+from scoretopia.domain.captures import CaptureIngestService
 from scoretopia.domain.field_correction import apply_field_correction_to_parent
 from scoretopia.domain.games import GameService
 from scoretopia.domain.ingest import IngestService, deserialize_staged_extraction
@@ -195,10 +200,7 @@ def resolve_guild_channels(
 ) -> dict[str, int]:
     by_name = {channel.name: channel.id for channel in guild.text_channels}
     resolved: dict[str, int] = {}
-    for key, channel_name in (
-        ("input", channels.input),
-        ("reports", channels.reports),
-    ):
+    for key, channel_name in (("reports", channels.reports),):
         channel_id = by_name.get(channel_name)
         if channel_id is None:
             raise DiscordConfigError(f"Discord channel not found: {channel_name}")
@@ -273,8 +275,13 @@ class DiscordBotAdapter(BotPort):
         token: str,
         game_repo: GameRepo | None = None,
         player_repo: PlayerRepo | None = None,
+        capture_service: CaptureIngestService | None = None,
+        capture_poll_seconds: int = 300,
     ) -> None:
         self._config = config
+        self._capture_service = capture_service
+        self._capture_poll_seconds = capture_poll_seconds
+        self._capture_task: asyncio.Task[None] | None = None
         self._ingest_service = ingest_service
         self._game_service = game_service
         self._win_ratio_service = win_ratio_service
@@ -295,7 +302,6 @@ class DiscordBotAdapter(BotPort):
             player_repo=self._player_repo,
         ) if pending_repo is not None else None
         intents = discord.Intents.default()
-        intents.message_content = True
         intents.guilds = True
         self._bot = commands.Bot(command_prefix="!", intents=intents)
         self._channel_ids: dict[str, int] = {}
@@ -329,18 +335,7 @@ class DiscordBotAdapter(BotPort):
             )
             await self._bot.tree.sync()
             logger.info("Discord bot ready; slash commands synced")
-
-        @self._bot.event
-        async def on_message(message: discord.Message) -> None:
-            if message.author.bot:
-                return
-            if not self._is_input_channel(message.channel):
-                return
-            for attachment in message.attachments:
-                content_type = attachment.content_type
-                if not content_type or not content_type.startswith("image/"):
-                    continue
-                await self._handle_screenshot_upload(message, attachment)
+            self._start_capture_poll()
 
         @self._bot.event
         async def on_interaction(interaction: discord.Interaction) -> None:
@@ -1860,9 +1855,37 @@ class DiscordBotAdapter(BotPort):
             return None
         return self._channels_by_id.get(channel_id)
 
-    def _is_input_channel(self, channel: discord.abc.Messageable) -> bool:
-        input_id = self._channel_ids.get("input")
-        return isinstance(channel, discord.TextChannel) and channel.id == input_id
+    def _start_capture_poll(self) -> None:
+        """Start the capture poll once; ``on_ready`` fires again on reconnect."""
+        if self._capture_service is None:
+            return
+        if self._capture_task is not None and not self._capture_task.done():
+            return
+        self._capture_task = asyncio.get_running_loop().create_task(
+            self._capture_poll_loop()
+        )
+
+    async def _capture_poll_loop(self) -> None:
+        while True:
+            await self.poll_captures_once()
+            await asyncio.sleep(self._capture_poll_seconds)
+
+    async def poll_captures_once(self) -> int:
+        """Process new capture directories and post each start and end.
+
+        OCR runs in a worker thread so the gateway heartbeat keeps going; the
+        capture service holds its own database connection for that thread.
+        """
+        if self._capture_service is None or self._publisher is None:
+            return 0
+        try:
+            posts = await asyncio.to_thread(self._capture_service.collect)
+        except Exception:
+            logger.exception("Capture poll failed; retrying next poll")
+            return 0
+        for post in posts:
+            self._publisher.publish(post.report_name, post.dto, post.channel_key)
+        return len(posts)
 
     async def _post_game_started_to_reports(self, result: GameStarted) -> None:
         reports_channel = self._channel("reports")
