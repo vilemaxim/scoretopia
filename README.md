@@ -218,7 +218,43 @@ scoretopia captures run --config /path/to/scoretopia.yaml
 ```
 
 This records what it processes in the same database the bot uses, so the bot
-will not post those games again.
+will not post those games again. It ends by printing two lines to stderr:
+
+```
+Captures processed: N posted
+Captures remaining: M
+```
+
+`M` is the complete capture directories still not recorded after the run.
+
+To bound a run, pass `--limit N`: it stops after N unprocessed directories, in
+the order the bot reads them (setups first, then by capture time), whatever
+each one's outcome — a capture that cannot be read counts toward N and is
+retried on the next run. Run it again to continue with the next N:
+
+```bash
+scoretopia captures run --limit 20
+```
+
+The bot's own poll has no limit.
+
+To start from the captures already on disk without reading or posting them —
+on a first deploy, say — mark them all processed:
+
+```bash
+scoretopia captures seed
+scoretopia captures seed --config /path/to/scoretopia.yaml
+```
+
+`seed` records every complete, unprocessed directory under `captures.path` as
+`seeded`, with no game, loads no OCR, and posts nothing. It prints
+`Captures seeded: N` to stderr. A directory with no `manifest.json` yet is left
+for the bot, and directories already processed keep their record. After a seed,
+`captures run` and the bot skip every seeded directory.
+
+The database migrates itself on open: a database from before `seed` existed
+(schema version 2) has its `capture_manifests` table rebuilt, rows kept, so it
+accepts `seeded`.
 
 ### Smoke test
 

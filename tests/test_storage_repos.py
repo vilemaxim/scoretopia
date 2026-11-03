@@ -501,8 +501,99 @@ def test_version_1_database_gains_capture_manifests_on_open(tmp_path) -> None:
     }
     assert "capture_manifests" in tables
     assert upgraded.execute("SELECT name FROM games").fetchall() == [("kept",)]
-    assert upgraded.execute("SELECT version FROM schema_version").fetchall() == [(2,)]
+    assert upgraded.execute("SELECT version FROM schema_version").fetchall() == [(3,)]
     upgraded.close()
+
+
+_V2_CAPTURE_MANIFESTS = """
+CREATE TABLE schema_version (version INTEGER NOT NULL);
+INSERT INTO schema_version (version) VALUES (2);
+CREATE TABLE games (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);
+INSERT INTO games (name) VALUES ('kept');
+CREATE TABLE capture_manifests (
+    directory TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('setup', 'result')),
+    game_key TEXT,
+    game_id INTEGER REFERENCES games (id),
+    outcome TEXT NOT NULL CHECK (outcome IN ('posted', 'duplicate')),
+    processed_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX capture_manifests_game_key ON capture_manifests (kind, game_key);
+INSERT INTO capture_manifests
+    (directory, kind, game_key, game_id, outcome, processed_at)
+VALUES ('setup/a', 'setup', 'g-1', 1, 'posted', '2026-10-20 10:00:00'),
+       ('setup/b', 'setup', 'g-1', NULL, 'duplicate', '2026-10-21 10:00:00');
+"""
+
+
+def _version_2_database(tmp_path) -> str:
+    path = str(tmp_path / "v2.db")
+    old = sqlite3.connect(path)
+    old.executescript(_V2_CAPTURE_MANIFESTS)
+    old.commit()
+    old.close()
+    return path
+
+
+def test_version_2_database_migrates_capture_manifests_keeping_rows(tmp_path) -> None:
+    upgraded = open_database(_version_2_database(tmp_path))
+
+    assert upgraded.execute("SELECT version FROM schema_version").fetchall() == [(3,)]
+    assert upgraded.execute(
+        """
+        SELECT directory, kind, game_key, game_id, outcome, processed_at
+        FROM capture_manifests ORDER BY directory
+        """
+    ).fetchall() == [
+        ("setup/a", "setup", "g-1", 1, "posted", "2026-10-20 10:00:00"),
+        ("setup/b", "setup", "g-1", None, "duplicate", "2026-10-21 10:00:00"),
+    ]
+    repo = CaptureManifestRepo(upgraded)
+    assert repo.game_id_for_key("setup", "g-1") == 1
+    repo.record(
+        directory="result/c",
+        kind="result",
+        game_key=None,
+        game_id=None,
+        outcome="seeded",
+    )
+    assert repo.is_processed("result/c")
+    indexes = {
+        row[0]
+        for row in upgraded.execute(
+            "SELECT name FROM sqlite_master"
+            " WHERE type='index' AND tbl_name='capture_manifests'"
+        )
+    }
+    assert "capture_manifests_game_key" in indexes
+    tables = {
+        row[0]
+        for row in upgraded.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    assert "capture_manifests_v3" not in tables
+    upgraded.close()
+
+
+def test_migrated_database_is_left_alone_on_the_next_open(tmp_path) -> None:
+    path = _version_2_database(tmp_path)
+    open_database(path).close()
+
+    reopened = open_database(path)
+
+    assert reopened.execute("SELECT COUNT(*) FROM capture_manifests").fetchone() == (2,)
+    assert reopened.execute("SELECT version FROM schema_version").fetchall() == [(3,)]
+    reopened.close()
+
+
+def test_outcome_still_rejects_an_unknown_value(conn: sqlite3.Connection) -> None:
+    with pytest.raises(sqlite3.IntegrityError):
+        CaptureManifestRepo(conn).record(
+            directory="setup/x",
+            kind="setup",
+            game_key=None,
+            game_id=None,
+            outcome="other",
+        )
 
 
 def test_capture_manifest_record_and_lookup(

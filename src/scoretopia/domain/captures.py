@@ -17,6 +17,11 @@ Each directory is processed once and recorded in ``capture_manifests``. A
 failed extraction records nothing and posts nothing, so the next poll retries
 it. A game id read from ``info.png`` de-duplicates a game captured twice; with
 no id, the directory is the unit.
+
+A run can be bounded to the first N unprocessed directories (``limit``), and
+:func:`seed_captures` marks every complete directory processed without reading
+its screens, so a deploy can start from the captures already on disk without
+posting them (homelab-ops#568).
 """
 
 from __future__ import annotations
@@ -151,6 +156,37 @@ def _read_manifest(root: Path, directory: Path, kind: str) -> CaptureManifest | 
     )
 
 
+def count_unprocessed(root: Path, capture_repo: CaptureManifestRepo) -> int:
+    """Complete capture directories under ``root`` not yet recorded."""
+    return sum(
+        1
+        for manifest in scan_manifests(root)
+        if not capture_repo.is_processed(manifest.relative_path)
+    )
+
+
+def seed_captures(root: Path, capture_repo: CaptureManifestRepo) -> int:
+    """Record every complete, unprocessed directory as ``seeded``; return how many.
+
+    Reads manifests only, never screens: no extractor is needed, nothing is
+    posted, and no game is created. A seeded directory counts as processed, so
+    a later run or poll skips it.
+    """
+    seeded = 0
+    for manifest in scan_manifests(root):
+        if capture_repo.is_processed(manifest.relative_path):
+            continue
+        capture_repo.record(
+            directory=manifest.relative_path,
+            kind=manifest.kind,
+            game_key=None,
+            game_id=None,
+            outcome="seeded",
+        )
+        seeded += 1
+    return seeded
+
+
 class CaptureIngestService:
     """Turns new capture directories into matches and reports-channel posts."""
 
@@ -169,20 +205,35 @@ class CaptureIngestService:
         self._game_service = game_service
         self._extractor = extractor
 
-    def collect(self) -> list[CapturePost]:
-        """Process every new capture directory once; return what to post."""
+    def collect(self, limit: int | None = None) -> list[CapturePost]:
+        """Process new capture directories once; return what to post.
+
+        With ``limit``, stop after that many unprocessed directories have been
+        attempted, in :func:`scan_manifests` order, whatever each outcome: a
+        failed extraction counts toward the limit and stays unprocessed.
+        """
+        if limit is not None and limit < 1:
+            raise ValueError(f"limit must be a positive integer, got {limit}")
         posts: list[CapturePost] = []
+        attempted = 0
         for manifest in scan_manifests(self._root):
+            if limit is not None and attempted >= limit:
+                break
             if self._captures.is_processed(manifest.relative_path):
                 continue
+            attempted += 1
             post = self._process(manifest)
             if post is not None:
                 posts.append(post)
         return posts
 
-    def run_once(self, publisher: ReportPublisher) -> int:
+    def remaining(self) -> int:
+        """Complete capture directories not yet recorded as processed."""
+        return count_unprocessed(self._root, self._captures)
+
+    def run_once(self, publisher: ReportPublisher, limit: int | None = None) -> int:
         """Process new captures and publish each post; return how many."""
-        posts = self.collect()
+        posts = self.collect(limit)
         for post in posts:
             publisher.publish(post.report_name, post.dto, post.channel_key)
         return len(posts)
