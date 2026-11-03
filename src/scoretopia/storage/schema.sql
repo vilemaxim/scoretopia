@@ -68,13 +68,15 @@ CREATE TABLE IF NOT EXISTS disputes (
 
 -- One row per steam-test capture directory processed (homelab-ops#428).
 -- directory is relative to captures.path; game_key is the game id the
--- extraction read, when it read one.
+-- extraction read, when it read one. 'seeded' marks a directory recorded by
+-- `scoretopia captures seed` without being read (homelab-ops#568, schema 3).
+-- Keep this definition in step with _CAPTURE_MANIFESTS_V3 in db.py.
 CREATE TABLE IF NOT EXISTS capture_manifests (
     directory TEXT PRIMARY KEY,
     kind TEXT NOT NULL CHECK (kind IN ('setup', 'result')),
     game_key TEXT,
     game_id INTEGER REFERENCES games (id),
-    outcome TEXT NOT NULL CHECK (outcome IN ('posted', 'duplicate')),
+    outcome TEXT NOT NULL CHECK (outcome IN ('posted', 'duplicate', 'seeded')),
     processed_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

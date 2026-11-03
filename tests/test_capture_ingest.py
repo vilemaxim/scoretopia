@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from pathlib import Path
 
 import pytest
@@ -17,7 +18,9 @@ from scoretopia.domain.captures import (
     CaptureManifest,
     ResultCapture,
     SetupCapture,
+    count_unprocessed,
     scan_manifests,
+    seed_captures,
 )
 from scoretopia.domain.games import GameService
 from scoretopia.reports.dto import ReportDTO
@@ -507,16 +510,155 @@ def test_collect_returns_posts_without_publishing(
     assert posts[0].channel_key == "reports"
 
 
+# --- bounded runs ----------------------------------------------------------
+
+
+def _three_setups(root: Path) -> StubExtractor:
+    extractor = StubExtractor()
+    for index, key in enumerate(("s1", "s2", "s3"), start=1):
+        _write_manifest(root, "setup", key, captured_at=f"2026-10-2{index}T10:00:00Z")
+        extractor.setups[key] = SetupCapture(basics=_basics(f"Game {index}"))
+    return extractor
+
+
+def test_limit_stops_after_n_and_the_next_run_continues(
+    conn: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    extractor = _three_setups(tmp_path)
+    service = _service(conn, tmp_path, extractor)
+    publisher = RecordingPublisher()
+
+    assert service.run_once(publisher, limit=2) == 2
+    assert extractor.calls == ["s1", "s2"]
+    assert service.remaining() == 1
+
+    assert service.run_once(publisher, limit=2) == 1
+    assert extractor.calls == ["s1", "s2", "s3"]
+    assert service.remaining() == 0
+    assert [dto.title for _, dto, _ in publisher.posts] == [
+        "Game started: Game 1",
+        "Game started: Game 2",
+        "Game started: Game 3",
+    ]
+
+
+def test_a_failed_extraction_counts_toward_the_limit_and_stays_unprocessed(
+    conn: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    extractor = _three_setups(tmp_path)
+    del extractor.setups["s1"]
+    service = _service(conn, tmp_path, extractor)
+
+    assert service.run_once(RecordingPublisher(), limit=2) == 1
+    assert extractor.calls == ["s1", "s2"]
+    assert service.remaining() == 2
+    assert not CaptureManifestRepo(conn).is_processed("setup/s1")
+
+    assert service.run_once(RecordingPublisher(), limit=1) == 0
+    assert extractor.calls == ["s1", "s2", "s1"]
+
+
+def test_a_duplicate_counts_toward_the_limit(
+    conn: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    extractor = _three_setups(tmp_path)
+    extractor.setups["s1"] = SetupCapture(basics=_basics(), game_id="g-1")
+    extractor.setups["s2"] = SetupCapture(basics=_basics(), game_id="g-1")
+    service = _service(conn, tmp_path, extractor)
+
+    assert service.run_once(RecordingPublisher(), limit=2) == 1
+    assert extractor.calls == ["s1", "s2"]
+    assert service.remaining() == 1
+
+
+def test_no_limit_processes_everything(
+    conn: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    extractor = _three_setups(tmp_path)
+
+    assert _service(conn, tmp_path, extractor).run_once(RecordingPublisher()) == 3
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_limit_must_be_positive(
+    conn: sqlite3.Connection,
+    tmp_path: Path,
+    limit: int,
+) -> None:
+    extractor = _three_setups(tmp_path)
+
+    with pytest.raises(ValueError, match="positive"):
+        _service(conn, tmp_path, extractor).collect(limit)
+    assert extractor.calls == []
+
+
+# --- seed ------------------------------------------------------------------
+
+
+def test_seed_records_every_complete_unprocessed_directory(
+    conn: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    _write_manifest(tmp_path, "setup", "s1")
+    _write_manifest(tmp_path, "result", "r1")
+    (tmp_path / "setup" / "in-progress").mkdir()
+    repo = CaptureManifestRepo(conn)
+
+    assert seed_captures(tmp_path, repo) == 2
+
+    rows = conn.execute(
+        """
+        SELECT directory, kind, game_key, game_id, outcome
+        FROM capture_manifests ORDER BY directory
+        """
+    ).fetchall()
+    assert rows == [
+        ("result/r1", "result", None, None, "seeded"),
+        ("setup/s1", "setup", None, None, "seeded"),
+    ]
+    assert not repo.is_processed("setup/in-progress")
+    assert count_unprocessed(tmp_path, repo) == 0
+    assert conn.execute("SELECT id FROM games").fetchall() == []
+
+
+def test_seed_leaves_processed_directories_as_they_were(
+    conn: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    _write_manifest(tmp_path, "setup", "s1", captured_at="2026-10-20T10:00:00Z")
+    extractor = StubExtractor()
+    extractor.setups["s1"] = SetupCapture(basics=_basics())
+    _service(conn, tmp_path, extractor).run_once(RecordingPublisher())
+    _write_manifest(tmp_path, "setup", "s2", captured_at="2026-10-21T10:00:00Z")
+
+    assert seed_captures(tmp_path, CaptureManifestRepo(conn)) == 1
+    assert seed_captures(tmp_path, CaptureManifestRepo(conn)) == 0
+
+    outcomes = dict(conn.execute("SELECT directory, outcome FROM capture_manifests"))
+    assert outcomes == {"setup/s1": "posted", "setup/s2": "seeded"}
+
+
+def test_a_run_after_seed_posts_nothing_and_reads_nothing(
+    conn: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    extractor = _three_setups(tmp_path)
+    seed_captures(tmp_path, CaptureManifestRepo(conn))
+    publisher = RecordingPublisher()
+
+    assert _service(conn, tmp_path, extractor).run_once(publisher) == 0
+    assert publisher.posts == []
+    assert extractor.calls == []
+
+
 # --- one-shot CLI ----------------------------------------------------------
 
 
-def test_cli_captures_run_processes_the_directory_once(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    captures = tmp_path / "captures"
-    _write_manifest(captures, "setup", "s1")
+def _write_config(tmp_path: Path, captures: Path) -> Path:
     config_file = tmp_path / "scoretopia.yaml"
     config_file.write_text(
         f"""
@@ -530,24 +672,123 @@ reports:
   win_ratios: {{enabled: false, schedule: "0 8 1 * *", channel: reports}}
 """
     )
+    return config_file
+
+
+def _run_cli(monkeypatch: pytest.MonkeyPatch, *argv: str) -> None:
+    monkeypatch.setattr("sys.argv", ["scoretopia", *argv])
+    from scoretopia.cli import main
+
+    main()
+
+
+def test_cli_captures_run_processes_the_directory_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captures = tmp_path / "captures"
+    _write_manifest(captures, "setup", "s1")
+    config_file = _write_config(tmp_path, captures)
     extractor = StubExtractor()
     extractor.setups["s1"] = SetupCapture(basics=_basics())
     monkeypatch.setattr(
         "scoretopia.screenshot.captures.OcrCaptureExtractor",
         lambda: extractor,
     )
-    monkeypatch.setattr(
-        "sys.argv",
-        ["scoretopia", "captures", "run", "--config", str(config_file)],
-    )
-    from scoretopia.cli import main
-
-    main()
+    _run_cli(monkeypatch, "captures", "run", "--config", str(config_file))
     first = capsys.readouterr().out
-    main()
+    _run_cli(monkeypatch, "captures", "run", "--config", str(config_file))
     second = capsys.readouterr().out
 
     assert first.count("Game started: Test Game") == 1
     assert "Players: Alpha, Bravo" in first
     assert second == ""
     assert (tmp_path / "data" / "scoretopia.db").is_file()
+
+
+def test_cli_captures_run_limit_prints_processed_and_remaining(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captures = tmp_path / "captures"
+    extractor = _three_setups(captures)
+    config_file = _write_config(tmp_path, captures)
+    monkeypatch.setattr(
+        "scoretopia.screenshot.captures.OcrCaptureExtractor",
+        lambda: extractor,
+    )
+
+    _run_cli(
+        monkeypatch, "captures", "run", "--limit", "2", "--config", str(config_file)
+    )
+    first = capsys.readouterr()
+    _run_cli(monkeypatch, "captures", "run", "--config", str(config_file))
+    second = capsys.readouterr()
+
+    assert first.out.count("Game started:") == 2
+    assert first.err.splitlines()[-2:] == [
+        "Captures processed: 2 posted",
+        "Captures remaining: 1",
+    ]
+    assert second.out.count("Game started:") == 1
+    assert second.err.splitlines()[-2:] == [
+        "Captures processed: 1 posted",
+        "Captures remaining: 0",
+    ]
+
+
+@pytest.mark.parametrize("value", ["0", "-3", "two"])
+def test_cli_captures_run_rejects_a_limit_that_is_not_positive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    config_file = _write_config(tmp_path, tmp_path / "captures")
+
+    with pytest.raises(SystemExit) as exc:
+        _run_cli(
+            monkeypatch,
+            "captures",
+            "run",
+            "--limit",
+            value,
+            "--config",
+            str(config_file),
+        )
+    assert exc.value.code == 2
+
+
+def test_cli_captures_seed_never_loads_ocr_and_a_run_after_it_posts_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captures = tmp_path / "captures"
+    extractor = _three_setups(captures)
+    (captures / "result" / "in-progress").mkdir(parents=True)
+    config_file = _write_config(tmp_path, captures)
+    # Any import of the OCR capture module during seed fails the test.
+    monkeypatch.setitem(sys.modules, "scoretopia.screenshot.captures", None)
+
+    _run_cli(monkeypatch, "captures", "seed", "--config", str(config_file))
+    seeded = capsys.readouterr()
+
+    assert seeded.out == ""
+    assert seeded.err.splitlines()[-1] == "Captures seeded: 3"
+
+    monkeypatch.delitem(sys.modules, "scoretopia.screenshot.captures")
+    monkeypatch.setattr(
+        "scoretopia.screenshot.captures.OcrCaptureExtractor",
+        lambda: extractor,
+    )
+    _run_cli(monkeypatch, "captures", "run", "--config", str(config_file))
+    after = capsys.readouterr()
+
+    assert after.out == ""
+    assert after.err.splitlines()[-2:] == [
+        "Captures processed: 0 posted",
+        "Captures remaining: 0",
+    ]
+    assert extractor.calls == []

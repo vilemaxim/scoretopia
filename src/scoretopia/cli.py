@@ -12,7 +12,7 @@ from pathlib import Path
 
 from scoretopia.config import KNOWN_REPORTS, ScoretopiaConfig, load_config
 from scoretopia.discord.adapter import DiscordBotAdapter, load_discord_token
-from scoretopia.domain.captures import CaptureIngestService
+from scoretopia.domain.captures import CaptureIngestService, seed_captures
 from scoretopia.domain.games import GameService
 from scoretopia.domain.ingest import IngestService
 from scoretopia.domain.players import PlayerService
@@ -109,10 +109,34 @@ def _cmd_captures_run(args: argparse.Namespace) -> None:
     conn = open_database(str(config.database.path))
     try:
         service = _build_capture_service(config, conn)
-        posted = service.run_once(StdoutReportPublisher())
+        posted = service.run_once(StdoutReportPublisher(), limit=args.limit)
+        remaining = service.remaining()
     finally:
         conn.close()
     print(f"Captures processed: {posted} posted", file=sys.stderr)
+    print(f"Captures remaining: {remaining}", file=sys.stderr)
+
+
+def _cmd_captures_seed(args: argparse.Namespace) -> None:
+    """Mark every capture already on disk processed, without OCR or posts."""
+    config = load_config(args.config)
+    config.database.path.parent.mkdir(parents=True, exist_ok=True)
+    conn = open_database(str(config.database.path))
+    try:
+        seeded = seed_captures(config.captures.path, CaptureManifestRepo(conn))
+    finally:
+        conn.close()
+    print(f"Captures seeded: {seeded}", file=sys.stderr)
+
+
+def _positive_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not an integer: {value}") from None
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"must be a positive integer: {value}")
+    return number
 
 
 def _build_discord_bot(config: ScoretopiaConfig, token: str) -> DiscordBotAdapter:
@@ -240,7 +264,27 @@ def main() -> None:
             "(no Discord); for testing"
         ),
     )
+    captures_run_parser.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=None,
+        metavar="N",
+        help=(
+            "Process at most N unprocessed capture directories, then print how "
+            "many remain (default: all)"
+        ),
+    )
     captures_run_parser.set_defaults(handler=_cmd_captures_run)
+
+    captures_seed_parser = captures_sub.add_parser(
+        "seed",
+        parents=[config_parent],
+        help=(
+            "Mark every complete capture directory under captures.path processed "
+            "without reading it or posting"
+        ),
+    )
+    captures_seed_parser.set_defaults(handler=_cmd_captures_seed)
 
     bot_parser = subparsers.add_parser(
         "bot",
