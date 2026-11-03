@@ -17,8 +17,11 @@ from scoretopia.screenshot.steam import (
     is_steam_frame,
     mask_colored,
     mask_platform_icons,
+    normalize_game_id,
     parse_steam_game_basics,
     parse_steam_game_end,
+    parse_steam_game_info,
+    refine_steam_game_info,
     relative_contrast,
 )
 
@@ -427,3 +430,199 @@ def test_relative_contrast_lifts_dim_text_over_grey() -> None:
     assert out.shape == (5, 5, 3)
     assert out[2, 2, 0] == 255.0
     assert out[0, 0, 0] == 0.0
+
+
+# --- Game Info (the More info modal) ----------------------------------------
+
+# A made-up id; the modal wraps it at a hyphen onto a second line.
+INFO_ID = "0f8fad5b-d9cb-469f-a165-70867728950e"
+
+
+def _info(**overrides: str | None) -> list[OCRLine]:
+    """A Game Info modal: title centred at (537, 273), as on steam-test."""
+    texts = {
+        "card_title": "Map of Test",
+        "title": "Game Info",
+        "id_a": "ID: 0f8fad5b-d9cb-469f-a165-",
+        "id_b": "70867728950e",
+        "version": "Game version: 123",
+        "last_move": "Last move: 1 minute ago",
+        "updated": "Updated: 1 minute ago",
+        "turn_label": "Turn:",
+        "turn": "7",
+        "back": "BACK",
+    }
+    texts.update(overrides)
+    layout = {
+        "card_title": (207, 565),
+        "title": (273, 537),
+        "id_a": (310, 588),
+        "id_b": (327, 530),
+        "version": (344, 544),
+        "last_move": (364, 576),
+        "updated": (381, 569),
+        "turn_label": (399, 495),
+        "turn": (399, 520),
+        "back": (439, 640),
+    }
+    return [
+        _line(text, *layout[key]) for key, text in texts.items() if text is not None
+    ]
+
+
+def test_game_info_is_detected_before_the_card_under_it() -> None:
+    lines = _info() + [_line("Glory", 295, 604), _line("More info", 470, 640)]
+
+    assert detect_steam_screenshot_type(lines) == "game_info"
+
+
+def test_lobby_game_info_is_detected() -> None:
+    lines = _info(version=None, last_move="Created: 1 minute ago")
+
+    assert detect_steam_screenshot_type(lines) == "game_info"
+
+
+def test_game_info_title_alone_is_not_game_info() -> None:
+    assert detect_steam_screenshot_type([_line("Game Info", 273, 537)]) is None
+
+
+def test_game_info_type() -> None:
+    assert parse_steam_game_info(_info()).screenshot_type == "game_info"
+
+
+def test_game_info_id_joins_the_wrapped_line() -> None:
+    assert parse_steam_game_info(_info()).game_id == INFO_ID
+
+
+def test_game_info_id_on_one_line() -> None:
+    lines = _info(id_a=f"ID: {INFO_ID}", id_b=None)
+
+    assert parse_steam_game_info(lines).game_id == INFO_ID
+
+
+def test_game_info_id_fixes_letters_a_uuid_cannot_hold() -> None:
+    lines = _info(id_a="ID: Of8fad5b-d9cb-469f-a165-", id_b="7O8677Z8g5Oe")
+
+    assert parse_steam_game_info(lines).game_id == INFO_ID
+
+
+def test_game_info_id_lowers_upper_case_hex() -> None:
+    lines = _info(id_a="ID: 0F8FAD5B-D9CB-469F-A165-", id_b="70867728950E")
+
+    assert parse_steam_game_info(lines).game_id == INFO_ID
+
+
+def test_game_info_id_tolerates_spaces_and_a_lost_hyphen() -> None:
+    lines = _info(id_a="ID: 0f8fad5b d9cb-469f-a165 -", id_b="70867728950e")
+
+    assert parse_steam_game_info(lines).game_id == INFO_ID
+
+
+def test_game_info_id_too_short_is_none() -> None:
+    lines = _info(id_a="ID: 0f8fad5b-d9cb-469f-a165-", id_b="7086772")
+
+    assert parse_steam_game_info(lines).game_id is None
+
+
+def test_game_info_id_without_its_label() -> None:
+    lines = _info(id_a="0f8fad5b-d9cb-469f-a165-")
+
+    assert parse_steam_game_info(lines).game_id == INFO_ID
+
+
+def test_game_info_id_starting_1d_is_not_taken_for_the_label() -> None:
+    lines = _info(id_a="1d8fad5b-d9cb-469f-a165-")
+
+    expected = "1d8fad5b-d9cb-469f-a165-70867728950e"
+    assert parse_steam_game_info(lines).game_id == expected
+
+
+def test_game_info_game_version() -> None:
+    assert parse_steam_game_info(_info()).game_version == 123
+
+
+def test_game_info_game_version_fixes_ocr_letters() -> None:
+    lines = _info(version="Game version: 12S")
+
+    assert parse_steam_game_info(lines).game_version == 125
+
+
+def test_game_info_turn_from_its_row() -> None:
+    assert parse_steam_game_info(_info()).turn == 7
+
+
+def test_game_info_turn_on_the_label_token() -> None:
+    lines = _info(turn_label="Turn: 12", turn=None)
+
+    assert parse_steam_game_info(lines).turn == 12
+
+
+def test_game_info_turn_zero_read_as_letter_o() -> None:
+    lines = _info(turn="O")
+
+    assert parse_steam_game_info(lines).turn == 0
+
+
+def test_lobby_game_info_has_no_version_or_turn() -> None:
+    lines = _info(
+        version=None,
+        last_move="Created: 1 minute ago",
+        turn_label=None,
+        turn=None,
+    )
+    result = parse_steam_game_info(lines)
+
+    assert result.game_id == INFO_ID
+    assert result.game_version is None
+    assert result.turn is None
+
+
+def test_game_info_ignores_text_outside_the_modal() -> None:
+    lines = _info(turn_label=None, turn=None) + [_line("Turn: 9", 600, 537)]
+
+    assert parse_steam_game_info(lines).turn is None
+
+
+def test_game_info_without_a_title_is_empty() -> None:
+    result = parse_steam_game_info([_line("Updated: now", 381, 569)])
+
+    assert (result.game_id, result.game_version, result.turn) == (None, None, None)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (INFO_ID, INFO_ID),
+        (INFO_ID.replace("-", ""), INFO_ID),
+        ("0f8fad5b-d9cb-469f-a165-7086772895", None),
+        ("not an id", None),
+        ("", None),
+    ],
+)
+def test_normalize_game_id(text: str, expected: str | None) -> None:
+    assert normalize_game_id(text) == expected
+
+
+def test_refine_game_info_reads_the_body_from_one_magnified_crop() -> None:
+    rgb = np.zeros((720, 1280, 3), dtype=np.uint8)
+    calls: list[tuple[tuple[int, ...], str | None]] = []
+
+    def read(array: np.ndarray, allowlist: str | None) -> list[OCRLine]:
+        calls.append((array.shape, allowlist))
+        # Crop-relative coordinates at 2x: the first id line's centre.
+        return [_line(f"ID: {INFO_ID}", 24.0, 220.0)]
+
+    refined = refine_steam_game_info(_info(), rgb, read)
+
+    assert len(calls) == 1
+    assert calls[0][1] is None
+    # The full-frame id lines inside the crop are replaced by the re-read.
+    assert not any(line.text == "70867728950e" for line in refined)
+    assert parse_steam_game_info(refined).game_id == INFO_ID
+
+
+def test_refine_game_info_keeps_full_frame_when_the_crop_reads_nothing() -> None:
+    rgb = np.zeros((720, 1280, 3), dtype=np.uint8)
+    lines = _info()
+
+    assert refine_steam_game_info(lines, rgb, lambda *_: []) == lines

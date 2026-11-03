@@ -27,6 +27,7 @@ from scoretopia.domain.actions import (
     GameEndNeedsConfirmation,
     GameEndNeedsPick,
     GameEndPendingStart,
+    GameInfoOnly,
     GameStarted,
     IngestError,
     IngestResult,
@@ -61,10 +62,15 @@ from scoretopia.screenshot.models import (
     GameEndExtraction,
     GameEndHeader,
     GameEndPlayer,
+    GameInfoExtraction,
     WinRatio,
 )
 from scoretopia.storage.repos import PendingInteractionRepo
 
+_GAME_INFO_MESSAGE = (
+    "This is a More info screen: it carries only the game id, so no game was "
+    "started or ended. Upload the game's card or its victory screen instead."
+)
 _UNRECOGNIZED_MESSAGE = (
     "Could not recognize this screenshot. Please upload a Polytopia "
     "game basics, game end, or friend profile screenshot."
@@ -144,7 +150,7 @@ class IngestService:
             uploader_discord_id=uploader_discord_id,
             filename=source.name,
         )
-        if isinstance(staged, (UnrecognizedScreenshot, IngestError)):
+        if isinstance(staged, (GameInfoOnly, UnrecognizedScreenshot, IngestError)):
             return staged
         continued = self.continue_review(
             staged.interaction_id,
@@ -163,7 +169,12 @@ class IngestService:
         *,
         uploader_discord_id: str,
         filename: str | None = None,
-    ) -> ExtractionNeedsConfirmation | UnrecognizedScreenshot | IngestError:
+    ) -> (
+        ExtractionNeedsConfirmation
+        | GameInfoOnly
+        | UnrecognizedScreenshot
+        | IngestError
+    ):
         path = Path(stored_path)
         extracted = self.extract_stored_screenshot(path)
         if isinstance(extracted, (UnrecognizedScreenshot, IngestError)):
@@ -182,6 +193,9 @@ class IngestService:
             screenshot_type=extracted.screenshot_type,
         )
         self._log_extraction(extracted)
+        if isinstance(extracted, GameInfoExtraction):
+            # Nothing to review: the screen names no player and no result.
+            return _game_info_only(extracted)
 
         raw_extraction = _serialize_extraction(extracted)
         resolved = resolve_roster_slots(
@@ -527,6 +541,8 @@ class IngestService:
                 stored_path=stored_path,
                 uploader_discord_id=uploader_discord_id,
             )
+        if isinstance(extraction, GameInfoExtraction):
+            return _game_info_only(extraction)
         return UnrecognizedScreenshot(message=_UNRECOGNIZED_MESSAGE)
 
     def process_extracted_screenshot(
@@ -777,6 +793,10 @@ class IngestService:
         )
 
 
+def _game_info_only(extraction: GameInfoExtraction) -> GameInfoOnly:
+    return GameInfoOnly(message=_GAME_INFO_MESSAGE, game_id=extraction.game_id)
+
+
 def _extraction_preview(extraction: ExtractionResult) -> ExtractionPreview:
     if isinstance(extraction, GameBasicsExtraction):
         return ExtractionPreview(
@@ -835,6 +855,12 @@ def deserialize_staged_extraction(payload: dict[str, object]) -> ExtractionResul
         return _game_end_from_dict(extraction_data)
     if screenshot_type == "friend_profile":
         return _friend_profile_from_dict(extraction_data)
+    if screenshot_type == "game_info":
+        return GameInfoExtraction(
+            game_id=_optional_str(extraction_data, "game_id"),
+            game_version=_optional_int(extraction_data, "game_version"),
+            turn=_optional_int(extraction_data, "turn"),
+        )
     msg = f"Unknown screenshot type: {screenshot_type!r}"
     raise ValueError(msg)
 

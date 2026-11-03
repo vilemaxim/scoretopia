@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from pathlib import Path
 
 from scoretopia.domain.captures import (
@@ -16,40 +15,17 @@ from scoretopia.screenshot.models import (
     ExtractionResult,
     GameBasicsExtraction,
     GameEndExtraction,
+    GameInfoExtraction,
 )
 
 ExtractFn = Callable[[Path], ExtractionResult]
-ReadTextFn = Callable[[Path], list[str]]
-
-# A Polytopia game id as a GUID. Assumed from the More info panel's id, not
-# yet checked against a capture: an id this does not find leaves de-duplication
-# to the capture directory.
-_GAME_ID = re.compile(
-    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-    re.IGNORECASE,
-)
-
-
-def parse_game_id(lines: Iterable[str]) -> str | None:
-    """The first GUID in the OCR lines of a More info panel, lower-cased."""
-    for line in lines:
-        match = _GAME_ID.search(line.replace(" ", ""))
-        if match:
-            return match.group(0).lower()
-    return None
 
 
 class OcrCaptureExtractor:
     """:class:`~scoretopia.domain.captures.CaptureExtractor` over EasyOCR."""
 
-    def __init__(
-        self,
-        *,
-        extract: ExtractFn | None = None,
-        read_text: ReadTextFn | None = None,
-    ) -> None:
+    def __init__(self, *, extract: ExtractFn | None = None) -> None:
         self._extract = extract or _default_extract
-        self._read_text = read_text or _default_read_text
 
     def extract_setup(self, manifest: CaptureManifest) -> SetupCapture:
         return SetupCapture(
@@ -74,24 +50,24 @@ class OcrCaptureExtractor:
         return result
 
     def _game_id(self, manifest: CaptureManifest) -> str | None:
+        """The id from the ``game_info`` extraction of ``info.png``.
+
+        The id only de-duplicates: an unread one leaves that to the capture
+        directory, and the capture still counts.
+        """
         info = manifest.screens.get("info")
         if info is None or not info.is_file():
             return None
         try:
-            return parse_game_id(self._read_text(info))
+            result = self._extract(info)
         except Exception:
-            # The id only de-duplicates; a capture without one still counts.
             return None
+        if not isinstance(result, GameInfoExtraction):
+            return None
+        return result.game_id
 
 
 def _default_extract(path: Path) -> ExtractionResult:
     from scoretopia.screenshot.extract import extract_screenshot
 
     return extract_screenshot(path)
-
-
-def _default_read_text(path: Path) -> list[str]:
-    from scoretopia.screenshot.extract import DEFAULT_MODEL_DIR, _ocr_reader
-
-    reader = _ocr_reader(str(DEFAULT_MODEL_DIR))
-    return [str(text) for text in reader.readtext(str(path), detail=0)]

@@ -73,6 +73,7 @@ from scoretopia.domain.actions import (
     GameEndNeedsConfirmation,
     GameEndNeedsPick,
     GameEndPendingStart,
+    GameInfoOnly,
     GameStarted,
     IngestError,
     IngestResult,
@@ -235,7 +236,7 @@ def plan_ingest_response(
         return ResponsePlan(channel="input", kind="field_correction_view")
     if isinstance(result, FinalSummaryNeedsConfirmation):
         return ResponsePlan(channel="input", kind="final_summary_view")
-    if isinstance(result, (UnrecognizedScreenshot, IngestError)):
+    if isinstance(result, (GameInfoOnly, UnrecognizedScreenshot, IngestError)):
         return ResponsePlan(
             channel="input",
             kind="guidance_reply",

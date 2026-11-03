@@ -28,6 +28,7 @@ if TYPE_CHECKING:
         FriendProfileExtraction,
         GameBasicsExtraction,
         GameEndExtraction,
+        GameInfoExtraction,
     )
 
 DEFAULT_MODEL_DIR = Path(".easyocr_models")
@@ -109,6 +110,10 @@ def _extract_steam(
             for bbox, text, confidence in reader.readtext(array, allowlist=allowlist)
         ]
 
+    if screenshot_type == "game_info":
+        return steam.parse_steam_game_info(
+            steam.refine_steam_game_info(ocr_results, rgb, read)
+        )
     if screenshot_type == "game_end":
         return steam.parse_steam_game_end(
             steam.refine_steam_game_end(ocr_results, rgb, read)
@@ -133,6 +138,8 @@ def format_extraction(result: ExtractionResult) -> str:
         return _format_game_end(result)
     if result.screenshot_type == "game_basics":
         return _format_game_basics(result)
+    if result.screenshot_type == "game_info":
+        return _format_game_info(result)
     return _format_friend_profile(result)
 
 
@@ -382,6 +389,17 @@ def _format_game_basics(result: GameBasicsExtraction) -> str:
         suffix = f" ({', '.join(markers)})" if markers else ""
         lines.append(f"  - {player.name}{suffix}")
     return "\n".join(lines) + "\n"
+
+
+def _format_game_info(result: GameInfoExtraction) -> str:
+    title = "Polytopia Game Info Screenshot"
+    lines = [title, "=" * len(title), ""]
+    lines.append(f"Game id: {result.game_id or '?'}")
+    if result.game_version is not None:
+        lines.append(f"Game version: {result.game_version}")
+    if result.turn is not None:
+        lines.append(f"Turn: {result.turn}")
+    return "\n".join(lines)
 
 
 def _format_friend_profile(result: FriendProfileExtraction) -> str:

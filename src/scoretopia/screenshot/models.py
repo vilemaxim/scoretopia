@@ -73,4 +73,23 @@ class GameBasicsExtraction:
     players: tuple[GameBasicsPlayer, ...] = ()
 
 
-ExtractionResult = GameEndExtraction | FriendProfileExtraction | GameBasicsExtraction
+@dataclass(frozen=True)
+class GameInfoExtraction:
+    """The Game Info modal behind a Multiplayer card's More info button.
+
+    It carries the game's id and nothing that names a player. A lobby (a game
+    not yet started) shows no game version or turn line.
+    """
+
+    screenshot_type: str = "game_info"
+    game_id: str | None = None
+    game_version: int | None = None
+    turn: int | None = None
+
+
+ExtractionResult = (
+    GameEndExtraction
+    | FriendProfileExtraction
+    | GameBasicsExtraction
+    | GameInfoExtraction
+)

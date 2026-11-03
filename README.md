@@ -313,6 +313,13 @@ extraction:
 On finished replay cards, `game_timer` and `turn_status` may be null; player names
 are still required for registration.
 
+A card's **More info** button opens the Game Info modal, which produces a
+`game_info` extraction: the game id (a UUID, wrapped over two lines on screen),
+game version, and turn. A lobby's modal shows no version or turn, so both are
+null. Capture ingest takes its game id from this extraction of `info.png`;
+uploaded in Discord, the screen starts no game and the bot replies that it
+carries only the game id.
+
 Local golden pairs under `samples/screenshots/`: place a same-stem `.json` next
 to a `.png` / `.jpg` / `.jpeg`. Pytest discovers those pairs and compares
 **every field** of the live OCR extraction with the golden (via
