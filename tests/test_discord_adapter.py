@@ -30,6 +30,7 @@ from scoretopia.domain.actions import (
     GameEndNeedsConfirmation,
     GameEndNeedsPick,
     GameEndPendingStart,
+    GameInfoOnly,
     GameStarted,
     IngestError,
     UnrecognizedScreenshot,
@@ -2571,3 +2572,32 @@ def test_adapter_skip_last_slot_resumes_final_summary(
         assert len(pending_repo.list_open_by_kind("confirm_final_summary")) == 1
     finally:
         conn.close()
+
+
+def test_plan_ingest_response_replies_to_a_game_info_upload() -> None:
+    result = GameInfoOnly(message="Only the game id.", game_id=None)
+
+    plan = plan_ingest_response(result)
+
+    assert (plan.channel, plan.kind, plan.body) == (
+        "input",
+        "guidance_reply",
+        "Only the game id.",
+    )
+
+
+def test_plan_ingest_ack_reaction_for_game_info_is_success() -> None:
+    from scoretopia.discord.adapter import plan_ingest_ack_reaction
+
+    assert plan_ingest_ack_reaction(GameInfoOnly(message="x")) == _SUCCESS_REACTION
+
+
+def test_game_info_upload_replies_with_the_message(tmp_path: Path) -> None:
+    adapter = _screenshot_adapter(tmp_path, MagicMock())
+    message = _upload_message()
+
+    asyncio.run(
+        adapter._deliver_ingest_result(message, GameInfoOnly(message="Only the id."))
+    )
+
+    message.reply.assert_awaited_once_with("Only the id.")

@@ -133,6 +133,15 @@ class FinalSummaryNeedsConfirmation:
 
 
 @dataclass(frozen=True)
+class GameInfoOnly:
+    """A More info (Game Info) screen: it carries the game id and no result."""
+
+    message: str
+    game_id: str | None = None
+    action: str = "game_info_only"
+
+
+@dataclass(frozen=True)
 class UnrecognizedScreenshot:
     message: str
     action: str = "unrecognized_screenshot"
@@ -156,6 +165,7 @@ IngestResult = (
     | FieldCorrectionNeedsInput
     | RosterSlotsUnresolved
     | FinalSummaryNeedsConfirmation
+    | GameInfoOnly
     | UnrecognizedScreenshot
     | IngestError
 )

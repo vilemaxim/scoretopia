@@ -15,6 +15,7 @@ from scoretopia.domain.actions import (
     GameEndNeedsConfirmation,
     GameEndNeedsPick,
     GameEndPendingStart,
+    GameInfoOnly,
     GameStarted,
     StagedIngestNotAuthorized,
     UnrecognizedScreenshot,
@@ -32,6 +33,7 @@ from scoretopia.screenshot.models import (
     GameBasicsPlayer,
     GameEndExtraction,
     GameEndPlayer,
+    GameInfoExtraction,
     WinRatio,
 )
 from scoretopia.storage.db import open_database
@@ -1430,3 +1432,69 @@ def test_stage_screenshot_stores_raw_extraction_and_resolved_roster(
         assert confirmed.get(index) is True
     for index in fuzzy_new_indexes:
         assert confirmed.get(index) is not True
+
+
+_INFO = GameInfoExtraction(
+    game_id="0f8fad5b-d9cb-469f-a165-70867728950e", game_version=123, turn=4
+)
+
+
+def test_stage_game_info_replies_without_staging_or_a_game(
+    ingest_service: IngestService,
+    game_repo: GameRepo,
+    pending_repo: PendingInteractionRepo,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "info.png"
+    Image.new("RGB", (10, 10), color=(0, 0, 0)).save(source)
+
+    with patch("scoretopia.domain.ingest.extract_screenshot", return_value=_INFO):
+        result = _stage_screenshot(ingest_service, source, uploader_discord_id="u-1")
+
+    assert isinstance(result, GameInfoOnly)
+    assert result.game_id == _INFO.game_id
+    assert "only the game id" in result.message
+    assert game_repo.list_active() == []
+    assert pending_repo.list_open_for_user("u-1") == []
+
+
+def test_ingest_game_info_returns_game_info_only(
+    ingest_service: IngestService,
+    game_repo: GameRepo,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "info.png"
+    Image.new("RGB", (10, 10), color=(0, 0, 0)).save(source)
+
+    with patch("scoretopia.domain.ingest.extract_screenshot", return_value=_INFO):
+        result = ingest_service.ingest(source, uploader_discord_id="u-1")
+
+    assert isinstance(result, GameInfoOnly)
+    assert game_repo.list_active() == []
+
+
+def test_complete_ingest_game_info_creates_no_game(
+    ingest_service: IngestService,
+    game_repo: GameRepo,
+    tmp_path: Path,
+) -> None:
+    result = ingest_service.complete_ingest(
+        tmp_path / "info.png", _INFO, uploader_discord_id="u-1"
+    )
+
+    assert isinstance(result, GameInfoOnly)
+    assert game_repo.list_active() == []
+
+
+def test_deserialize_staged_game_info() -> None:
+    payload = {
+        "screenshot_type": "game_info",
+        "extraction": {
+            "screenshot_type": "game_info",
+            "game_id": _INFO.game_id,
+            "game_version": 123,
+            "turn": 4,
+        },
+    }
+
+    assert deserialize_staged_extraction(payload) == _INFO

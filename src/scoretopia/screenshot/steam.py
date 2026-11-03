@@ -30,6 +30,7 @@ from scoretopia.screenshot.models import (
     GameEndExtraction,
     GameEndHeader,
     GameEndPlayer,
+    GameInfoExtraction,
 )
 from scoretopia.screenshot.name_matching import (
     normalize_ocr_name,
@@ -107,6 +108,47 @@ _YOUR_TURN_PATTERN = re.compile(r"it\s*is\s*your\s*turn", re.IGNORECASE)
 _WAITING_PATTERN = re.compile(r"waiting\s+for\s+.+\s+to\s+play", re.IGNORECASE)
 _STARS_GAINED_PATTERN = re.compile(r"\(\s*\+\s*(\d+)\s*\)")
 
+# Game Info modal geometry, relative to the centre of its "Game Info" title.
+# Measured on the steam-test More info captures, 1280x720 (homelab-ops#533).
+_INFO_TITLE = "game info"
+_INFO_BODY_X = (-90.0, 300.0)
+_INFO_BODY_Y = (15.0, 150.0)
+_INFO_CROP_X = (-67.0, 280.0)
+_INFO_CROP_Y = (25.0, 140.0)
+# The body text is larger than a card's; a 2x read beat 3x and 4x on the id.
+INFO_SCALE = 2
+_INFO_ROW_TOLERANCE = 8.0
+# "ID:" as OCR reads it. The colon, or an upper-case D and a space, is required
+# so that an id starting with 1d or 10 is not taken for the label.
+_INFO_ID_PREFIX = re.compile(r"^\s*(?:[I1l|!][DdO0]\s*[:;.,]|[I1l|!]D\s)\s*")
+_INFO_VERSION_LABEL = re.compile(r"game\s*vers\w*\s*[:;.]?", re.IGNORECASE)
+_INFO_TURN_LABEL = re.compile(r"^\s*turn\s*[:;.]?", re.IGNORECASE)
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_UUID_GROUPS = (8, 4, 4, 4, 12)
+# Characters a UUID cannot hold, mapped to the hex digit OCR mistook them for.
+# A swap between two hex characters (b and 6, say) cannot be corrected here;
+# the magnified re-read is what gets those right.
+_UUID_FIXES = str.maketrans(
+    {
+        "o": "0",
+        "O": "0",
+        "Q": "0",
+        "g": "9",
+        "q": "9",
+        "l": "1",
+        "I": "1",
+        "i": "1",
+        "|": "1",
+        "!": "1",
+        "s": "5",
+        "S": "5",
+        "z": "2",
+        "Z": "2",
+        "G": "6",
+        "T": "7",
+    }
+)
+
 
 def is_steam_frame(size: tuple[int, int]) -> bool:
     """True for a landscape frame: the Steam build, not a phone screenshot."""
@@ -157,9 +199,16 @@ def _ocr_digit_fix(text: str) -> str:
 
 
 def detect_steam_screenshot_type(results: list[OCRLine]) -> str | None:
-    """Classify a Steam frame by its layout cues; None when neither matches."""
+    """Classify a Steam frame by its layout cues; None when none matches.
+
+    The Game Info modal is drawn over a Multiplayer card, so it is tried first.
+    """
     texts = [_text(item).lower() for item in results]
     joined = "\n".join(texts)
+    if _info_title(results) is not None and any(
+        word in joined for word in ("updated", "version", "created")
+    ):
+        return "game_info"
     elo_chips = sum(1 for text in texts if _ELO_PATTERN.match(text))
     if elo_chips >= 2 and any(text == "done" for text in texts):
         return "game_end"
@@ -167,6 +216,107 @@ def detect_steam_screenshot_type(results: list[OCRLine]) -> str | None:
     if has_mode and ("more info" in joined or "game timer" in joined):
         return "game_basics"
     return None
+
+
+# --- game info (the More info modal) ---------------------------------------
+
+
+def _info_title(results: list[OCRLine]) -> OCRLine | None:
+    for item in results:
+        if _fuzzy(_text(item), (_INFO_TITLE,), 0.75):
+            return item
+    return None
+
+
+def normalize_game_id(text: str) -> str | None:
+    """A UUID from OCR text, or None when the text cannot be one.
+
+    Whitespace is dropped, upper case lowered, and characters a UUID cannot
+    hold are mapped to the hex digit OCR mistook them for. Lost hyphens are
+    restored when exactly 32 hex digits remain.
+    """
+    fixed = re.sub(r"\s+", "", text).translate(_UUID_FIXES).lower()
+    fixed = re.sub(r"[^0-9a-f-]", "", fixed)
+    fixed = re.sub(r"-{2,}", "-", fixed)
+    match = _UUID.search(fixed)
+    if match:
+        return match.group(0)
+    digits = fixed.replace("-", "")
+    if len(digits) != sum(_UUID_GROUPS):
+        return None
+    groups, start = [], 0
+    for width in _UUID_GROUPS:
+        groups.append(digits[start : start + width])
+        start += width
+    return "-".join(groups)
+
+
+def _info_body(results: list[OCRLine], title: OCRLine) -> list[OCRLine]:
+    box = (
+        title.x + _INFO_BODY_X[0],
+        title.y + _INFO_BODY_Y[0],
+        title.x + _INFO_BODY_X[1],
+        title.y + _INFO_BODY_Y[1],
+    )
+    body = [item for item in results if _in_box(item, box) and _text(item)]
+    return sorted(body, key=lambda item: (item.y, item.x))
+
+
+def _info_game_id(body: list[OCRLine]) -> str | None:
+    """The id from its line and the line it wraps onto, after the ID: label."""
+    start = next(
+        (i for i, item in enumerate(body) if _INFO_ID_PREFIX.match(_text(item))),
+        0 if body else None,
+    )
+    if start is None:
+        return None
+    text = _INFO_ID_PREFIX.sub("", _text(body[start]), count=1)
+    for item in body[start + 1 : start + 3]:
+        found = normalize_game_id(text)
+        if found:
+            return found
+        if not _is_id_fragment(_text(item)):
+            break
+        text += _text(item)
+    return normalize_game_id(text)
+
+
+def _is_id_fragment(text: str) -> bool:
+    """True for a wrapped id line, not the next label line ("Game version")."""
+    fixed = re.sub(r"\s+", "", text).translate(_UUID_FIXES).lower()
+    return bool(fixed) and re.fullmatch(r"[0-9a-f-]+", fixed) is not None
+
+
+def _info_number(body: list[OCRLine], label: re.Pattern[str]) -> int | None:
+    """The number after ``label``: on the label's own token, else on its row."""
+    for item in body:
+        match = label.search(_text(item))
+        if not match:
+            continue
+        rest = _ocr_digit_fix(_text(item)[match.end() :])
+        value = _parse_number(rest)
+        if value is not None:
+            return value
+        for other in _row(body, item.y, _INFO_ROW_TOLERANCE):
+            if other.x > item.x:
+                value = _parse_number(_ocr_digit_fix(_text(other)))
+                if value is not None:
+                    return value
+        return None
+    return None
+
+
+def parse_steam_game_info(results: list[OCRLine]) -> GameInfoExtraction:
+    """Game id, game version, and turn from the Game Info modal."""
+    title = _info_title(results)
+    if title is None:
+        return GameInfoExtraction()
+    body = _info_body(results, title)
+    return GameInfoExtraction(
+        game_id=_info_game_id(body),
+        game_version=_info_number(body, _INFO_VERSION_LABEL),
+        turn=_info_number(body, _INFO_TURN_LABEL),
+    )
 
 
 # --- game basics (Multiplayer card, lobby, replay panel) -------------------
@@ -906,3 +1056,26 @@ def refine_steam_game_end(
         )
         refined = _replace(refined, box, _header_value(results, rgb, box, read))
     return refined
+
+
+def refine_steam_game_info(
+    results: list[OCRLine], rgb: np.ndarray, read: ReadFn
+) -> list[OCRLine]:
+    """Re-read the Game Info body from one magnified crop.
+
+    The full-frame read swaps hex characters in the id (b for 6, 9 for g);
+    the magnified one reads them, and its O for 0 is fixed by the parser.
+    """
+    title = _info_title(results)
+    if title is None:
+        return results
+    box = (
+        int(title.x + _INFO_CROP_X[0]),
+        int(title.y + _INFO_CROP_Y[0]),
+        int(title.x + _INFO_CROP_X[1]),
+        int(title.y + _INFO_CROP_Y[1]),
+    )
+    refined = _read_scaled(read, _crop(rgb, box), box, scale=INFO_SCALE)
+    if not refined:
+        return results
+    return _replace(results, box, refined)
