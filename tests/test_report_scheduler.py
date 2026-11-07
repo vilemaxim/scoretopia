@@ -13,7 +13,6 @@ import pytest
 from scoretopia.config import (
     ChannelsConfig,
     DatabaseConfig,
-    InboxConfig,
     ReportConfig,
     ScoretopiaConfig,
 )
@@ -41,12 +40,9 @@ def _minimal_config(
     config_dir.mkdir(parents=True)
     db_path = tmp_path / "data" / "scoretopia.db"
     db_path.parent.mkdir(parents=True)
-    inbox_path = tmp_path / "data" / "inbox"
-    inbox_path.mkdir(parents=True)
     return ScoretopiaConfig(
         channels=ChannelsConfig(reports="out"),
         database=DatabaseConfig(path=db_path),
-        inbox=InboxConfig(path=inbox_path),
         reports={
             "active_games": ReportConfig(
                 enabled=active_enabled,
@@ -141,8 +137,6 @@ def test_cli_report_run_name_active_games_prints_text(
           reports: out
         database:
           path: ../data/scoretopia.db
-        inbox:
-          path: ../data/inbox
         reports:
           active_games:
             enabled: true
@@ -356,8 +350,6 @@ def _minimal_valid_yaml_body() -> str:
           reports: out
         database:
           path: ../data/scoretopia.db
-        inbox:
-          path: ../data/inbox
         reports:
           active_games:
             enabled: true

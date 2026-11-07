@@ -9,34 +9,11 @@ import pytest
 
 from scoretopia.discord.embeds import (
     ReportKind,
-    build_dispute_embed,
     build_embed,
-    build_game_completed_embed,
-    build_game_started_embed,
     colour_for_kind,
     embed_from_report_dto,
-    participant_fields,
 )
-from scoretopia.domain.actions import ActiveGameReport
 from scoretopia.reports.dto import ReportDTO, ReportField
-from scoretopia.storage.models import Game
-
-
-def _sample_game(**overrides: object) -> Game:
-    defaults: dict[str, object] = {
-        "id": 1,
-        "name": "Friday Night",
-        "status": "active",
-        "map_size": 12,
-        "terrain": "Drylands",
-        "game_type": "Domination",
-        "target_score": 10000,
-        "game_timer": "Blitz",
-        "winner_player_id": None,
-        "created_at": datetime(2026, 7, 1, tzinfo=UTC),
-    }
-    defaults.update(overrides)
-    return Game(**defaults)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -94,107 +71,6 @@ def test_build_embed_adds_fields_and_footer() -> None:
     assert embed.footer.text == "Updated just now"
 
 
-def test_participant_fields_lists_humans_and_bot_count() -> None:
-    fields = participant_fields(
-        human_player_names=("Alice", "Bob"),
-        bot_count=2,
-    )
-
-    assert fields == [
-        ("Players", "Alice, Bob"),
-        ("Bots", "2"),
-    ]
-
-
-def test_participant_fields_omits_bots_when_count_is_zero() -> None:
-    fields = participant_fields(
-        human_player_names=("Alice", "Bob"),
-        bot_count=0,
-    )
-
-    assert fields == [("Players", "Alice, Bob")]
-
-
-def test_build_game_started_embed_uses_colon_title_and_settings_description() -> None:
-    game = _sample_game()
-    report = ActiveGameReport(
-        game_id=1,
-        game_name="Friday Night",
-        human_player_names=("Alice", "Bob"),
-        bot_count=0,
-    )
-
-    embed = build_game_started_embed(game, report)
-
-    assert embed.title == "Game started: Friday Night"
-    assert embed.colour.value == 0x57F287
-    assert embed.timestamp is not None
-    assert "Drylands" in (embed.description or "")
-    assert "12" in (embed.description or "")
-    assert "Domination" in (embed.description or "")
-    assert "score 10000" in (embed.description or "")
-    assert "Blitz" in (embed.description or "")
-
-
-def test_build_game_started_embed_separates_humans_and_bots() -> None:
-    game = _sample_game(name="Bots Included")
-    report = ActiveGameReport(
-        game_id=2,
-        game_name="Bots Included",
-        human_player_names=("Alice",),
-        bot_count=2,
-    )
-
-    embed = build_game_started_embed(game, report)
-    field_map = {field.name: field.value for field in embed.fields}
-
-    assert field_map["Players"] == "Alice"
-    assert field_map["Bots"] == "2"
-
-
-def test_build_game_started_embed_omits_bots_field_when_zero() -> None:
-    game = _sample_game()
-    report = ActiveGameReport(
-        game_id=1,
-        game_name="Friday Night",
-        human_player_names=("Alice", "Bob"),
-        bot_count=0,
-    )
-
-    embed = build_game_started_embed(game, report)
-    field_names = [field.name for field in embed.fields]
-
-    assert "Players" in field_names
-    assert "Bots" not in field_names
-
-
-def test_build_game_completed_embed_shows_winner_when_known() -> None:
-    embed = build_game_completed_embed("Friday Night", winner_name="Alice")
-
-    assert embed.title == "Game completed: Friday Night"
-    assert embed.colour.value == 0xFEE75C
-    assert embed.timestamp is not None
-    field_map = {field.name: field.value for field in embed.fields}
-    assert field_map["Winner"] == "Alice"
-
-
-def test_build_game_completed_embed_without_winner_omits_winner_field() -> None:
-    embed = build_game_completed_embed("Friday Night")
-
-    assert embed.title == "Game completed: Friday Night"
-    field_names = [field.name for field in embed.fields]
-    assert "Winner" not in field_names
-
-
-def test_build_dispute_embed_uses_dispute_colour_and_timestamp() -> None:
-    embed = build_dispute_embed("Win-ratio dispute: Alice claimed 9–11 vs Bob.")
-
-    assert embed.title == "Win-ratio dispute"
-    assert embed.description == "Win-ratio dispute: Alice claimed 9–11 vs Bob."
-    assert embed.colour.value == 0xED4245
-    assert embed.timestamp is not None
-
-
 def test_embed_from_report_dto_uses_kind_colour_and_timestamp() -> None:
     dto = ReportDTO(
         title="Recent Completions",
@@ -209,63 +85,3 @@ def test_embed_from_report_dto_uses_kind_colour_and_timestamp() -> None:
     assert embed.colour.value == 0x5865F2
     assert embed.timestamp is not None
     assert embed.fields[0].name == "Recent Win"
-
-
-def test_extraction_preview_embed_shows_raw_vs_suggested_with_match_type() -> None:
-    """Task 028: preview highlights raw OCR vs suggestion when they differ."""
-    from scoretopia.discord.embeds import build_extraction_preview_embed
-    from scoretopia.domain.actions import ExtractionPreview
-    from scoretopia.screenshot.models import GameBasicsExtraction, GameBasicsPlayer
-
-    preview = ExtractionPreview(
-        screenshot_type="game_basics",
-        game_name="Preview Roster",
-    )
-    extraction = GameBasicsExtraction(
-        game_name="Preview Roster",
-        players=(
-            GameBasicsPlayer(name="Alice", is_you=True),
-            GameBasicsPlayer(name="Roberrt"),
-            GameBasicsPlayer(name="ZedUnknown"),
-        ),
-    )
-    resolved_roster = [
-        {
-            "raw_ocr": "Alice",
-            "suggested_name": "Alice",
-            "confidence": 1.0,
-            "match_type": "exact",
-        },
-        {
-            "raw_ocr": "Roberrt",
-            "suggested_name": "Robert",
-            "confidence": 0.92,
-            "match_type": "fuzzy",
-        },
-        {
-            "raw_ocr": "ZedUnknown",
-            "suggested_name": None,
-            "confidence": 0.0,
-            "match_type": "new",
-        },
-    ]
-
-    embed = build_extraction_preview_embed(
-        preview,
-        extraction=extraction,
-        resolved_roster=resolved_roster,
-    )
-    field_map = {field.name: field.value for field in embed.fields}
-    joined_names = " ".join(field_map)
-    joined_values = " ".join(field_map.values())
-
-    # Exact match shown as-is (no raw≠suggested prompt).
-    assert "Alice" in joined_values or "Alice" in joined_names
-    # Fuzzy/new show raw vs suggested and a match_type indicator.
-    assert "Roberrt" in joined_values or "Roberrt" in joined_names
-    assert "Robert" in joined_values or "Robert" in joined_names
-    assert "ZedUnknown" in joined_values or "ZedUnknown" in joined_names
-    assert any(
-        marker in joined_names or marker in joined_values
-        for marker in ("fuzzy", "Fuzzy", "~", "≈", "❓", "🆕", "new", "New")
-    )

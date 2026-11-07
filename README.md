@@ -316,9 +316,7 @@ are still required for registration.
 A card's **More info** button opens the Game Info modal, which produces a
 `game_info` extraction: the game id (a UUID, wrapped over two lines on screen),
 game version, and turn. A lobby's modal shows no version or turn, so both are
-null. Capture ingest takes its game id from this extraction of `info.png`;
-uploaded in Discord, the screen starts no game and the bot replies that it
-carries only the game id.
+null. Capture ingest takes its game id from this extraction of `info.png`.
 
 Local golden pairs under `samples/screenshots/`: place a same-stem `.json` next
 to a `.png` / `.jpg` / `.jpeg`. Pytest discovers those pairs and compares
@@ -342,11 +340,6 @@ Steam captures (landscape frames, 1280x720 from steam-test) go through
 `scoretopia.screenshot.steam`: it re-reads the small panel text from magnified
 crops and parses relative to the panel's labels. Phone screenshots use the
 original parsers unchanged.
-
-Successful ingest commits also write a local training artifact bundle under
-`data/training/` (configurable via `training.path`; gitignored). Promote curated
-screenshot + JSON pairs from that directory into `samples/screenshots/` when you
-want them as pytest goldens (`scoretopia-extract --expected-names-only`).
 
 Production code under `src/scoretopia/` must **not** hardcode human player
 names from your local sample JSON; a pytest guard enforces this so parsers stay

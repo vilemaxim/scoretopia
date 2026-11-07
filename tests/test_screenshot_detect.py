@@ -3,66 +3,20 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
-from PIL import Image
 
-from scoretopia.domain.actions import ExtractionNeedsConfirmation
-from scoretopia.domain.games import GameService
-from scoretopia.domain.ingest import IngestService
-from scoretopia.domain.players import PlayerService
-from scoretopia.domain.win_ratios import WinRatioService
 from scoretopia.screenshot.extract import extract_screenshot
 from scoretopia.screenshot.models import (
-    GameBasicsExtraction,
-    GameBasicsPlayer,
     GameEndExtraction,
 )
 from scoretopia.screenshot.parsers import OCRLine, detect_screenshot_type
-from scoretopia.storage.db import open_database
-from scoretopia.storage.repos import (
-    DisputeRepo,
-    GameParticipantRepo,
-    GameRepo,
-    PendingInteractionRepo,
-    PlayerPairRatioRepo,
-    PlayerRepo,
-)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SAMPLES_DIR = PROJECT_ROOT / "samples" / "screenshots"
 MODEL_DIR = PROJECT_ROOT / ".easyocr_models"
 GAME_END_SAMPLE = SAMPLES_DIR / "game_end.png"
 FIXIOOOIAN_SAMPLE = SAMPLES_DIR / "fixioooian_butte-start.png"
-
-
-@pytest.fixture
-def ingest_service(tmp_path: Path) -> IngestService:
-    conn = open_database(":memory:")
-    player_repo = PlayerRepo(conn)
-    pending_repo = PendingInteractionRepo(conn)
-    inbox_path = tmp_path / "inbox"
-    inbox_path.mkdir()
-    service = IngestService(
-        player_service=PlayerService(player_repo),
-        game_service=GameService(
-            GameRepo(conn),
-            GameParticipantRepo(conn),
-            player_repo,
-        ),
-        win_ratio_service=WinRatioService(
-            player_repo,
-            pending_repo,
-            PlayerPairRatioRepo(conn),
-            DisputeRepo(conn),
-        ),
-        pending_repo=pending_repo,
-        inbox_path=inbox_path,
-        model_dir=MODEL_DIR,
-    )
-    yield service
-    conn.close()
 
 
 def _epic_wasteland_ongoing_ocr_lines() -> list[OCRLine]:
@@ -209,30 +163,3 @@ def test_extract_screenshot_fixioooian_butte_start_recognizes_game_basics() -> N
     """Regression: multiplayer menu modal must not raise unrecognized type."""
     result = extract_screenshot(FIXIOOOIAN_SAMPLE, model_dir=MODEL_DIR)
     assert result.screenshot_type == "game_basics"
-
-
-def test_ingest_ongoing_menu_card_stages_game_basics(
-    ingest_service: IngestService,
-    tmp_path: Path,
-) -> None:
-    """Multiplayer Ongoing menu card should stage as game_basics, not reject."""
-    image_path = tmp_path / "ongoing_card.png"
-    Image.new("RGB", (100, 100), color=(0, 128, 0)).save(image_path)
-    extraction = GameBasicsExtraction(
-        game_name="Epic Wasteland",
-        players=(GameBasicsPlayer(name="Alice", is_you=True),),
-    )
-
-    with patch(
-        "scoretopia.domain.ingest.extract_screenshot",
-        return_value=extraction,
-    ):
-        stored_path = ingest_service.prepare_stored_path(image_path)
-        result = ingest_service.stage_screenshot(
-            stored_path,
-            uploader_discord_id="uploader-1",
-            filename=image_path.name,
-        )
-
-    assert isinstance(result, ExtractionNeedsConfirmation)
-    assert result.preview.screenshot_type == "game_basics"
