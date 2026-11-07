@@ -14,9 +14,7 @@ from scoretopia.config import KNOWN_REPORTS, ScoretopiaConfig, load_config
 from scoretopia.discord.adapter import DiscordBotAdapter, load_discord_token
 from scoretopia.domain.captures import CaptureIngestService, seed_captures
 from scoretopia.domain.games import GameService
-from scoretopia.domain.ingest import IngestService
 from scoretopia.domain.players import PlayerService
-from scoretopia.domain.win_ratios import WinRatioService
 from scoretopia.reports.publisher import StdoutReportPublisher
 from scoretopia.reports.scheduler import (
     run_due_reports,
@@ -27,7 +25,6 @@ from scoretopia.reports.service import ReportService
 from scoretopia.storage.db import open_database
 from scoretopia.storage.repos import (
     CaptureManifestRepo,
-    DisputeRepo,
     GameParticipantRepo,
     GameRepo,
     PendingInteractionRepo,
@@ -141,55 +138,20 @@ def _positive_int(value: str) -> int:
 
 def _build_discord_bot(config: ScoretopiaConfig, token: str) -> DiscordBotAdapter:
     config.database.path.parent.mkdir(parents=True, exist_ok=True)
-    config.inbox.path.mkdir(parents=True, exist_ok=True)
 
     conn = open_database(str(config.database.path))
     player_repo = PlayerRepo(conn)
-    game_repo = GameRepo(conn)
-    participant_repo = GameParticipantRepo(conn)
-    pending_repo = PendingInteractionRepo(conn)
-    ratio_repo = PlayerPairRatioRepo(conn)
-    dispute_repo = DisputeRepo(conn)
-
-    player_service = PlayerService(player_repo)
-    game_service = GameService(
-        game_repo,
-        participant_repo,
-        player_repo,
-        pending_repo=pending_repo,
-        ratio_repo=ratio_repo,
-    )
-    win_ratio_service = WinRatioService(
-        player_repo,
-        pending_repo,
-        ratio_repo,
-        dispute_repo,
-    )
-    ingest_service = IngestService(
-        player_service=player_service,
-        game_service=game_service,
-        win_ratio_service=win_ratio_service,
-        pending_repo=pending_repo,
-        inbox_path=config.inbox.path,
-        training_path=config.training.path,
-    )
-    report_service = ReportService(
-        game_repo,
-        participant_repo,
-        player_repo,
-        ratio_repo,
-    )
 
     return DiscordBotAdapter(
         config=config,
-        ingest_service=ingest_service,
-        game_service=game_service,
-        win_ratio_service=win_ratio_service,
-        player_service=player_service,
-        report_service=report_service,
+        player_service=PlayerService(player_repo),
+        report_service=ReportService(
+            GameRepo(conn),
+            GameParticipantRepo(conn),
+            player_repo,
+            PlayerPairRatioRepo(conn),
+        ),
         token=token,
-        game_repo=game_repo,
-        player_repo=player_repo,
         capture_service=_build_capture_service(
             config,
             open_database(str(config.database.path), check_same_thread=False),

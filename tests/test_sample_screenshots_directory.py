@@ -3,6 +3,8 @@
 import subprocess
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 GITIGNORE = PROJECT_ROOT / ".gitignore"
 AGENT_CONTEXT = PROJECT_ROOT / ".agent-context.md"
@@ -53,5 +55,9 @@ def test_agent_context_documents_samples_screenshots() -> None:
     )
 
 
+@pytest.mark.skipif(
+    not SAMPLES_SCREENSHOTS_DIR.exists(),
+    reason="samples/screenshots/ is gitignored and absent in this checkout",
+)
 def test_samples_screenshots_directory_exists() -> None:
     assert SAMPLES_SCREENSHOTS_DIR.is_dir()

@@ -9,8 +9,6 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import easyocr
-
 from scoretopia.screenshot import steam
 from scoretopia.screenshot.game_basics import parse_game_basics
 from scoretopia.screenshot.icons import is_skull_avatar
@@ -24,6 +22,8 @@ from scoretopia.screenshot.parsers import (
 )
 
 if TYPE_CHECKING:
+    import easyocr
+
     from scoretopia.screenshot.models import (
         FriendProfileExtraction,
         GameBasicsExtraction,
@@ -38,7 +38,13 @@ _STEAM_AVATAR_HALF = 10
 
 @lru_cache(maxsize=2)
 def _ocr_reader(model_dir: str) -> easyocr.Reader:
-    """Build the EasyOCR reader once per model dir; loading it costs seconds."""
+    """Build the EasyOCR reader once per model dir; loading it costs seconds.
+
+    EasyOCR (and torch under it) is imported here, not at module level, so code
+    that only imports this module -- the CLI -- does not pay for it.
+    """
+    import easyocr
+
     return easyocr.Reader(
         ["en"],
         gpu=False,

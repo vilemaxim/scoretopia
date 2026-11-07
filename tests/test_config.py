@@ -51,7 +51,6 @@ def test_load_config_parses_valid_fixture(tmp_path: Path) -> None:
     assert config.channels.reports == "polytopia-reports"
     expected_db = config_file.parent / "data" / "scoretopia.db"
     assert config.database.path == expected_db.resolve()
-    assert config.inbox.path == (config_file.parent / "data" / "inbox").resolve()
 
     assert set(config.reports) == KNOWN_REPORTS
 
@@ -82,8 +81,6 @@ def test_load_config_resolves_explicit_relative_paths_from_config_dir(
           reports: out
         database:
           path: data/custom.db
-        inbox:
-          path: data/custom-inbox
         reports:
           active_games:
             enabled: true
@@ -103,9 +100,6 @@ def test_load_config_resolves_explicit_relative_paths_from_config_dir(
     config = load_config(config_file)
 
     assert config.database.path == (config_file.parent / "data" / "custom.db").resolve()
-    assert config.inbox.path == (
-        config_file.parent / "data" / "custom-inbox"
-    ).resolve()
 
 
 def test_load_config_default_path_none_uses_project_config_file(
@@ -300,96 +294,27 @@ def test_load_config_missing_config_file_raises(tmp_path: Path) -> None:
         load_config(missing)
 
 
-def _minimal_valid_yaml_with_bot_mods(
-    *,
-    discord_user_ids: str = '["123456789012345678"]',
-    training_path: str | None = "data/training",
-) -> str:
-    training_block = ""
-    if training_path is not None:
-        training_block = f"""
-        training:
-          path: {training_path}
-        """
-    return (
-        _minimal_valid_yaml()
-        + f"""
-        bot_mods:
-          discord_user_ids: {discord_user_ids}
-        """
-        + training_block
-    )
-
-
-def test_load_config_parses_bot_mods_and_training(tmp_path: Path) -> None:
-    from scoretopia.config import is_bot_mod
-
-    config_file = _write_config(
-        tmp_path,
-        _minimal_valid_yaml_with_bot_mods(
-            discord_user_ids='["111111111111111111", "222222222222222222"]',
-            training_path="data/custom-training",
-        ),
-    )
-    config = load_config(config_file)
-
-    assert config.bot_mods.discord_user_ids == (
-        "111111111111111111",
-        "222222222222222222",
-    )
-    assert config.training.path == (
-        config_file.parent / "data" / "custom-training"
-    ).resolve()
-    assert is_bot_mod("111111111111111111", config) is True
-    assert is_bot_mod("999999999999999999", config) is False
-
-
-def test_load_config_defaults_empty_bot_mods_and_training_path(tmp_path: Path) -> None:
-    from scoretopia.config import is_bot_mod
-
-    config_file = _write_config(tmp_path, _minimal_valid_yaml())
-    config = load_config(config_file)
-
-    assert config.bot_mods.discord_user_ids == ()
-    assert config.training.path == (config_file.parent / "data" / "training").resolve()
-    # Empty list means no mod bypass — every sensitive action queues approval.
-    assert is_bot_mod("123456789012345678", config) is False
-
-
-@pytest.mark.parametrize(
-    ("discord_user_ids", "match"),
-    [
-        ("not-a-list", "bot_mods.discord_user_ids"),
-        ('[""]', "bot_mods.discord_user_ids"),
-        ('["abc"]', "bot_mods.discord_user_ids"),
-        ('[123456789012345678]', "bot_mods.discord_user_ids"),
-        ('["12 34"]', "bot_mods.discord_user_ids"),
-    ],
-)
-def test_load_config_invalid_bot_mods_raises(
-    tmp_path: Path, discord_user_ids: str, match: str
+def test_load_config_ignores_keys_only_the_review_flow_read(
+    tmp_path: Path,
 ) -> None:
-    config_file = _write_config(
-        tmp_path,
-        _minimal_valid_yaml_with_bot_mods(discord_user_ids=discord_user_ids),
-    )
-
-    with pytest.raises(ConfigError, match=match):
-        load_config(config_file)
-
-
-def test_load_config_invalid_training_path_raises(tmp_path: Path) -> None:
     config_file = _write_config(
         tmp_path,
         _minimal_valid_yaml()
         + """
+        inbox:
+          path: data/inbox
         training:
-          path: 42
+          path: data/training
+        bot_mods:
+          discord_user_ids: ["123456789012345678"]
         """,
     )
 
-    with pytest.raises(ConfigError, match="training.path|Path"):
-        load_config(config_file)
+    config = load_config(config_file)
+
+    assert not hasattr(config, "inbox")
+    assert not hasattr(config, "training")
+    assert not hasattr(config, "bot_mods")
 
 
 def test_load_config_rejects_the_removed_input_channel(tmp_path: Path) -> None:
