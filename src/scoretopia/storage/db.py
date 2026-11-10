@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 # capture_manifests as of schema 3, for rebuilding a table from an earlier
 # version: SQLite cannot alter a CHECK constraint in place. Keep in step with
@@ -21,6 +21,9 @@ CREATE TABLE capture_manifests_v3 (
     processed_at TEXT NOT NULL DEFAULT (datetime('now'))
 )
 """
+
+# Tables dropped in schema 4: the removed screenshot review flow's storage.
+_DROPPED_TABLES_V4 = ("pending_interactions", "disputes")
 
 
 def open_database(
@@ -61,7 +64,9 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
     database from an earlier version adds only the tables that version lacked
     (version 2 added ``capture_manifests``). Version 3 widened
     ``capture_manifests.outcome`` to accept ``seeded``; a table created before
-    that keeps its old ``CHECK``, so it is rebuilt with its rows.
+    that keeps its old ``CHECK``, so it is rebuilt with its rows. Version 4
+    dropped ``pending_interactions`` and ``disputes``, which only the removed
+    screenshot review flow used (homelab-ops#728).
     """
     version = _stored_version(conn)
     if version is not None and version >= _SCHEMA_VERSION:
@@ -72,6 +77,8 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
     try:
         if not _capture_manifests_accepts_seeded(conn):
             _rebuild_capture_manifests(conn)
+        for table in _DROPPED_TABLES_V4:
+            conn.execute(f"DROP TABLE IF EXISTS {table}")
         conn.execute("DELETE FROM schema_version")
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?)", (_SCHEMA_VERSION,)
