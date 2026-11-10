@@ -7,6 +7,12 @@
 channels:
   reports: polytopia-reports # game started/finished posts and report output
 
+# Which Discord server the bot works in. Needed only when the bot is in more than
+# one server; with one it uses that one. Copy the id: Developer Mode, right-click
+# the server, Copy Server ID.
+# discord:
+#   guild_id: "123456789012345678"
+
 # SQLite database file. Default: data/scoretopia.db (relative to this file).
 database:
   path: data/scoretopia.db
