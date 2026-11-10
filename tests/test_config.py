@@ -375,3 +375,57 @@ def test_load_config_rejects_bad_captures(
 
     with pytest.raises(ConfigError, match=match):
         load_config(config_file)
+
+
+def test_load_config_discord_guild_id_defaults_to_none(tmp_path: Path) -> None:
+    config = load_config(_write_config(tmp_path, _minimal_valid_yaml()))
+
+    assert config.discord.guild_id is None
+
+
+@pytest.mark.parametrize(
+    ("block", "expected"),
+    [
+        ("discord:", None),
+        ("discord: {}", None),
+        ("discord:\n          guild_id:", None),
+        ('discord:\n          guild_id: "123456789012345678"', 123456789012345678),
+        ("discord:\n          guild_id: 123456789012345678", 123456789012345678),
+    ],
+)
+def test_load_config_parses_discord_guild_id(
+    tmp_path: Path, block: str, expected: int | None
+) -> None:
+    body = _minimal_valid_yaml() + "\n        " + block
+    config = load_config(_write_config(tmp_path, body))
+
+    assert config.discord.guild_id == expected
+    if expected is not None:
+        assert isinstance(config.discord.guild_id, int)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["true", '""', '"abc"', '"12 34"', '"-5"', "-5", "0", "[1, 2]", "1.5"],
+)
+def test_load_config_rejects_bad_discord_guild_id(
+    tmp_path: Path, value: str
+) -> None:
+    body = _minimal_valid_yaml() + f"\n        discord:\n          guild_id: {value}"
+    config_file = _write_config(tmp_path, body)
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(config_file)
+
+    assert str(excinfo.value) == "discord.guild_id must be a Discord server id (digits)"
+
+
+@pytest.mark.parametrize("block", ["discord: abc", "discord: [1]"])
+def test_load_config_rejects_a_non_mapping_discord_block(
+    tmp_path: Path, block: str
+) -> None:
+    body = _minimal_valid_yaml() + "\n        " + block
+    config_file = _write_config(tmp_path, body)
+
+    with pytest.raises(ConfigError, match="discord must be a mapping"):
+        load_config(config_file)
