@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
@@ -10,11 +9,8 @@ from datetime import UTC, datetime
 from scoretopia.domain.matching import is_bot_name
 from scoretopia.storage.errors import DuplicatePolytopiaNameError
 from scoretopia.storage.models import (
-    Dispute,
-    DisputeCreate,
     Game,
     GameParticipantInput,
-    PendingInteraction,
     Player,
     PlayerPairRatio,
     normalize_polytopia_name,
@@ -39,25 +35,6 @@ SELECT
     created_at,
     completed_at
 FROM games
-"""
-
-_PENDING_SELECT = """
-SELECT id, kind, discord_user_id, status, payload
-FROM pending_interactions
-"""
-
-_DISPUTE_SELECT = """
-SELECT
-    id,
-    player_a_id,
-    player_b_id,
-    submitter_player_id,
-    rejector_player_id,
-    claimed_wins_a,
-    claimed_wins_b,
-    screenshot_path,
-    status
-FROM disputes
 """
 
 
@@ -376,126 +353,6 @@ class GameParticipantRepo:
         self._conn.commit()
 
 
-class PendingInteractionRepo:
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        self._conn = conn
-
-    def create(
-        self,
-        *,
-        kind: str,
-        discord_user_id: str,
-        payload: dict[str, object],
-    ) -> PendingInteraction:
-        cursor = self._conn.execute(
-            """
-            INSERT INTO pending_interactions (kind, discord_user_id, status, payload)
-            VALUES (?, ?, 'open', ?)
-            """,
-            (kind, discord_user_id, json.dumps(payload)),
-        )
-        self._conn.commit()
-        interaction = self.get_by_id(int(cursor.lastrowid))
-        assert interaction is not None
-        return interaction
-
-    def get_by_id(self, interaction_id: int) -> PendingInteraction | None:
-        row = self._conn.execute(
-            f"{_PENDING_SELECT} WHERE id = ?",
-            (interaction_id,),
-        ).fetchone()
-        return _pending_from_row(row) if row else None
-
-    def list_open_for_user(self, discord_user_id: str) -> list[PendingInteraction]:
-        rows = self._conn.execute(
-            f"{_PENDING_SELECT} "
-            "WHERE discord_user_id = ? AND status = 'open' ORDER BY id",
-            (discord_user_id,),
-        ).fetchall()
-        return [_pending_from_row(row) for row in rows]
-
-    def resolve(self, interaction_id: int) -> PendingInteraction:
-        self._conn.execute(
-            """
-            UPDATE pending_interactions
-            SET status = 'resolved'
-            WHERE id = ?
-            """,
-            (interaction_id,),
-        )
-        self._conn.commit()
-        interaction = self.get_by_id(interaction_id)
-        assert interaction is not None
-        return interaction
-
-    def resolve_with_payload(
-        self,
-        interaction_id: int,
-        payload_updates: dict[str, object],
-    ) -> PendingInteraction:
-        interaction = self.get_by_id(interaction_id)
-        assert interaction is not None
-        updated_payload = {**interaction.payload, **payload_updates}
-        self._conn.execute(
-            """
-            UPDATE pending_interactions
-            SET status = 'resolved', payload = ?
-            WHERE id = ?
-            """,
-            (json.dumps(updated_payload), interaction_id),
-        )
-        self._conn.commit()
-        resolved = self.get_by_id(interaction_id)
-        assert resolved is not None
-        return resolved
-
-    def list_open_by_kind(self, kind: str) -> list[PendingInteraction]:
-        rows = self._conn.execute(
-            f"{_PENDING_SELECT} WHERE kind = ? AND status = 'open' ORDER BY id",
-            (kind,),
-        ).fetchall()
-        return [_pending_from_row(row) for row in rows]
-
-    def list_by_kind(self, kind: str) -> list[PendingInteraction]:
-        rows = self._conn.execute(
-            f"{_PENDING_SELECT} WHERE kind = ? ORDER BY id",
-            (kind,),
-        ).fetchall()
-        return [_pending_from_row(row) for row in rows]
-
-    def update_payload(
-        self,
-        interaction_id: int,
-        payload: dict[str, object],
-    ) -> PendingInteraction:
-        self._conn.execute(
-            """
-            UPDATE pending_interactions
-            SET payload = ?
-            WHERE id = ?
-            """,
-            (json.dumps(payload), interaction_id),
-        )
-        self._conn.commit()
-        interaction = self.get_by_id(interaction_id)
-        assert interaction is not None
-        return interaction
-
-    def mark_disputed(self, interaction_id: int) -> PendingInteraction:
-        self._conn.execute(
-            """
-            UPDATE pending_interactions
-            SET status = 'disputed'
-            WHERE id = ?
-            """,
-            (interaction_id,),
-        )
-        self._conn.commit()
-        interaction = self.get_by_id(interaction_id)
-        assert interaction is not None
-        return interaction
-
-
 class PlayerPairRatioRepo:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
@@ -560,55 +417,6 @@ class PlayerPairRatioRepo:
             """
         ).fetchall()
         return [_ratio_from_row(row) for row in rows]
-
-
-class DisputeRepo:
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        self._conn = conn
-
-    def create(self, dispute: DisputeCreate) -> Dispute:
-        cursor = self._conn.execute(
-            """
-            INSERT INTO disputes (
-                player_a_id,
-                player_b_id,
-                submitter_player_id,
-                rejector_player_id,
-                claimed_wins_a,
-                claimed_wins_b,
-                screenshot_path,
-                status
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                dispute.player_a_id,
-                dispute.player_b_id,
-                dispute.submitter_player_id,
-                dispute.rejector_player_id,
-                dispute.claimed_wins_a,
-                dispute.claimed_wins_b,
-                dispute.screenshot_path,
-                dispute.status,
-            ),
-        )
-        self._conn.commit()
-        created = self.get_by_id(int(cursor.lastrowid))
-        assert created is not None
-        return created
-
-    def get_by_id(self, dispute_id: int) -> Dispute | None:
-        row = self._conn.execute(
-            f"{_DISPUTE_SELECT} WHERE id = ?",
-            (dispute_id,),
-        ).fetchone()
-        return _dispute_from_row(row) if row else None
-
-    def list_open(self) -> list[Dispute]:
-        rows = self._conn.execute(
-            f"{_DISPUTE_SELECT} WHERE status = 'open' ORDER BY id"
-        ).fetchall()
-        return [_dispute_from_row(row) for row in rows]
 
 
 class CaptureManifestRepo:
@@ -690,16 +498,6 @@ def _game_from_row(row: tuple[object, ...]) -> Game:
     )
 
 
-def _pending_from_row(row: tuple[object, ...]) -> PendingInteraction:
-    return PendingInteraction(
-        id=int(row[0]),
-        kind=str(row[1]),
-        discord_user_id=str(row[2]),
-        status=str(row[3]),
-        payload=json.loads(str(row[4])),
-    )
-
-
 def _ratio_from_row(row: tuple[object, ...]) -> PlayerPairRatio:
     return PlayerPairRatio(
         player_a_id=int(row[0]),
@@ -707,18 +505,4 @@ def _ratio_from_row(row: tuple[object, ...]) -> PlayerPairRatio:
         wins=int(row[2]),
         source=str(row[3]),
         updated_at=_parse_datetime(row[4]),  # type: ignore[arg-type]
-    )
-
-
-def _dispute_from_row(row: tuple[object, ...]) -> Dispute:
-    return Dispute(
-        id=int(row[0]),
-        player_a_id=int(row[1]),
-        player_b_id=int(row[2]),
-        submitter_player_id=int(row[3]),
-        rejector_player_id=int(row[4]),
-        claimed_wins_a=int(row[5]),
-        claimed_wins_b=int(row[6]),
-        screenshot_path=row[7],  # type: ignore[arg-type]
-        status=str(row[8]),
     )

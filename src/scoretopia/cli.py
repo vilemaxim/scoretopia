@@ -27,7 +27,6 @@ from scoretopia.storage.repos import (
     CaptureManifestRepo,
     GameParticipantRepo,
     GameRepo,
-    PendingInteractionRepo,
     PlayerPairRatioRepo,
     PlayerRepo,
 )
@@ -87,7 +86,6 @@ def _build_capture_service(
         game_repo,
         GameParticipantRepo(conn),
         PlayerRepo(conn),
-        pending_repo=PendingInteractionRepo(conn),
         ratio_repo=PlayerPairRatioRepo(conn),
     )
     return CaptureIngestService(
