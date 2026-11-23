@@ -38,6 +38,13 @@ _Avoid_: screenshot (a capture may hold several)
 What the recording side tells seat control to do on its next run: which known players to accept invitations from, and which games to start.
 _Avoid_: instructions, commands (those are what players send from Discord)
 
+**Run**:
+One hourly pass of seat control over the game client, from restarting the client to starting any games its orders ask for.
+_Avoid_: job, poll (recording polls; seat control runs)
+
+**Run report**:
+What seat control leaves behind after a run: what it did, what it skipped, and whether it stopped early.
+
 **Game reading**:
 A fact read from a game's screens, such as its players, tribes, map, turn, or scores.
 _Avoid_: stats
