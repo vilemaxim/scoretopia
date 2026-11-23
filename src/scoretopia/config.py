@@ -47,11 +47,19 @@ class ReportConfig:
 
 
 @dataclass(frozen=True)
+class DiscordConfig:
+    """Which Discord server the bot works in; unset means its only server."""
+
+    guild_id: int | None = None
+
+
+@dataclass(frozen=True)
 class ScoretopiaConfig:
     channels: ChannelsConfig
     database: DatabaseConfig
     reports: dict[str, ReportConfig]
     captures: CapturesConfig = CapturesConfig(path=DEFAULT_CAPTURES_PATH)
+    discord: DiscordConfig = DiscordConfig()
 
 
 def load_config(path: Path | None = None) -> ScoretopiaConfig:
@@ -97,13 +105,39 @@ def _parse_config(raw: dict[str, Any], base_dir: Path) -> ScoretopiaConfig:
     reports = _parse_reports(reports_raw, channels_raw)
 
     captures = _parse_captures(raw.get("captures"), base_dir)
+    discord = _parse_discord(raw.get("discord"))
 
     return ScoretopiaConfig(
         channels=channels,
         database=DatabaseConfig(path=database_path),
         reports=reports,
         captures=captures,
+        discord=discord,
     )
+
+
+def _parse_discord(raw: Any) -> DiscordConfig:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ConfigError("discord must be a mapping")
+    value = raw.get("guild_id")
+    if value is None:
+        return DiscordConfig()
+    message = "discord.guild_id must be a Discord server id (digits)"
+    if isinstance(value, bool):
+        raise ConfigError(message)
+    if isinstance(value, str):
+        if not (value.isascii() and value.isdigit()):
+            raise ConfigError(message)
+        guild_id = int(value)
+    elif isinstance(value, int):
+        guild_id = value
+    else:
+        raise ConfigError(message)
+    if guild_id < 1:
+        raise ConfigError(message)
+    return DiscordConfig(guild_id=guild_id)
 
 
 def _parse_captures(raw: Any, base_dir: Path) -> CapturesConfig:

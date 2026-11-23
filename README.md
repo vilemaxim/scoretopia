@@ -59,8 +59,11 @@ Scoretopia needs no privileged gateway intents: it reads no messages.
 4. Copy the generated URL, open it in a browser, choose your server, and
    authorize the bot.
 
-The bot only supports **one guild** today; invite it to the server where your
-group plays.
+The bot serves **one guild**. With the bot in a single server nothing more is
+needed. If it is in more than one, set `discord.guild_id` in
+`config/scoretopia.yaml` (Part 2, step 2) to the one where your group plays. To
+copy a server id, turn on **Developer Mode** (User Settings, Advanced), then
+right-click the server and choose **Copy Server ID**.
 
 ### 5. Create the reports channel
 
@@ -123,6 +126,9 @@ Edit `config/scoretopia.yaml`:
 ```yaml
 channels:
   reports: polytopia-reports      # must match your reports channel name exactly
+
+discord:                          # optional: only when the bot is in several servers
+  guild_id: "123456789012345678"  # the server id, as digits
 
 database:
   path: data/scoretopia.db
@@ -357,7 +363,9 @@ scoretopia-extract path/to/screenshot.png --expected path/to/expected.json --exp
 | Symptom | Likely cause |
 |---------|----------------|
 | `Missing Discord bot token` | `SCORETOPIA_DISCORD_TOKEN` not set in the shell running `scoretopia bot` |
-| `Discord channel not found: …` | Channel name in `scoretopia.yaml` does not match the server exactly |
+| `Discord channel not found: …` | Channel name in `scoretopia.yaml` does not match a channel in the chosen server exactly (with several servers, check `discord.guild_id`). The bot exits non-zero |
+| `Configured Discord guild not found: the bot is not in discord.guild_id` | `discord.guild_id` is not a server the bot has joined: re-copy the server id, or invite the bot to that server. The bot exits non-zero |
+| `Bot is in N guilds; set discord.guild_id` | The bot is in more than one server and the config does not say which: set `discord.guild_id` to the server id. The bot exits non-zero |
 | `channels.input was removed` | Delete `channels.input` from `scoretopia.yaml`; games now come from captures |
 | Slash commands missing | Wait a few minutes after first start; re-invite with `applications.commands` scope |
 | No game posts | Nothing new under `captures.path`, or the directories have no `manifest.json` yet — run `scoretopia captures run` and read its log |

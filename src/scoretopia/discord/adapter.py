@@ -15,6 +15,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections.abc import Sequence
+from typing import Any
 
 import discord
 from discord import app_commands
@@ -60,6 +62,33 @@ def resolve_guild_channels(
     return resolved
 
 
+def select_guild(
+    guilds: Sequence[Any],
+    guild_id: int | None,
+) -> Any | None:
+    """Pick the guild the bot works in.
+
+    A configured ``discord.guild_id`` wins whatever the guild count or order.
+    Unset, the bot's only guild is used; with several it refuses to guess.
+    Returns ``None`` (after a warning) when the bot is in no guild.
+    """
+    if not guilds:
+        logger.warning("Bot is not in any guild; channel resolution skipped")
+        return None
+    if guild_id is not None:
+        for guild in guilds:
+            if guild.id == guild_id:
+                return guild
+        raise DiscordConfigError(
+            "Configured Discord guild not found: the bot is not in discord.guild_id"
+        )
+    if len(guilds) > 1:
+        raise DiscordConfigError(
+            f"Bot is in {len(guilds)} guilds; set discord.guild_id"
+        )
+    return guilds[0]
+
+
 class DiscordBotAdapter(BotPort):
     """Gateway-mode Discord bot implementing :class:`BotPort`."""
 
@@ -86,34 +115,48 @@ class DiscordBotAdapter(BotPort):
         self._channel_ids: dict[str, int] = {}
         self._channels_by_id: dict[int, discord.TextChannel] = {}
         self._publisher: DiscordReportPublisher | None = None
+        self._config_error: DiscordConfigError | None = None
         self._register_handlers()
 
     def run(self) -> None:
         self._bot.run(self._token)
+        if self._config_error is not None:
+            raise self._config_error
+
+    async def _on_ready(self) -> None:
+        try:
+            guild = select_guild(self._bot.guilds, self._config.discord.guild_id)
+            if guild is None:
+                return
+            self._channel_ids = resolve_guild_channels(guild, self._config.channels)
+        except DiscordConfigError as exc:
+            # discord.py logs and swallows errors raised in event handlers, so
+            # record it, stop the bot, and let run() raise it: the process then
+            # exits non-zero and systemd's Restart=on-failure sees a failure.
+            logger.error("%s", exc)
+            self._config_error = exc
+            await self._bot.close()
+            return
+        self._channels_by_id = {
+            channel.id: channel
+            for channel in guild.text_channels
+            if channel.id in self._channel_ids.values()
+        }
+        self._publisher = DiscordReportPublisher(
+            channel_lookup={
+                key: self._channels_by_id[channel_id]
+                for key, channel_id in self._channel_ids.items()
+            },
+            bot=self._bot,
+        )
+        await self._bot.tree.sync()
+        logger.info("Discord bot ready; slash commands synced")
+        self._start_capture_poll()
 
     def _register_handlers(self) -> None:
         @self._bot.event
         async def on_ready() -> None:
-            guild = self._bot.guilds[0] if self._bot.guilds else None
-            if guild is None:
-                logger.warning("Bot is not in any guild; channel resolution skipped")
-                return
-            self._channel_ids = resolve_guild_channels(guild, self._config.channels)
-            self._channels_by_id = {
-                channel.id: channel
-                for channel in guild.text_channels
-                if channel.id in self._channel_ids.values()
-            }
-            self._publisher = DiscordReportPublisher(
-                channel_lookup={
-                    key: self._channels_by_id[channel_id]
-                    for key, channel_id in self._channel_ids.items()
-                },
-                bot=self._bot,
-            )
-            await self._bot.tree.sync()
-            logger.info("Discord bot ready; slash commands synced")
-            self._start_capture_poll()
+            await self._on_ready()
 
         @self._bot.tree.command(
             name="register",
