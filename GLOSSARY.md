@@ -1,0 +1,35 @@
+# Scoretopia
+
+Scoretopia sits in a friend group's Polytopia games from an account of its own, records what happens in them, and reports to the group's Discord channel.
+
+## Language
+
+**Scoretopia**:
+The whole system: the part that drives the game, the part that records it, and the part that talks to Discord.
+_Avoid_: the bot
+
+**Seat**:
+The Polytopia account Scoretopia occupies in a game so that it can observe it. The seat never plays to win.
+_Avoid_: the bot, bot account, bot player
+
+**AI opponent**:
+A computer-controlled player supplied by Polytopia.
+_Avoid_: bot
+
+**Known player**:
+A person on the list of players Scoretopia accepts invitations from and keeps statistics for.
+
+**Group**:
+A set of known players who have each consented to Scoretopia keeping a game going for them. A player can withdraw consent.
+
+**Routine**:
+A rule Scoretopia follows on its own, built from its capabilities, such as starting a game when the group has none active.
+_Avoid_: playbook (that word means an Ansible playbook)
+
+**Game reading**:
+A fact read from a game's screens, such as its players, tribes, map, turn, or scores.
+_Avoid_: stats
+
+**Statistic**:
+A figure computed over many games, such as a win ratio by player, tribe, or map.
+_Avoid_: stats
