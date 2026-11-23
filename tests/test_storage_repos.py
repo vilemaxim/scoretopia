@@ -9,13 +9,11 @@ import pytest
 
 from scoretopia.storage.db import open_database
 from scoretopia.storage.errors import DuplicatePolytopiaNameError
-from scoretopia.storage.models import DisputeCreate, GameParticipantInput
+from scoretopia.storage.models import GameParticipantInput
 from scoretopia.storage.repos import (
     CaptureManifestRepo,
-    DisputeRepo,
     GameParticipantRepo,
     GameRepo,
-    PendingInteractionRepo,
     PlayerPairRatioRepo,
     PlayerRepo,
 )
@@ -25,13 +23,22 @@ EXPECTED_TABLES = frozenset(
         "players",
         "games",
         "game_participants",
-        "pending_interactions",
         "player_pair_ratios",
-        "disputes",
         "capture_manifests",
         "schema_version",
     }
 )
+
+
+REVIEW_FLOW_TABLES = frozenset({"pending_interactions", "disputes"})
+
+
+def test_schema_has_no_review_flow_tables(conn: sqlite3.Connection) -> None:
+    tables = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    assert not tables & REVIEW_FLOW_TABLES
 
 
 @pytest.fixture
@@ -57,18 +64,8 @@ def participant_repo(conn: sqlite3.Connection) -> GameParticipantRepo:
 
 
 @pytest.fixture
-def pending_repo(conn: sqlite3.Connection) -> PendingInteractionRepo:
-    return PendingInteractionRepo(conn)
-
-
-@pytest.fixture
 def ratio_repo(conn: sqlite3.Connection) -> PlayerPairRatioRepo:
     return PlayerPairRatioRepo(conn)
-
-
-@pytest.fixture
-def dispute_repo(conn: sqlite3.Connection) -> DisputeRepo:
-    return DisputeRepo(conn)
 
 
 def test_schema_creates_all_tables(conn: sqlite3.Connection) -> None:
@@ -337,80 +334,6 @@ def test_add_participants_round_trip(
     ]
 
 
-def test_pending_interaction_create_and_get_by_id(
-    pending_repo: PendingInteractionRepo,
-) -> None:
-    created = pending_repo.create(
-        kind="confirm_game_end",
-        discord_user_id="444",
-        payload={"game_id": 7},
-    )
-
-    fetched = pending_repo.get_by_id(created.id)
-
-    assert fetched is not None
-    assert fetched.kind == "confirm_game_end"
-    assert fetched.discord_user_id == "444"
-    assert fetched.status == "open"
-    assert fetched.payload == {"game_id": 7}
-
-
-def test_pending_interaction_list_open_for_user(
-    pending_repo: PendingInteractionRepo,
-) -> None:
-    mine = pending_repo.create(
-        kind="pick_game",
-        discord_user_id="555",
-        payload={"candidates": [1, 2]},
-    )
-    pending_repo.create(
-        kind="confirm_game_end",
-        discord_user_id="666",
-        payload={"game_id": 3},
-    )
-    pending_repo.resolve(
-        pending_repo.create(
-            kind="confirm_game_end",
-            discord_user_id="555",
-            payload={"game_id": 4},
-        ).id
-    )
-
-    open_for_user = pending_repo.list_open_for_user("555")
-
-    assert [interaction.id for interaction in open_for_user] == [mine.id]
-
-
-def test_pending_interaction_resolve(
-    pending_repo: PendingInteractionRepo,
-) -> None:
-    created = pending_repo.create(
-        kind="confirm_win_ratio",
-        discord_user_id="777",
-        payload={"pair": ["Alice", "Bob"]},
-    )
-
-    resolved = pending_repo.resolve(created.id)
-
-    assert resolved.status == "resolved"
-    assert pending_repo.list_open_for_user("777") == []
-
-
-def test_pending_interaction_mark_disputed(
-    pending_repo: PendingInteractionRepo,
-) -> None:
-    created = pending_repo.create(
-        kind="confirm_win_ratio",
-        discord_user_id="888",
-        payload={"pair": ["Alice", "Bob"]},
-    )
-
-    disputed = pending_repo.mark_disputed(created.id)
-
-    assert disputed.status == "disputed"
-    assert pending_repo.list_open_for_user("888") == []
-
-
 def test_player_pair_ratio_get_ratio_returns_none_when_missing(
     ratio_repo: PlayerPairRatioRepo,
     player_repo: PlayerRepo,
@@ -451,34 +374,6 @@ def test_player_pair_ratio_upsert_round_trip(
     assert fetched.source == "screenshot"
 
 
-def test_dispute_create_and_list_open(
-    dispute_repo: DisputeRepo,
-    player_repo: PlayerRepo,
-) -> None:
-    alice = player_repo.create(polytopia_name="Alice", discord_user_id="111")
-    bob = player_repo.create(polytopia_name="Bob", discord_user_id="222")
-
-    dispute = dispute_repo.create(
-        DisputeCreate(
-            player_a_id=alice.id,
-            player_b_id=bob.id,
-            submitter_player_id=alice.id,
-            rejector_player_id=bob.id,
-            claimed_wins_a=5,
-            claimed_wins_b=3,
-            screenshot_path="/tmp/ratio.png",
-            status="open",
-        )
-    )
-    open_disputes = dispute_repo.list_open()
-
-    assert dispute.id is not None
-    assert dispute.status == "open"
-    assert dispute.claimed_wins_a == 5
-    assert dispute.claimed_wins_b == 3
-    assert [item.id for item in open_disputes] == [dispute.id]
-
-
 def test_version_1_database_gains_capture_manifests_on_open(tmp_path) -> None:
     path = str(tmp_path / "old.db")
     old = sqlite3.connect(path)
@@ -500,8 +395,9 @@ def test_version_1_database_gains_capture_manifests_on_open(tmp_path) -> None:
         for row in upgraded.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
     assert "capture_manifests" in tables
+    assert not tables & REVIEW_FLOW_TABLES
     assert upgraded.execute("SELECT name FROM games").fetchall() == [("kept",)]
-    assert upgraded.execute("SELECT version FROM schema_version").fetchall() == [(3,)]
+    assert upgraded.execute("SELECT version FROM schema_version").fetchall() == [(4,)]
     upgraded.close()
 
 
@@ -538,7 +434,7 @@ def _version_2_database(tmp_path) -> str:
 def test_version_2_database_migrates_capture_manifests_keeping_rows(tmp_path) -> None:
     upgraded = open_database(_version_2_database(tmp_path))
 
-    assert upgraded.execute("SELECT version FROM schema_version").fetchall() == [(3,)]
+    assert upgraded.execute("SELECT version FROM schema_version").fetchall() == [(4,)]
     assert upgraded.execute(
         """
         SELECT directory, kind, game_key, game_id, outcome, processed_at
@@ -581,7 +477,7 @@ def test_migrated_database_is_left_alone_on_the_next_open(tmp_path) -> None:
     reopened = open_database(path)
 
     assert reopened.execute("SELECT COUNT(*) FROM capture_manifests").fetchone() == (2,)
-    assert reopened.execute("SELECT version FROM schema_version").fetchall() == [(3,)]
+    assert reopened.execute("SELECT version FROM schema_version").fetchall() == [(4,)]
     reopened.close()
 
 
@@ -623,13 +519,101 @@ def test_capture_manifest_duplicate_rows_do_not_shadow_the_posted_one(
     repo = CaptureManifestRepo(conn)
     game = game_repo.create_active_game(name="Captured")
     repo.record(
-        directory="setup/k1", kind="setup", game_key="g-1", game_id=game.id,
+        directory="setup/k1",
+        kind="setup",
+        game_key="g-1",
+        game_id=game.id,
         outcome="posted",
     )
     repo.record(
-        directory="setup/k2", kind="setup", game_key="g-1", game_id=None,
+        directory="setup/k2",
+        kind="setup",
+        game_key="g-1",
+        game_id=None,
         outcome="duplicate",
     )
 
     assert repo.game_id_for_key("setup", "g-1") == game.id
     assert repo.is_processed("setup/k2") is True
+
+
+_V3_WITH_REVIEW_TABLES = """
+CREATE TABLE schema_version (version INTEGER NOT NULL);
+INSERT INTO schema_version (version) VALUES (3);
+CREATE TABLE players (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    polytopia_name TEXT NOT NULL,
+    polytopia_name_normalized TEXT NOT NULL UNIQUE,
+    discord_user_id TEXT UNIQUE,
+    discord_display_name TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+INSERT INTO players (polytopia_name, polytopia_name_normalized)
+VALUES ('kept', 'kept');
+CREATE TABLE games (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);
+INSERT INTO games (name) VALUES ('kept');
+CREATE TABLE capture_manifests (
+    directory TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('setup', 'result')),
+    game_key TEXT,
+    game_id INTEGER REFERENCES games (id),
+    outcome TEXT NOT NULL CHECK (outcome IN ('posted', 'duplicate', 'seeded')),
+    processed_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+INSERT INTO capture_manifests (directory, kind, game_key, game_id, outcome)
+VALUES ('setup/a', 'setup', 'g-1', 1, 'posted');
+CREATE TABLE pending_interactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    discord_user_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('open', 'resolved', 'disputed')),
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+INSERT INTO pending_interactions (kind, discord_user_id, status, payload)
+VALUES ('confirm_game_end', 'u', 'open', '{}');
+CREATE TABLE disputes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    player_a_id INTEGER NOT NULL REFERENCES players (id),
+    player_b_id INTEGER NOT NULL REFERENCES players (id),
+    submitter_player_id INTEGER NOT NULL REFERENCES players (id),
+    rejector_player_id INTEGER NOT NULL REFERENCES players (id),
+    claimed_wins_a INTEGER NOT NULL,
+    claimed_wins_b INTEGER NOT NULL,
+    screenshot_path TEXT,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+INSERT INTO disputes
+    (player_a_id, player_b_id, submitter_player_id, rejector_player_id,
+     claimed_wins_a, claimed_wins_b, status)
+VALUES (1, 1, 1, 1, 1, 0, 'open');
+"""
+
+
+def test_version_3_database_drops_review_flow_tables_keeping_the_rest(
+    tmp_path,
+) -> None:
+    path = str(tmp_path / "v3.db")
+    old = sqlite3.connect(path)
+    old.executescript(_V3_WITH_REVIEW_TABLES)
+    old.commit()
+    old.close()
+
+    upgraded = open_database(path)
+
+    tables = {
+        row[0]
+        for row in upgraded.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    assert not tables & REVIEW_FLOW_TABLES
+    assert upgraded.execute("SELECT version FROM schema_version").fetchall() == [(4,)]
+    assert upgraded.execute("SELECT name FROM games").fetchall() == [("kept",)]
+    assert upgraded.execute("SELECT directory FROM capture_manifests").fetchall() == [
+        ("setup/a",)
+    ]
+    upgraded.close()
+
+    reopened = open_database(path)
+    assert reopened.execute("SELECT version FROM schema_version").fetchall() == [(4,)]
+    reopened.close()

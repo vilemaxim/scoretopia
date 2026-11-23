@@ -11,7 +11,6 @@ from scoretopia.domain.results import (
     CompleteResult,
     MatchOutcome,
     MatchResult,
-    RejectResult,
 )
 from scoretopia.screenshot.models import (
     GameBasicsExtraction,
@@ -23,7 +22,6 @@ from scoretopia.storage.db import open_database
 from scoretopia.storage.repos import (
     GameParticipantRepo,
     GameRepo,
-    PendingInteractionRepo,
     PlayerPairRatioRepo,
     PlayerRepo,
 )
@@ -52,11 +50,6 @@ def participant_repo(conn: sqlite3.Connection) -> GameParticipantRepo:
 
 
 @pytest.fixture
-def pending_repo(conn: sqlite3.Connection) -> PendingInteractionRepo:
-    return PendingInteractionRepo(conn)
-
-
-@pytest.fixture
 def ratio_repo(conn: sqlite3.Connection) -> PlayerPairRatioRepo:
     return PlayerPairRatioRepo(conn)
 
@@ -66,15 +59,13 @@ def game_service(
     game_repo: GameRepo,
     participant_repo: GameParticipantRepo,
     player_repo: PlayerRepo,
-    pending_repo: PendingInteractionRepo,
     ratio_repo: PlayerPairRatioRepo,
 ) -> GameService:
     return GameService(
         game_repo,
         participant_repo,
         player_repo,
-        pending_repo,
-        ratio_repo,
+        ratio_repo=ratio_repo,
     )
 
 
@@ -214,11 +205,10 @@ def test_match_game_end_returns_many_when_multiple_active_games_match(
     assert {game.name for game in result.games} == {"Game A", "Game B"}
 
 
-def test_confirm_game_end_completes_game_and_updates_pair_ratios(
+def test_complete_game_records_results_and_updates_pair_ratios(
     game_service: GameService,
     game_repo: GameRepo,
     player_repo: PlayerRepo,
-    pending_repo: PendingInteractionRepo,
     ratio_repo: PlayerPairRatioRepo,
     conn: sqlite3.Connection,
 ) -> None:
@@ -243,31 +233,7 @@ def test_confirm_game_end_completes_game_and_updates_pair_ratios(
         ("Bob", 9000, False),
         ("Carol", 7000, False),
     )
-    pending = pending_repo.create(
-        kind="confirm_game_end",
-        discord_user_id="uploader-2",
-        payload={
-            "game_id": game.id,
-            "winner": "Alice",
-            "extraction": {
-                "winner": end.winner,
-                "players": [
-                    {
-                        "name": player.name,
-                        "score": player.score,
-                        "is_winner": player.is_winner,
-                    }
-                    for player in end.players
-                ],
-            },
-        },
-    )
-
-    result = game_service.confirm_game_end(
-        interaction_id=pending.id,
-        game_id=game.id,
-        confirmer_id="uploader-2",
-    )
+    result = game_service.complete_game(game.id, end)
 
     assert isinstance(result, CompleteResult)
     completed = game_repo.get_by_id(game.id)
@@ -299,92 +265,3 @@ def test_confirm_game_end_completes_game_and_updates_pair_ratios(
     assert alice_carol is not None
     assert alice_carol.wins == 1
     assert alice_carol.source == "computed"
-
-    resolved = pending_repo.get_by_id(pending.id)
-    assert resolved is not None
-    assert resolved.status == "resolved"
-
-
-def test_reject_game_end_resolves_interaction_without_completing_game(
-    game_service: GameService,
-    game_repo: GameRepo,
-    pending_repo: PendingInteractionRepo,
-) -> None:
-    start = GameBasicsExtraction(
-        game_name="Still Active",
-        players=(
-            GameBasicsPlayer(name="Alice"),
-            GameBasicsPlayer(name="Bob"),
-        ),
-    )
-    game = game_service.start_game(extraction=start, uploader_id="uploader-3")
-    pending = pending_repo.create(
-        kind="confirm_game_end",
-        discord_user_id="uploader-3",
-        payload={"game_id": game.id, "winner": "Alice"},
-    )
-
-    result = game_service.reject_game_end(
-        interaction_id=pending.id,
-        confirmer_id="uploader-3",
-        note="Wrong game",
-    )
-
-    assert isinstance(result, RejectResult)
-    assert result.interaction_id == pending.id
-
-    still_active = game_repo.get_by_id(game.id)
-    assert still_active is not None
-    assert still_active.status == "active"
-    assert still_active.winner_player_id is None
-
-    resolved = pending_repo.get_by_id(pending.id)
-    assert resolved is not None
-    assert resolved.status == "resolved"
-    assert resolved.payload.get("rejection_note") == "Wrong game"
-
-
-def test_reconcile_pending_for_game_auto_completes_matching_game_end(
-    game_service: GameService,
-    game_repo: GameRepo,
-    player_repo: PlayerRepo,
-    pending_repo: PendingInteractionRepo,
-    ratio_repo: PlayerPairRatioRepo,
-) -> None:
-    pending_repo.create(
-        kind="game_end_pending_start",
-        discord_user_id="uploader-4",
-        payload={
-            "winner": "Alice",
-            "participant_names": ["Alice", "Bob"],
-            "extraction": {
-                "winner": "Alice",
-                "players": [
-                    {"name": "Alice", "score": 5000, "is_winner": True},
-                    {"name": "Bob", "score": 3000, "is_winner": False},
-                ],
-            },
-        },
-    )
-
-    start = GameBasicsExtraction(
-        game_name="Late Start",
-        players=(
-            GameBasicsPlayer(name="Alice"),
-            GameBasicsPlayer(name="Bob"),
-        ),
-    )
-    game = game_service.start_game(extraction=start, uploader_id="uploader-4")
-
-    assert game.status == "completed"
-
-    alice = player_repo.get_by_polytopia_name("Alice")
-    bob = player_repo.get_by_polytopia_name("Bob")
-    assert alice is not None and bob is not None
-    ratio = ratio_repo.get_ratio(alice.id, bob.id)
-    assert ratio is not None
-    assert ratio.wins == 1
-    assert ratio.source == "computed"
-
-    open_pending = pending_repo.list_open_by_kind("game_end_pending_start")
-    assert open_pending == []

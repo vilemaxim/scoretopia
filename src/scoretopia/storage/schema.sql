@@ -35,15 +35,6 @@ CREATE TABLE IF NOT EXISTS game_participants (
     PRIMARY KEY (game_id, player_id)
 );
 
-CREATE TABLE IF NOT EXISTS pending_interactions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind TEXT NOT NULL,
-    discord_user_id TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('open', 'resolved', 'disputed')),
-    payload TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
 CREATE TABLE IF NOT EXISTS player_pair_ratios (
     player_a_id INTEGER NOT NULL REFERENCES players (id),
     player_b_id INTEGER NOT NULL REFERENCES players (id),
@@ -51,19 +42,6 @@ CREATE TABLE IF NOT EXISTS player_pair_ratios (
     source TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (player_a_id, player_b_id)
-);
-
-CREATE TABLE IF NOT EXISTS disputes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    player_a_id INTEGER NOT NULL REFERENCES players (id),
-    player_b_id INTEGER NOT NULL REFERENCES players (id),
-    submitter_player_id INTEGER NOT NULL REFERENCES players (id),
-    rejector_player_id INTEGER NOT NULL REFERENCES players (id),
-    claimed_wins_a INTEGER NOT NULL,
-    claimed_wins_b INTEGER NOT NULL,
-    screenshot_path TEXT,
-    status TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- One row per steam-test capture directory processed (homelab-ops#428).

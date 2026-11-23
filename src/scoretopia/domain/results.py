@@ -42,8 +42,3 @@ class MatchResult:
 @dataclass(frozen=True)
 class CompleteResult:
     game: Game
-
-
-@dataclass(frozen=True)
-class RejectResult:
-    interaction_id: int

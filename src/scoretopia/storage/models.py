@@ -44,43 +44,9 @@ class GameParticipantInput:
 
 
 @dataclass(frozen=True)
-class PendingInteraction:
-    id: int
-    kind: str
-    discord_user_id: str
-    status: str
-    payload: dict[str, object]
-
-
-@dataclass(frozen=True)
 class PlayerPairRatio:
     player_a_id: int
     player_b_id: int
     wins: int
     source: str
     updated_at: datetime | None = None
-
-
-@dataclass(frozen=True)
-class DisputeCreate:
-    player_a_id: int
-    player_b_id: int
-    submitter_player_id: int
-    rejector_player_id: int
-    claimed_wins_a: int
-    claimed_wins_b: int
-    screenshot_path: str | None
-    status: str
-
-
-@dataclass(frozen=True)
-class Dispute:
-    id: int
-    player_a_id: int
-    player_b_id: int
-    submitter_player_id: int
-    rejector_player_id: int
-    claimed_wins_a: int
-    claimed_wins_b: int
-    screenshot_path: str | None
-    status: str

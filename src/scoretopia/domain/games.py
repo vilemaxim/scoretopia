@@ -15,7 +15,6 @@ from scoretopia.domain.results import (
     CompleteResult,
     MatchOutcome,
     MatchResult,
-    RejectResult,
 )
 from scoretopia.ingest import logger as ingest_logger
 from scoretopia.screenshot.models import GameBasicsExtraction, GameEndExtraction
@@ -23,7 +22,6 @@ from scoretopia.storage.models import Game, GameParticipantInput
 from scoretopia.storage.repos import (
     GameParticipantRepo,
     GameRepo,
-    PendingInteractionRepo,
     PlayerPairRatioRepo,
     PlayerRepo,
 )
@@ -35,13 +33,11 @@ class GameService:
         game_repo: GameRepo,
         participant_repo: GameParticipantRepo,
         player_repo: PlayerRepo,
-        pending_repo: PendingInteractionRepo | None = None,
         ratio_repo: PlayerPairRatioRepo | None = None,
     ) -> None:
         self._game_repo = game_repo
         self._participant_repo = participant_repo
         self._player_service = PlayerService(player_repo)
-        self._pending_repo = pending_repo
         self._ratio_repo = ratio_repo
 
     def start_game(
@@ -68,8 +64,6 @@ class GameService:
             game_timer=extraction.game_timer,
         )
         self.add_participants_from_basics(game.id, extraction)
-        if self._pending_repo is not None and self._ratio_repo is not None:
-            self.reconcile_pending_for_game(game.id)
         refreshed = self._game_repo.get_by_id(game.id)
         assert refreshed is not None
         return refreshed
@@ -122,78 +116,27 @@ class GameService:
         )
         return result
 
-    def confirm_game_end(
-        self,
-        *,
-        interaction_id: int,
-        game_id: int,
-        confirmer_id: str,
-    ) -> CompleteResult:
-        del confirmer_id  # reserved for adapter authorization checks
-        assert self._pending_repo is not None
-        pending = self._pending_repo.get_by_id(interaction_id)
-        assert pending is not None
-        extraction_data = pending.payload.get("extraction")
-        if not isinstance(extraction_data, dict):
-            extraction_data = {"winner": pending.payload.get("winner"), "players": []}
-        return self._complete_game_from_payload(game_id, extraction_data, pending.id)
-
-    def reject_game_end(
-        self,
-        *,
-        interaction_id: int,
-        confirmer_id: str,
-        note: str | None = None,
-    ) -> RejectResult:
-        del confirmer_id  # reserved for adapter authorization checks
-        assert self._pending_repo is not None
-        payload_updates: dict[str, object] = {}
-        if note is not None:
-            payload_updates["rejection_note"] = note
-        self._pending_repo.resolve_with_payload(interaction_id, payload_updates)
-        return RejectResult(interaction_id=interaction_id)
-
     def complete_game(
         self,
         game_id: int,
         extraction: GameEndExtraction,
     ) -> CompleteResult:
-        """Complete ``game_id`` from a trusted victory read, with no pending prompt.
+        """Complete ``game_id`` from a victory read.
 
         Records the winner, each player's end points and placement, and the
-        computed pair ratios, as a confirmed game end does.
+        computed pair ratios.
         """
         if not extraction.winner:
             raise ValueError("Game end extraction has no winner")
         return self._complete_game_from_payload(
             game_id,
             json.loads(json.dumps(asdict(extraction))),
-            None,
         )
-
-    def reconcile_pending_for_game(self, game_id: int) -> list[CompleteResult]:
-        assert self._pending_repo is not None
-        game_names = self._participant_repo.get_participant_names(game_id)
-        results: list[CompleteResult] = []
-        for pending in self._pending_repo.list_open_by_kind("game_end_pending_start"):
-            participant_names = pending.payload.get("participant_names", [])
-            if not isinstance(participant_names, list):
-                continue
-            if not participant_sets_match(game_names, participant_names):
-                continue
-            extraction_data = pending.payload.get("extraction")
-            if not isinstance(extraction_data, dict):
-                continue
-            results.append(
-                self._complete_game_from_payload(game_id, extraction_data, pending.id)
-            )
-        return results
 
     def _complete_game_from_payload(
         self,
         game_id: int,
         extraction_data: dict[str, object],
-        interaction_id: int | None,
     ) -> CompleteResult:
         assert self._ratio_repo is not None
 
@@ -231,9 +174,6 @@ class GameService:
                 continue
             self._ratio_repo.increment_ratio(winner.id, other_id, source="computed")
 
-        if interaction_id is not None:
-            assert self._pending_repo is not None
-            self._pending_repo.resolve(interaction_id)
         return CompleteResult(game=game)
 
     def _resolve_player_for_game(self, game_id: int, name: str):
