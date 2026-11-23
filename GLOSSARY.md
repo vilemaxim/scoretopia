@@ -26,6 +26,18 @@ A set of known players who have each consented to Scoretopia keeping a game goin
 A rule Scoretopia follows on its own, built from its capabilities, such as starting a game when the group has none active.
 _Avoid_: playbook (that word means an Ansible playbook)
 
+**Seat control**:
+The part of Scoretopia that recognises the game's screens and acts on them: accepting invitations, starting games, resigning, and capturing.
+_Avoid_: the driver, automation, playbook
+
+**Capture**:
+The frames seat control saves of one game at one moment, with a manifest, for the recording side to read.
+_Avoid_: screenshot (a capture may hold several)
+
+**Orders**:
+What the recording side tells seat control to do on its next run: which known players to accept invitations from, and which games to start.
+_Avoid_: instructions, commands (those are what players send from Discord)
+
 **Game reading**:
 A fact read from a game's screens, such as its players, tribes, map, turn, or scores.
 _Avoid_: stats
