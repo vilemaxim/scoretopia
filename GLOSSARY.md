@@ -19,8 +19,25 @@ _Avoid_: bot
 **Known player**:
 A person on the list of players Scoretopia accepts invitations from and keeps statistics for.
 
+**Admin**:
+A person allowed to manage groups: create, change, and delete them, and consent on a player's behalf.
+_Avoid_: owner, maintainer (that is the person who looks after the code)
+
 **Group**:
-A set of known players who have each consented to Scoretopia keeping a game going for them. A player can withdraw consent.
+A named set of two or more known players for whom Scoretopia keeps one game going. No two groups have exactly the same members.
+
+**Consent**:
+A member's agreement to be in a group, given by their own action or by an admin for them. A group does nothing until every member has it.
+
+**Opt-out**:
+A player's withdrawal: either leaving one group, or a permanent refusal of all games Scoretopia starts, which only that player can undo.
+_Avoid_: unregister, block
+
+**Active group**:
+A group whose every member has consented and is a friend of the seat. Only an active group has games started for it.
+
+**Group's game**:
+A game whose players are exactly a group's members plus the seat. AI opponents do not change this.
 
 **Routine**:
 A rule Scoretopia follows on its own, built from its capabilities, such as starting a game when the group has none active.
