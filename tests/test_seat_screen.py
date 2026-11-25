@@ -64,8 +64,8 @@ def test_a_sliver_at_the_lists_top_edge_is_a_cut_band() -> None:
 def test_a_cards_key_follows_its_text_and_not_its_colour() -> None:
     dark, blue = _frame(), _frame()
     band = _card(dark, 200)
-    _card(blue, 200)
-    ImageDraw.Draw(blue).rectangle((479, 245, 800, 259), fill=(49, 140, 228))
+    ImageDraw.Draw(blue).rectangle((479, 200, 800, 259), fill=(49, 140, 228))
+    ImageDraw.Draw(blue).rectangle((560, 214, 620, 230), fill=WHITE)
     other = _frame()
     _card(other, 200, text_at=640)
 
@@ -81,22 +81,32 @@ def test_a_card_with_no_white_text_has_no_key() -> None:
     assert screen.key_of(im, (200, 260)) is None
 
 
-def test_a_card_is_still_matched_after_the_list_moves_a_pixel() -> None:
+def _striped_card(im: Image.Image, top: int) -> None:
+    """A card whose text is one 4 px stripe, 160 px wide, on a cell boundary."""
+    draw = ImageDraw.Draw(im)
+    draw.rectangle((479, top, 800, top + 59), fill=CARD)
+    draw.rectangle((550, top + 12, 709, top + 15), fill=WHITE)
+
+
+def test_a_card_is_matched_after_the_list_moves_two_pixels() -> None:
     before, after = _frame(), _frame()
-    band = _card(before, 200)
-    moved = _card(after, 201)
+    band = (200, 260)
+    _striped_card(before, 200)
+    _striped_card(after, 202)
     recorded = [screen.mask_of(before, band)]
 
-    variants = screen.mask_variants(after, (moved[0] - 1, moved[1] - 1))
+    as_read = screen.mask_of(after, band)
+    aligned = screen.mask_variants(after, band)
 
-    assert screen.match(variants, recorded) == recorded[0]
+    assert screen.hamming(as_read, recorded[0]) > screen.KEY_TOLERANCE
+    assert screen.match(as_read, recorded) is None
+    assert screen.match(aligned, recorded) == recorded[0]
 
 
 def test_a_different_card_is_not_matched() -> None:
     one, two = _frame(), _frame()
     band = _card(one, 200, text_at=545)
     _card(two, 200, text_at=670)
-
     recorded = [screen.mask_of(one, band)]
 
     assert screen.match(screen.mask_variants(two, band), recorded) is None
@@ -104,11 +114,13 @@ def test_a_different_card_is_not_matched() -> None:
 
 def test_masks_of_different_kinds_are_never_compared() -> None:
     im = _frame()
-    band = _card(im, 200)
+    _card(im, 200)
+    band = (200, 236)
 
     setup = screen.mask_of(im, band, "setup")
     result = screen.mask_of(im, band, "result")
 
+    assert len(setup) - len("setup") == len(result) - len("result")
     assert screen.hamming(setup, result) is None
     assert screen.hamming(setup, setup) == 0
 

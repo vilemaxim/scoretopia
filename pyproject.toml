@@ -37,7 +37,7 @@ line-length = 88
 select = ["E", "F", "I", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
-# Moved from the infrastructure jobs with its code unchanged (ADR 003). Its
+# Moved from the infrastructure playbooks with its code unchanged (ADR 003). Its
 # long lines, % formatting, and named lambdas go when the waits and moves are
 # rewritten behind the seat seam.
 "src/scoretopia/seat/screen.py" = ["E501", "E731", "UP031"]

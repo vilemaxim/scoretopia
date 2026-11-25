@@ -1,9 +1,9 @@
 """Screen tests and input for Polytopia on a 1280x720 X display.
 
-The screen layer of seat control (ADR 003). It was written for scheduled jobs
-that copied it to the game machine and drove the client from a short script,
-and it is moved here with its behaviour unchanged. Comments that cited those
-jobs and their runs have been reworded; the measurements they record are kept,
+The screen layer of seat control (ADR 003). It was written for the infrastructure playbooks,
+which copied it to the game machine and drove the client from a short
+script, and it is moved here with its behaviour unchanged. Comments that cited those
+playbooks and their runs have been reworded; the measurements they record are kept,
 because each threshold below was chosen from them.
 
 What is here:
@@ -56,13 +56,12 @@ A = {
     'wait': 20,              # least timeout of a wait: input lags 6 to 8 s
     'escapes': 3,            # Escapes recover() presses at most
     'budget': 3300,          # seconds a run may spend; see budget()
-    'client_wait': 600,      # restart_client(): bound, as a scheduled job uses
+    'client_wait': 600,      # restart_client(): how long it may take
     'settle_s': 8,           # restart_client(): gap between settled frames
     'client_poll': 2,        # restart_client(): gap while no menu shows
     'unit': 'polytopia.service',
     'x_user': 'steam',       # who X commands run as when the run is root
-    # heal_list(): the pull, as the scheduled job's defaults. Runs on
-    # 2026-10-21 confirmed no value, so these stand.
+    # heal_list(): the pull. No measurement has shown a better value.
     'pull_px': 75,
     'pull_ms': 1000,
     'list_wait': 30,         # list_check(): how long a tab may take to show a card
@@ -174,10 +173,9 @@ def grab(path=None):
 
 
 def save(im, path, mode=0o600):
-    # `mode` from the start: by default 0600, so the file is never readable
-    # by others. The capture run passes 0640 for its screens, which
-    # group scoretopia reads; every other caller keeps
-    # 0600.
+    # The file is created with `mode`, 0600 by default, so it is never
+    # readable by others even for a moment. Capture passes 0640 for its
+    # screens, which recording reads through a shared group.
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
     with os.fdopen(fd, 'wb') as fh:
         im.save(fh, 'PNG')
@@ -251,7 +249,7 @@ def lit(im, box):
 
 
 # ------------------------------------------------------------ screen tests
-# From the new-game run unless marked capture.
+# Those marked capture are used only when capturing a finished game.
 
 def on_multiplayer(im):
     # The white back arrow and the pink header, and the Ongoing and Replays
@@ -294,7 +292,7 @@ def bands(im):
     # difference 60, largest between-card 137; largest in-card gap 2 px,
     # smallest between-card gap 1 px (a scenery run 1 px from a card).
     #
-    # Choice: unchanged. Bridging gaps of 1
+    # The test was left as it is. Bridging gaps of 1
     # or 2 px joins scenery runs to cards: it drops a card this test reads
     # whole (68 px with the scenery run, over 66) and still loses a split
     # one (73 px). No threshold separates 60 from 137. split_bands() counts
@@ -380,21 +378,17 @@ def mp_list(im):
 
 
 # An invitation's panel over the Multiplayer Ongoing list.
-# The client opens it on its own when an invitation to the bot arrives,
-# with no click: on 2026-11-10 the bot's client sat on the Ongoing list
-# from 16:58:31Z, the maintainer sent a second invitation, and the 17:04:47Z frame
-# showed this panel. It is the panel an invitation card opens:
+# The client opens it on its own when an invitation to the seat arrives,
+# with no click: seen on 2026-11-10, when an invitation arrived while the
+# client sat on the Ongoing list. It is the panel an invitation card opens:
 # black, x 466 to 813 and y 195 to 524; red
 # DECLINE top right, x 720 to 801, y 207 to 228; grey (204,204,204) BACK
 # bottom left, x 477 to 554, y 480 to 514, centre (516,497); blue
 # (0,122,204) ACCEPT bottom right, x 698 to 801, y 480 to about 516. Before
 # this test recover() knew no such screen, so to_list() stopped
-# `unknown_screen`: an earlier run (16:17Z, badge null, no restart),
-# an earlier run (the accept phase, 16:42Z; its stop recovery restarted
-# the client), and an earlier run (17:17Z, the same codes as the first).
-# Escape does not leave it: an earlier run's Escapes left the frame byte for
-# byte as it was. BACK does: clicked once at 17:40:58Z, it left the
-# Ongoing list with no panel and both invitations still pending.
+# `unknown_screen` in three runs that day. Escape does not leave it: the
+# frame stayed byte for byte as it was. BACK does: clicked once, it left
+# the Ongoing list with no panel and the invitations still pending.
 #
 # The test, measured on that frame and on an earlier invite-panel frame, and
 # false on 46 other saved frames (main menu, both lists, the lobby, live,
@@ -437,8 +431,7 @@ def main_menu(im):
     # gained an animated "Weekly Challenge" laurel at the top left, spanning
     # x 7 to 79 and y 13 to 98, which covers the old corner box: it read
     # (136,184,195) there, so every wait for the main menu timed out
-    # (an earlier run client_no_menu, an earlier run
-    # timeout_main_menu). MENU_SKY sits 21 px right of the laurel at the
+    # (client_no_menu in one run, timeout_main_menu in another). MENU_SKY sits 21 px right of the laurel at the
     # old box's height and read (245,103,169) on all five menu frames, as
     # the old corner did on menus without the laurel. MENU_TR read
     # (197,138,201) on every menu frame with and without the laurel. On the
@@ -460,7 +453,7 @@ def menu_key(im):
     # mask of 4 px cells that are mostly button blue or near-white. Measured
     # on captures of 2026-10-21: identical on every
     # main-menu frame of one client session, and different on the frame
-    # taken straight after an earlier run's restart, whose column lacks three of
+    # taken straight after a client restart, whose column lacks three of
     # the settled menu's blue runs at x 640.
     bits = []
     for by in range(260, 497, 4):
@@ -473,7 +466,7 @@ def menu_key(im):
 
 # The main menu's Multiplayer badge (2026-10-25): a red
 # disc with a white count, on the MULTIPLAYER button's top-right corner.
-# Measured on four main-menu frames of one client session with the bot's
+# Measured on four main-menu frames of one client session with the seat's
 # Ongoing list holding 5 cards, all "Your turn", and the badge reading 5:
 # its red pixels span x 714 to 731 and y 375 to 392, centre about
 # (723,384), fill (253,73,29). BADGE_BOX is that span plus 1 px. In the box,
@@ -487,7 +480,7 @@ def menu_key(im):
 # it, read 0 %, as did every other 20 px box of the button column (x 500
 # to 780, y 250 to 500), the sky's nearest pixel being 68 off (253,73,29) on
 # a channel. BADGE_MIN sits between. The count is the games waiting on the
-# bot, those on "Your turn", not every ongoing game (the maintainer, 2026-10-25). So
+# seat, those on "Your turn", not every ongoing game. So
 # the badge present with both tabs empty confirms a stale list, and its
 # absence proves nothing: games on the other players' turn show no badge.
 BADGE_BOX = (713, 374, 733, 394)
@@ -559,7 +552,8 @@ def key_of(im, band, kind='setup'):
     # and different cards by at least 62. A caller that must recognise a
     # card matches mask_variants() with match(), within KEY_TOLERANCE, and
     # uses this hash only where an exact value is wanted: directory names,
-    # the legacy keys in the record file, list_sig(), and the scroll-end test.
+    # keys a caller recorded before masks existed, list_sig(), and the
+    # scroll-end test.
     m = mask_of(im, band, kind)
     if m is None:
         return None
@@ -578,8 +572,8 @@ MASK_TAG = 'c3'
 def mask_of(im, band, kind='setup', dy=0):
     # key_of()'s box and 4 px cells as a bit string, prefixed by kind and
     # MASK_TAG; None when no cell is set. dy moves the box down by dy px.
-    # A mask is a picture of the card's text: it never
-    # leaves the game machine's record file and is never printed.
+    # A mask is a picture of the card's text, which can be a game's name:
+    # callers keep it on the game machine and never print it.
     top, bottom = band
     top, bottom = top + dy, bottom + dy
     box = (540, top + 8, 740, top + 36) if kind == 'setup' else (540, top + 4, 740, bottom - 4)
@@ -605,12 +599,13 @@ def mask_variants(im, band, kind='setup', k=None):
     return out
 
 
-# Measured 2026-10-23 (the numbers are in key_of()): with CELL_MIN 3 and ALIGN_K 2 the same card differed by at
-# most 15 cells across every wheel offset and a client restart, different
-# cards by at least 62 on Ongoing. KEY_TOLERANCE sits between the two: at
+# Measured 2026-10-23 (the numbers are in key_of()): with CELL_MIN 3 and
+# ALIGN_K 2 the same card differed by at most 15 cells across every wheel
+# offset and a client restart, different cards by at least 62 on Ongoing.
+# KEY_TOLERANCE sits between the two: at
 # least the largest same-card distance, below half the smallest
-# different-card distance. The earlier 4 held only for the one pair of offsets
-# it measured.
+# different-card distance. An earlier tolerance of 4 held only for the one
+# pair of offsets it was measured on.
 KEY_TOLERANCE = 22
 ALIGN_K = 2
 
@@ -709,7 +704,7 @@ def pick_ready(im):
 # (2026-11-06). Until then setup_top() read the band
 # (515,85)-(765,88) for the Game Name box's white top edge; the page moved
 # down about 16 px, so on the page at its top that band was header pink
-# (mean minimum 82) and a scheduled job stopped timeout_setup_top (earlier runs).
+# (mean minimum 82) and runs stopped timeout_setup_top.
 #
 # Measured 2026-11-06: the header is a fade over the page that
 # ends, five rows below it identical, at y 83 at x 300 on the page at its
@@ -833,7 +828,7 @@ def victory(im):
 # The end screen of a game the other player resigned, which a replay of it
 # ends on. Measured 2026-11-07 on
 # frames 7 to 23 s after Finish Game in the replay of a resigned test
-# game, and on the frame an earlier run left when it stopped
+# game, and on the frame a run left when it stopped
 # no_victory_screen: a winner line, "No opponents left", two player rows,
 # and one DONE button, under the same near-black header as the victory
 # screen (top band mean (9,8,9)). Its DONE sits 23 px lower than the
@@ -875,8 +870,8 @@ def done_point(im):
 
 # An Ongoing game the other player resigned. Measured
 # 2026-11-07 on frames of a resigned test
-# game, a 2-player game, and of live games beside it. The bot's client
-# keeps such a game on Ongoing as the bot's turn, and the card itself is
+# game, a 2-player game, and of live games beside it. The seat's client
+# keeps such a game on Ongoing as the seat's turn, and the card itself is
 # unchanged: its portrait reads like every other card's. The mark is on the
 # card's panel, where the resigned player's portrait turns into a light
 # grey robot head with red eyes. In the 40 px box (650,382)-(690,422), 196
@@ -884,13 +879,13 @@ def done_point(im):
 # read 49 % near-grey pixels (channels within 12 of each other, red 100 to
 # 230) and 12 red ones (red over 180, green and blue under 80); the live
 # opponent's portrait in the same box read 0 % and 0. The robot spans
-# (655,384)-(685,429). The client showed the mark between 20:50Z and 21:44Z,
-# that is, 1 to 2 hours after the resign on the other side: a client restart
-# before then showed the plain portrait (2026-11-07). Since the slot
+# (655,384)-(685,429). The client showed the mark 1 to 2 hours after the
+# resign on the other side: a client restart before then showed the plain
+# portrait (2026-11-07). Since the slot
 # moves with the player count, the box is slid across the portrait row
-# (x 480 to 800, 4 px steps). Of 42 frames checked, resigned_panel() was true on the marked panel
-# only; no other panel read over 11 % grey or any red pixel at any
-# position, the same game's panel before the mark showed included. Only
+# (x 480 to 800, 4 px steps). Of 42 frames checked, resigned_panel() was
+# true on the marked panel only; no other panel read over 11 % grey or any
+# red pixel at any position, the same game's panel before the mark showed included. Only
 # 2-player games were measured.
 RESIGN_ROW = (196, 236)
 RESIGN_GREY = 0.3
@@ -1002,9 +997,8 @@ def budget(need):
 
 # recover() knows the invitation panel that opens on its own when an
 # invitation arrives, and leaves it by BACK INVITE_BACK (516,497), Escape
-# not closing it (2026-11-10). That panel stopped three earlier runs
-# `unknown_screen`; see
-# the note above invite_panel().
+# not closing it (2026-11-10). That panel stopped three runs
+# `unknown_screen`; see the note above invite_panel().
 def recover(clicks=True):
     # To the main menu or the Multiplayer list with no panel. From the
     # Settings screen its back arrow leads to the main menu; from GAME SETUP
@@ -1151,7 +1145,8 @@ def restart_client(report=None):
     # on 2026-10-24 stopped command_failed_runuser with the menu not
     # yet reached: one grab()'s xwd, the only X command here, exited
     # non-zero while the client was starting, and the run ended though the
-    # client went on to the main menu. Three restarts after it (earlier runs) did not repeat it, and the run kept no stderr, so why xwd
+    # client went on to the main menu. Three restarts after it did not
+    # repeat it, and the run kept no stderr, so why xwd
     # failed is not known. Now the loop counts the failure in
     # r['grab_failures'], keeps the last failed_code() in
     # r['grab_failure_last'], breaks the settled pair, and polls again
@@ -1196,17 +1191,16 @@ def restart_client(report=None):
 
 
 # ------------------------------------------------------------ stale view
-# 2026-10-22. The client's lobby panels and Ongoing list do
-# not update live with what other players do. After the bot invited the
-# friend, its own lobby panel still showed one player and "You need at least
-# two players", unchanged when reopened and after the scheduled job's held pull
-# (an earlier run), while the invite had reached the friend: the maintainer accepted
-# an earlier one and was sent this one (2026-10-22). Player.log
-# recorded no client event for the invite. A non-empty list can therefore be
+# Found 2026-10-22. The client's lobby panels and Ongoing list do not
+# update live with what other players do. After the seat invited a player,
+# its own lobby panel still showed one player and "You need at least two
+# players", unchanged when reopened and after a held pull, while the
+# invitation had reached the other player. The client's log recorded no
+# event for the invitation. A non-empty list can therefore be
 # stale, which list_check() cannot see. The one reload known to show changes
-# made elsewhere is a client restart (an earlier run, 2026-10-20); the pull is not
+# made elsewhere is a client restart (2026-10-20); the pull is not
 # proven to. reload_view() is that restart, for callers that must read
-# others' changes, such as the start phase's lobbies the invitee has accepted.
+# others' changes, such as a lobby the invited player has accepted.
 
 
 def reload_view(report):
@@ -1221,10 +1215,10 @@ def reload_view(report):
 
 
 # ------------------------------------------------------------ stale list
-# 2026-10-22. An earlier run (2026-10-20) read a stale lobby
+# Found 2026-10-22. A run on 2026-10-20 read a stale lobby
 # list; after a Replays-Ongoing tab switch both tabs stayed empty for more
 # than 30 s while the main menu still showed games, until a client restart
-# (an earlier run) fixed it.
+# fixed it.
 #
 # What counts as stale: the Multiplayer list shows no card on the tab to be
 # read and none on the other tab either, whatever the main menu's
@@ -1276,7 +1270,7 @@ def heal_list(tab, report):
     # returns only after a settled main menu, so nothing is clicked before
     # it), MULTIPLAYER, and check once more; still stale stops the run
     # list_stale. The list is never re-entered as a refresh: re-entering
-    # once emptied both tabs (the maintainer, 2026-10-20). Counts each recovery in
+    # once emptied both tabs (seen 2026-10-20). Counts each recovery in
     # report['list_refreshes'] and report['client_restarts'].
     report.setdefault('list_refreshes', 0)
     report.setdefault('client_restarts', 0)
@@ -1299,17 +1293,16 @@ def heal_list(tab, report):
 
 
 # ------------------------------------------------------------ accept and resign
-# 2026-11-10, for the new-game run's accept and resign phases. Measured on
-# frames saved on 2026-11-10, against the earlier frames listed with each
-# test. Nothing above is
-# changed: the capture run imports it.
+# Added 2026-11-10, for accepting an invitation and resigning. Measured on
+# frames saved that day, against the earlier frames listed with each test.
 
-# PICK YOUR TRIBE after ACCEPT on an invitation. The screen carries four lines of game settings
-# under its title, so the grid sits lower on the page's text and higher on
-# the screen than the create side's TRIBE_Y: the circles' blue (0,153,255)
+# PICK YOUR TRIBE after ACCEPT on an invitation. The screen carries four
+# lines of game settings under its title, so the grid sits lower on the
+# page's text and higher on the screen than the create side's TRIBE_Y: the
+# circles' blue (0,153,255)
 # ends at y 261, 371, and 481 (481 to 483 at x 792), against 276, 398 to
-# 399, and 521 on the create side (frames of 2026-10-18 22:27:50Z and
-# 2026-10-20 02:47:44Z). Columns are 1 px right of TRIBE_X.
+# 399, and 521 on the create side (two frames, 2026-10-18 and
+# 2026-10-20). Columns are 1 px right of TRIBE_X.
 ACCEPT_TRIBE_Y = [224, 333, 443]
 ACCEPT_TRIBE_X = [489, 590, 691, 792]
 
@@ -1318,8 +1311,8 @@ def accept_tribe_screen(im):
     # The accept side's grid: under an undimmed pink header, each of the
     # twelve circles shows its blue in a 60 x 8 px band 26 to 34 px below
     # its centre, and none in the band 42 to 48 px below it, where the
-    # create side's lower circles still are. Measured on the
-    # invite-tribe frame: inner share 0.158 at least, lower band 0 at most. On the
+    # create side's lower circles still are. Measured on a
+    # frame of this screen: inner share 0.158 at least, lower band 0 at most. On the
     # two create-side tribe frames above: inner 0.060 at least, lower band
     # up to 0.764, so this is false there, while tribe_screen() is true on
     # all three. False on the other 29 frames checked (lists, panels, game
@@ -1340,34 +1333,33 @@ def accept_tribe_screen(im):
 # list opened from the main menu with no accept between goes back to the
 # main menu. to_main_menu()'s
 # click at (31,31) opened it and its wait_for(main_menu) stopped
-# `timeout_main_menu` in an earlier run (the accept phase, 18:09Z, two
-# invitations accepted) and an earlier run (the accept phase, one accepted; frame
-# accept-19, 23:48:43Z, the reproduction).
+# `timeout_main_menu` in two runs that accepted invitations; the second
+# was run to reproduce the first and its frame kept.
 #
-# Measured on accept-19: accept_tribe_screen() true
+# Measured on that frame: accept_tribe_screen() true
 # (inner band share 0.158 at least, lower band 0.000), and tribe_screen()
 # true as well (create grid 0.149 at least), so recover() takes it for the
 # create side's screen, whose back arrow leads to GAME SETUP. The back
 # button lit: the box (20,20)-(42,42) reads mean (229,231,234) with the
-# pointer on it, against (175,175,175), dimmed, on accept-8 (23:44:25Z)
+# pointer on it, against (175,175,175), dimmed, on a frame
 # with a tribe panel open, where accept_tribe_screen() is false too.
 # main_menu() is false on it (MENU_TR green 88), and so are
 # on_multiplayer(), settings_screen(), setup_screen(), and invite_panel().
-# Escape does not leave it: an earlier run's stop recovery pressed Escape up to
-# three times and then restarted the client (stop_recovery restart).
+# Escape does not leave it: a run's stop recovery pressed Escape up to
+# three times and then had to restart the client.
 #
 # Its exit is the back arrow, TRIBE_BACK (33,34), the create side's back
 # point and the only control on the screen that opens no tribe panel. The
 # tribe was already picked, so it is not known to leave or cancel anything.
-# Unconfirmed: no frame shows the arrow clicked on this screen (an earlier run's
+# Unconfirmed: no frame shows the arrow clicked on this screen (the
 # restart cleared it first), so where it leads is inferred, not seen: back
 # to the Multiplayer list by the same back-navigation, whose arrow then
 # leads on. LIST_BACK_HOPS bounds the round trips; one per invitation
-# accepted in the run is the expectation, also unconfirmed. Of 76 frames in
-# the maintainer's saved frames from 2026-10-18 to 2026-11-10 checked, the test is
-# true on accept-19 and on the invite-tribe frame (02:24:15Z), the same screen
-# as ACCEPT first opens it, which it cannot tell apart, and false on the
-# other 74 (lists, panels, both tribe screens with a panel open, the create
+# accepted in the run is the expectation, also unconfirmed. Of 76 saved
+# frames from 2026-10-18 to 2026-11-10, the test is true on that frame and
+# on a frame of the same screen as ACCEPT first opens it, which it cannot
+# tell apart, and false on the other 74 (lists, panels, both tribe screens
+# with a panel open, the create
 # side's tribe screen, GAME SETUP, the main menu, game and end views, and
 # flat frames). Only to_main_menu() calls it, after the list's back arrow.
 TRIBE_BACK = (33, 34)
@@ -1380,15 +1372,13 @@ def list_back_tribe(im):
 
 
 def bot_turn_card(im, band):
-    # An Ongoing card on the bot's turn: the mean of the strip x 540 to 740,
+    # An Ongoing card on the seat's turn: the mean of the strip x 540 to 740,
     # 7 to 4 px above the band's bottom (under the subtitle, left of the
     # timer), passes blue(). Measured (2026-11-10): every card under
     # "Your Turn" read (49,138..154,225..231), or (13..27,151..155,239)
-    # over the scenery, on the turn-list and look-ongoing frames (5 cards each,
-    # "Time Up!" and "6 days" alike), on invite-list, and on frames of
-    # 2026-11-06 21:41:19Z and 2026-11-07 20:50:44Z and 20:50:56Z; every
-    # card under "Their Turn" read (49,26,23), on frames of 2026-10-18
-    # 22:28:42Z and 2026-10-20 13:20:30Z. Invitations under "Game
+    # over the scenery, on six frames (5 cards on two of them, "Time Up!"
+    # and "6 days" alike); every card under "Their Turn" read (49,26,23),
+    # on two frames. Invitations under "Game
     # Invitations" are blue too, so a caller tells them apart by the panel.
     # Unconfirmed: the "Their Turn" cards measured are all lobbies; no frame
     # shows a started game on the other player's turn, so that such a card
@@ -1397,8 +1387,8 @@ def bot_turn_card(im, band):
     return blue(m)
 
 
-# The turn 0 dialog's OK. (640,457) on the games a scheduled job created
-# earlier; (640,528) on a game the seat accepted (dialog
+# The turn 0 dialog's OK. (640,457) on games the seat created; (640,528)
+# on a game the seat accepted (dialog
 # "Mighty Leader!", header "Replaying… (6 days)"). No frame shows the
 # dialog at (640,528), so its colour is taken to be the game's button blue,
 # as at (640,457): unconfirmed. Each box is the button's middle, 40 x 12 px.
@@ -1417,8 +1407,8 @@ def turn0_ok(im):
 
 def resign_ready(im):
     # In-game Settings with RESIGN lit at (1225,30): (204,41,0), within 12,
-    # on at least 40 % of (1205,22)-(1245,38). Read 0.64 on the
-    # game-settings frame and on 2026-10-21 14:03:00Z (both game Settings), 0.00
+    # on at least 40 % of (1205,22)-(1245,38). Read 0.64 on two
+    # frames of in-game Settings, 0.00
     # on the resign confirmation (RESIGN dimmed) and on the other 30 frames.
     return game_settings_screen(im) and share(im, (1205, 22, 1245, 38), (204, 41, 0), 12) >= 0.4
 
