@@ -231,7 +231,11 @@ def read_tab(seat: Seat, tab: str) -> Image.Image:
     return shown if shown is not None else wait_for(seat, screen.mp_list, "list")
 
 
-Visit = Callable[[tuple[int, int], str, str], None]
+#: Given a row's span, key, and mask. True when it left the list somewhere
+#: other than where it found it, so the walk must find the list's top again.
+Visit = Callable[[tuple[int, int], str, str], bool | None]
+#: Given the list's frame, a row's span, and the row's mask variants.
+PassedOver = Callable[[Image.Image, tuple[int, int], list[str]], bool]
 
 
 def walk(
@@ -240,15 +244,18 @@ def walk(
     tab: str,
     visit: Visit,
     visit_budget: float,
-    passed_over: Callable[[list[str]], bool] = lambda variants: False,
+    passed_over: PassedOver = lambda frame, row, variants: False,
 ) -> bool:
     """Read a tab from its top to its end, visiting each row once.
 
-    ``visit`` is given a row's span, key, and mask, and must leave the client
-    on the list. ``passed_over`` is asked first, with the row's mask variants,
-    whether to leave the row alone. Returns True when the list's end was
-    reached, False when the page cap stopped the walk. Raises ``Budget`` when
-    fewer than ``visit_budget`` seconds are left for another visit.
+    ``visit`` must leave the client on the list. When it returns True the list
+    may have been reopened at another place, and the walk starts from its top
+    again, still passing over the rows it has seen. ``passed_over`` is asked
+    first, of the frame the row was read from, whether to leave the row alone.
+    Returns True when the list's end was reached, False when the page cap
+    stopped the walk, or more restarts from the top than the page cap. Raises
+    ``Budget`` when fewer than ``visit_budget`` seconds are left for another
+    visit.
 
     A page is read again after each visit, since a visit leaves and returns to
     the list. Rows seen earlier in the walk are passed over by their masks. A
@@ -258,12 +265,17 @@ def walk(
     """
     seen: list[str] = []
     at_top = False
-    for page in range(screen.PAGE_CAP + 1):
+    page = restarts = 0
+    while True:
         while True:
             frame = read_tab(seat, tab)
             if not at_top:
+                if restarts > screen.PAGE_CAP:
+                    # Each restart follows a visit to a row not seen before:
+                    # this many means rows are not being recognised again.
+                    return False
                 frame = to_top(seat, kind)
-                at_top = True
+                at_top, page, restarts = True, 0, restarts + 1
             todo = None
             for row in screen.bands(frame):
                 if row[0] <= LIST_TOP or row[1] >= LIST_BOTTOM:
@@ -277,20 +289,21 @@ def walk(
                     # row is still settling, and a later page reads it.
                     continue
                 seen.append(mask)
-                if passed_over(variants):
+                if passed_over(frame, row, variants):
                     continue
                 todo = (row, screen.key_of(frame, row, kind), mask)
                 break
             if todo is None:
                 break
             require_budget(seat, visit_budget)
-            visit(*todo)
+            if visit(*todo):
+                at_top = False
         if page == screen.PAGE_CAP:
             return False
         require_budget(seat, SCROLL_WAIT + 30)
         if _wheel_moves_list(seat, frame, kind, NOTCHES) is None:
             return True
-    return False
+        page += 1
 
 
 def sweep(
@@ -304,7 +317,9 @@ def sweep(
 ) -> None:
     """Walk a tab, capturing each row the record does not hold."""
 
-    def captured_before(variants: list[str]) -> bool:
+    def captured_before(
+        frame: Image.Image, row: tuple[int, int], variants: list[str]
+    ) -> bool:
         if record.knows(kind, variants):
             counts.skipped += 1
             return True

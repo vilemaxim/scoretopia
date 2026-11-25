@@ -350,6 +350,18 @@ without an orders file, nothing is accepted. The line carries `accepted` and
 names could not be read at all, and a run that accepted none and has any of
 those fails with `names_unread`.
 
+`scoretopia seat resign` resigns from each game on the Ongoing tab where it is
+the seat's turn and whose setup the record holds. A game whose setup is not
+captured is left until `capture-setup` has run, and a game on another player's
+turn is not opened. The seat resigns inside the game, from its Settings, and
+never deletes a game. The line carries `resigned`, `not_seats_turn` (a lobby
+counts here too),
+`setup_missing` (an unanswered invitation counts here too), and
+`opponent_resigned`, the games already over because the other player resigned.
+It succeeds when it resigned from at least one game. Not yet run on the live
+client: the end screen's DONE is taken to lead to the Multiplayer list or the
+main menu, and any other screen stops the command with its frame saved.
+
 Captures are written for the owner and group only: recording's user must share a
 group with seat control's user. `record.json` in the same directory is seat
 control's own record of what it has captured, and is readable by its owner

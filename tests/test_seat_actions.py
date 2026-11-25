@@ -239,7 +239,7 @@ DIRECT_TOOL_CALLS = {
 }  # fmt: skip
 
 
-@pytest.mark.parametrize("module", ["actions", "commands", "capture"])
+@pytest.mark.parametrize("module", ["actions", "commands", "capture", "resign"])
 def test_code_above_the_seam_reaches_no_tool_or_clock_itself(module: str) -> None:
     source = (Path(screen.__file__).parent / f"{module}.py").read_text()
     tree = ast.parse(source)

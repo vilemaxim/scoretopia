@@ -20,6 +20,8 @@ from fake_seat import (
     State,
     draw_card_info,
     draw_card_panel,
+    draw_game_settings,
+    draw_game_view,
     draw_invitation,
     draw_invited_lobby,
     draw_joined_lobby,
@@ -32,6 +34,7 @@ from fake_seat import (
     scroll_offsets,
     seat_states,
 )
+from PIL import Image
 
 from scoretopia.seat import panels, screen
 
@@ -395,3 +398,97 @@ def test_after_an_accept_the_lists_back_arrow_reopens_the_tribe_screen() -> None
     assert on_list == "ongoing@0" + AFTER_ACCEPT
     assert reopened
     assert fake.visited[-3:] == ["reopened_tribe", "ongoing@0", "main_menu"]
+
+
+# ------------------------------------------------------------ resigning
+
+
+def test_only_a_card_drawn_blue_reads_as_on_the_seats_turn() -> None:
+    games = [
+        OngoingGame(0, seat_turn=True),
+        OngoingGame(1),
+        OngoingGame(2, "invitation"),
+        OngoingGame(3, "lobby"),
+    ]
+    frame = draw_ongoing(games, 0)
+
+    cards = screen.bands(frame)
+
+    assert screen.mp_list(frame)
+    assert [screen.bot_turn_card(frame, card) for card in cards] == [
+        True,
+        False,
+        True,
+        False,
+    ]
+
+
+def test_a_card_keeps_its_mask_when_the_turn_passes() -> None:
+    theirs = draw_ongoing([OngoingGame(0)], 0)
+    ours = draw_ongoing([OngoingGame(0, seat_turn=True)], 0)
+    (card,) = screen.bands(ours)
+
+    assert screen.mask_of(ours, card) == screen.mask_of(theirs, card)
+
+
+def test_a_panel_on_the_seats_turn_is_still_a_started_games() -> None:
+    panel = draw_card_panel(OngoingGame(0, seat_turn=True))
+
+    assert panels.read_panel(panel).kind == panels.STARTED
+    assert not screen.resigned_panel(panel)
+
+
+def test_only_the_panel_of_a_game_the_opponent_resigned_shows_the_robot() -> None:
+    game = OngoingGame(0, seat_turn=True, opponent_resigned=True)
+
+    assert screen.resigned_panel(draw_card_panel(game))
+    assert panels.read_panel(draw_card_panel(game)).kind == panels.STARTED
+
+
+GAME_TESTS = ("resign_ready", "resign_confirm", "game_over")
+
+
+@pytest.mark.parametrize(
+    ("frame", "holds", "turn0"),
+    [
+        (draw_game_view(), set(), None),
+        (draw_game_view("created"), set(), screen.TURN0_OK[0]),
+        (draw_game_view("accepted"), set(), screen.TURN0_OK[1]),
+        (draw_game_settings(), {"resign_ready"}, None),
+        (draw_game_settings(confirm=True), {"resign_confirm"}, None),
+    ],
+    ids=["game", "turn0_created", "turn0_accepted", "settings", "confirm"],
+)
+def test_each_drawn_game_screen_is_the_screen_it_stands_for(
+    frame: Image.Image, holds: set[str], turn0: tuple[int, int] | None
+) -> None:
+    assert {name for name in GAME_TESTS if getattr(screen, name)(frame)} == holds
+    assert screen.turn0_ok(frame) == turn0
+    assert not screen.on_multiplayer(frame)
+    assert not screen.main_menu(frame)
+    assert not screen.finish_green(frame) and not screen.exit_blue(frame)
+
+
+def test_everything_in_game_settings_but_its_buttons_is_forbidden() -> None:
+    states = ongoing_states([OngoingGame(0, seat_turn=True)])
+    fake = FakeScreen(states, "gamesettings:0@0")
+
+    with pytest.raises(ForbiddenInput, match="settings"):
+        fake.click(640, 300)
+
+
+def test_resigning_in_the_game_leads_to_its_end_screen_and_back_to_the_list() -> None:
+    fake = FakeScreen(ongoing_states([OngoingGame(0, seat_turn=True)]), "card:0@0")
+
+    for point in [(760, 516), None, (640, 457), (515, 665), (1225, 30), (777, 404)]:
+        if point is None:
+            fake.sleep(8)
+            fake.grab()
+        else:
+            fake.click(*point)
+
+    assert fake.state == "over:0@0"
+    assert screen.game_over(fake.grab())
+    fake.click(*screen.done_point(fake.grab()))
+    assert fake.state == "ongoing@0"
+    assert fake.misses == []
