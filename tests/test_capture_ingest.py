@@ -140,11 +140,120 @@ def _service(
         game_repo=GameRepo(conn),
         game_service=game_service,
         extractor=extractor,
+        player_repo=PlayerRepo(conn),
     )
 
 
 def _fields(dto: ReportDTO) -> dict[str, str]:
     return {field.label: field.value for field in dto.fields}
+
+
+# --- names resolved against the players table ------------------------------
+
+REGISTERED = "Delta1"  # the registered spelling ends in the digit 1
+MISREAD = "Deltal"  # OCR read that digit as the letter l
+
+
+def _misread_basics() -> GameBasicsExtraction:
+    return GameBasicsExtraction(
+        game_name="Test Game",
+        game_type="Glory",
+        players=(GameBasicsPlayer(name="Alpha"), GameBasicsPlayer(name=MISREAD)),
+    )
+
+
+def _misread_victory() -> GameEndExtraction:
+    return GameEndExtraction(
+        winner=MISREAD,
+        players=(
+            GameEndPlayer(name=MISREAD, score=10450, is_winner=True),
+            GameEndPlayer(name="Alpha", score=7200),
+        ),
+    )
+
+
+def _register(conn: sqlite3.Connection, name: str = REGISTERED) -> int:
+    return PlayerRepo(conn).create(
+        polytopia_name=name,
+        discord_user_id="1001",
+        discord_display_name="someone",
+    ).id
+
+
+def _run_misread_game(conn: sqlite3.Connection, root: Path) -> RecordingPublisher:
+    _write_manifest(root, "setup", "s1")
+    _write_manifest(root, "result", "r1")
+    extractor = StubExtractor()
+    extractor.setups["s1"] = SetupCapture(basics=_misread_basics())
+    extractor.results["r1"] = ResultCapture(
+        basics=_misread_basics(), victory=_misread_victory()
+    )
+    publisher = RecordingPublisher()
+    assert _service(conn, root, extractor).run_once(publisher) == 2
+    return publisher
+
+
+def test_a_misread_name_is_stored_and_posted_in_the_registered_spelling(
+    conn: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    registered_id = _register(conn)
+
+    publisher = _run_misread_game(conn, tmp_path)
+
+    started, finished = publisher.posts[0][1], publisher.posts[1][1]
+    assert _fields(started)["Players"] == f"Alpha, {REGISTERED}"
+    assert _fields(finished)["Winner"] == REGISTERED
+    assert _fields(finished)["End points"] == "10450"
+    names = [player.polytopia_name for player in PlayerRepo(conn).list_all()]
+    assert names == ["Alpha", REGISTERED]
+    assert GameParticipantRepo(conn).get_participant_names(1) == ("Alpha", REGISTERED)
+    completed = GameRepo(conn).get_by_id(1)
+    assert completed is not None and completed.winner_player_id == registered_id
+
+
+def test_a_stray_misread_row_does_not_hide_the_registered_player(
+    conn: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    registered_id = _register(conn)
+    PlayerRepo(conn).create(polytopia_name=MISREAD)
+
+    publisher = _run_misread_game(conn, tmp_path)
+
+    started, finished = publisher.posts[0][1], publisher.posts[1][1]
+    assert _fields(started)["Players"] == f"Alpha, {REGISTERED}"
+    assert _fields(finished)["Winner"] == REGISTERED
+    assert GameParticipantRepo(conn).get_participant_names(1) == ("Alpha", REGISTERED)
+    completed = GameRepo(conn).get_by_id(1)
+    assert completed is not None and completed.winner_player_id == registered_id
+
+
+def test_a_name_matching_two_registered_players_keeps_its_raw_spelling(
+    conn: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    _register(conn)
+    PlayerRepo(conn).create(
+        polytopia_name=MISREAD,
+        discord_user_id="1002",
+        discord_display_name="someone else",
+    )
+
+    publisher = _run_misread_game(conn, tmp_path)
+
+    assert _fields(publisher.posts[0][1])["Players"] == f"Alpha, {MISREAD}"
+    assert _fields(publisher.posts[1][1])["Winner"] == MISREAD
+
+
+def test_a_name_with_no_registered_match_keeps_its_raw_spelling(
+    conn: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    publisher = _run_misread_game(conn, tmp_path)
+
+    assert _fields(publisher.posts[0][1])["Players"] == f"Alpha, {MISREAD}"
+    assert _fields(publisher.posts[1][1])["Winner"] == MISREAD
 
 
 # --- scanning --------------------------------------------------------------

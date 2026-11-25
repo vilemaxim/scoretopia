@@ -28,20 +28,21 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
 from scoretopia.domain.games import GameService
-from scoretopia.domain.matching import normalize_participant_name
+from scoretopia.domain.matching import is_bot_name, normalize_participant_name
 from scoretopia.domain.results import MatchOutcome
 from scoretopia.reports.dto import ReportDTO, ReportField
 from scoretopia.reports.kinds import ReportKind
 from scoretopia.reports.publisher import ReportPublisher
 from scoretopia.screenshot.models import GameBasicsExtraction, GameEndExtraction
-from scoretopia.storage.models import Game
-from scoretopia.storage.repos import CaptureManifestRepo, GameRepo
+from scoretopia.screenshot.name_matching import match_known_name
+from scoretopia.storage.models import Game, Player
+from scoretopia.storage.repos import CaptureManifestRepo, GameRepo, PlayerRepo
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +199,9 @@ class CaptureIngestService:
         game_repo: GameRepo,
         game_service: GameService,
         extractor: CaptureExtractor,
+        player_repo: PlayerRepo,
     ) -> None:
+        self._players = player_repo
         self._root = captures_path
         self._captures = capture_repo
         self._games = game_repo
@@ -260,6 +263,10 @@ class CaptureIngestService:
 
     def _process_setup(self, manifest: CaptureManifest) -> CapturePost | None:
         capture = _extract(self._extractor.extract_setup, manifest)
+        capture = replace(
+            capture,
+            basics=resolve_basics_names(capture.basics, self._players.list_all()),
+        )
         if not capture.basics.players:
             raise CaptureExtractionError("no players read")
         if capture.game_id and self._captures.has_key("setup", capture.game_id):
@@ -285,6 +292,12 @@ class CaptureIngestService:
 
     def _process_result(self, manifest: CaptureManifest) -> CapturePost | None:
         capture = _extract(self._extractor.extract_result, manifest)
+        known = self._players.list_all()
+        capture = replace(
+            capture,
+            basics=resolve_basics_names(capture.basics, known),
+            victory=resolve_victory_names(capture.victory, known),
+        )
         if not capture.victory.winner:
             raise CaptureExtractionError("no winner read")
         if not capture.basics.players and not capture.victory.players:
@@ -348,6 +361,49 @@ class CaptureIngestService:
             manifest.kind,
             manifest.relative_path,
         )
+
+
+def resolve_known_name(raw: str, known: Sequence[Player]) -> str:
+    """The registered spelling of an OCR name, or ``raw`` when none is certain.
+
+    OCR swaps ``1``/``l``/``I`` and ``0``/``O`` in small name text. A raw name
+    takes a known player's spelling when exactly one known player matches it
+    under those swaps. When several match (a misread saved earlier as a player
+    of its own sits beside the real one), the one linked to a Discord user
+    wins; with no single linked match the raw name is kept, never a guess.
+    """
+    if is_bot_name(raw):
+        return raw
+    everyone = [player.polytopia_name for player in known]
+    linked = [player.polytopia_name for player in known if player.discord_user_id]
+    return match_known_name(raw, everyone) or match_known_name(raw, linked) or raw
+
+
+def resolve_basics_names(
+    basics: GameBasicsExtraction,
+    known: Sequence[Player],
+) -> GameBasicsExtraction:
+    return replace(
+        basics,
+        players=tuple(
+            replace(player, name=resolve_known_name(player.name, known))
+            for player in basics.players
+        ),
+    )
+
+
+def resolve_victory_names(
+    victory: GameEndExtraction,
+    known: Sequence[Player],
+) -> GameEndExtraction:
+    return replace(
+        victory,
+        winner=resolve_known_name(victory.winner, known) if victory.winner else None,
+        players=tuple(
+            replace(player, name=resolve_known_name(player.name, known))
+            for player in victory.players
+        ),
+    )
 
 
 class CaptureExtractionError(ValueError):
