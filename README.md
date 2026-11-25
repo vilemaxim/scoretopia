@@ -331,6 +331,13 @@ writes `manifest.json` last. Recording reads the same directory (its own
 `skipped`, `list_end`, and `budget_reached`. It succeeds when it captured at
 least one game.
 
+`scoretopia seat capture-setup` captures the setup of every started game the
+seat has not captured before. For each card of the Ongoing tab it saves the
+card's panel and its Game Info in `setup/<key>/`, with `manifest.json` last. A
+game that has not started, a lobby or an invitation, is closed untouched and
+counted in `not_started`; it is captured once it starts. The record keeps which
+games have a captured setup, because the seat may resign only from those.
+
 Captures are written for the owner and group only: recording's user must share a
 group with seat control's user. `record.json` in the same directory is seat
 control's own record of what it has captured, and is readable by its owner

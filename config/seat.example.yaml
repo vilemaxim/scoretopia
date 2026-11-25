@@ -13,9 +13,10 @@ frames:
   path: data/seat-frames
 
 # Where captures are written: result/<key>/ with the screens of a finished
-# game and a manifest.json, and record.json, seat control's own record of what
-# it has captured. Recording reads the captures through a shared group, so this
-# is the directory its captures.path names. Default: data/captures.
+# game, setup/<key>/ with those of a started one, each with a manifest.json,
+# and record.json, seat control's own record of what it has captured. Recording
+# reads the captures through a shared group, so this is the directory its
+# captures.path names. Default: data/captures.
 captures:
   path: data/captures
 

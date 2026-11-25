@@ -1,19 +1,28 @@
-"""Capturing finished games: the Replays tab, one capture per game.
+"""Capturing games: one capture per game per kind, from the Multiplayer list.
 
-For each row of the Replays tab not captured before, the seat opens the row's
-panel, saves it, saves its Game Info, opens the replay, waits for it to play to
-its last turn, presses Finish Game, saves the end screen, and presses DONE.
-The screens go to ``<root>/result/<key>/`` with a ``manifest.json`` written
-last, which is the layout capture ingest reads (``domain/captures.py``): a
-directory with no manifest is a capture that did not finish, and ingest passes
-over it.
+A finished game: for each row of the Replays tab not captured before, the seat
+opens the row's panel, saves it, saves its Game Info, opens the replay, waits
+for it to play to its last turn, presses Finish Game, saves the end screen, and
+presses DONE. The screens go to ``<root>/result/<key>/``.
+
+A game's setup: for each card of the Ongoing tab not captured before, the seat
+opens the card's panel, saves it, saves its Game Info, and closes both. The
+screens go to ``<root>/setup/<key>/``. A card whose game has not started, a
+lobby or an invitation, is closed and not recorded, so it is captured once the
+game starts.
+
+Each directory gets a ``manifest.json`` written last, which is the layout
+capture ingest reads (``domain/captures.py``): a directory with no manifest is
+a capture that did not finish, and ingest passes over it.
 
 Seat control keeps its own record of what it has captured, ``record.json`` in
-the captures root, readable by its owner only. A row is known by a mask of its
-white text, matched with a tolerance because the list renders rows at
-sub-pixel heights; the screen layer's ``key_of()`` and ``match()`` carry the
-measurements. The record's format is the one written by the capture routine
-this module replaces, so games already captured are not captured again.
+the captures root, readable by its owner only. The seat may resign only from
+a game whose setup the record holds: ``CaptureRecord.knows()`` answers that for
+a card. A row or card is known by a mask of its white text, matched with a
+tolerance because the list renders rows at sub-pixel heights; the screen
+layer's ``key_of()`` and ``match()`` carry the measurements. The record's
+format is the one written by the capture routine this module replaces, so
+games already captured are not captured again.
 
 Nothing here reads a name: rows are told apart by their pixels, and directory
 names are hashes.
@@ -46,6 +55,7 @@ from scoretopia.seat.screen import Stop
 from scoretopia.seat.seam import Seat
 
 RESULT = "result"
+SETUP = "setup"
 RECORD_NAME = "record.json"
 MANIFEST_NAME = "manifest.json"
 #: The record's lists: per kind, exact keys and the masks rows are matched by.
@@ -71,6 +81,10 @@ SCROLL_WAIT = 10.0
 LIST_WAIT = 30.0
 #: The worst case of one capture: the replay, plus the waits around it.
 CAPTURE_BUDGET = FINISH_WAIT + 180
+#: Seconds a setup capture must have left to begin: it has five waits, each
+#: of the seat's wait at worst (20 s by default), and no replay to watch. Not
+#: measured on the live client.
+SETUP_BUDGET = 150.0
 #: The span the screen layer reads rows in: a row touching either edge is cut.
 LIST_TOP, LIST_BOTTOM = 130, 625
 #: Notches per wheel turn.
@@ -82,6 +96,15 @@ REPLAY_CONTROL = (765, 665)
 PANEL_BACK_X, PANEL_OPEN_X = 516, 760
 #: More info on a replay's panel: its x, and how far below the panel's top.
 REPLAY_INFO_X, INFO_BELOW_TOP = 676, 73
+#: More info on an Ongoing card's panel, the last of its icons.
+CARD_INFO_X = 749
+#: A started game's OPEN begins right of this x. An invitation's ACCEPT and a
+#: lobby's START GAME, which share OPEN's row, are blue here; see the screen
+#: layer's notes on ``invite_panel()``.
+WIDER_THAN_OPEN_X = 705
+#: A joined lobby's BACK is a short button centred at x 640, blue at neither
+#: of these. Any button that is blue at one of them is something else.
+WIDER_THAN_BACK_X = (575, WIDER_THAN_OPEN_X)
 
 
 @dataclass
@@ -93,6 +116,13 @@ class CaptureCounts:
     list_end: bool = False
     #: True when the sweep stopped because too little time was left.
     budget_reached: bool = False
+
+
+@dataclass
+class SetupCounts(CaptureCounts):
+    #: Cards passed over because their game has not started: lobbies and
+    #: invitations. They are not recorded.
+    not_started: int = 0
 
 
 class CaptureRecord:
@@ -117,7 +147,12 @@ class CaptureRecord:
             self._data.setdefault(key, [])
 
     def knows(self, kind: str, variants: list[str]) -> bool:
-        """Whether a row with these mask variants was captured before."""
+        """Whether a row with these mask variants was captured before.
+
+        ``variants`` is the screen layer's ``mask_variants()`` of the row, read
+        with the same kind. ``knows(SETUP, ...)`` of an Ongoing card is the
+        question "is this game's setup captured?".
+        """
         return screen.match(variants, self._data[kind + "_masks"]) is not None
 
     def add(self, kind: str, key: str, mask: str) -> None:
@@ -268,6 +303,17 @@ def _info_back(frame: Image.Image, top: int) -> int | None:
     return screen.find_blue(frame, 640, top + 200, top + 300)
 
 
+def _save_info(seat: Seat, info_x: int, top: int, path: Path) -> None:
+    """Open a panel's Game Info, save it, and close it back to the panel."""
+    press(seat, (info_x, top + INFO_BELOW_TOP))
+    info = wait_for(seat, lambda i: _info_back(i, top) is not None, "info")
+    _save(info, path)
+    press(seat, (640, _info_back(info, top)))
+    wait_for(
+        seat, lambda i: _has_panel(i) and _info_back(i, top) is None, "info_closed"
+    )
+
+
 def _await_finish(seat: Seat) -> None:
     """Watch a replay until Finish Game shows.
 
@@ -309,7 +355,7 @@ def capture_replay(
     press(seat, (640, (row[0] + row[1]) // 2))
     panel = wait_for(seat, _has_panel, "replay_panel")
     top = screen.panel_top(panel)
-    open_y = screen.find_blue(panel, PANEL_OPEN_X, top + 250, top + 420)
+    open_y = _button_y(panel, PANEL_OPEN_X, top)
     if open_y is None:
         raise ScreenStop("replay_panel_without_open", panel)
 
@@ -317,13 +363,7 @@ def capture_replay(
     captured_at = _timestamp(seat)
     _save(panel, directory / "setup.png")
 
-    press(seat, (REPLAY_INFO_X, top + INFO_BELOW_TOP))
-    info = wait_for(seat, lambda i: _info_back(i, top) is not None, "info")
-    _save(info, directory / "info.png")
-    press(seat, (640, _info_back(info, top)))
-    wait_for(
-        seat, lambda i: _has_panel(i) and _info_back(i, top) is None, "info_closed"
-    )
+    _save_info(seat, REPLAY_INFO_X, top, directory / "info.png")
 
     press(seat, (PANEL_OPEN_X, open_y))
     _await_finish(seat)
@@ -353,6 +393,14 @@ def capture_replay(
     counts.captured += 1
 
 
+def open_record(root: Path) -> CaptureRecord:
+    """The record of the captures root, which is made when it is not there."""
+    if not root.is_dir():
+        root.mkdir(mode=DIR_MODE, parents=True)
+        os.chmod(root, DIR_MODE)
+    return CaptureRecord(root / RECORD_NAME)
+
+
 def capture_finished(seat: Seat, root: Path, counts: CaptureCounts) -> None:
     """Capture every finished game not yet captured, from wherever the client is.
 
@@ -360,13 +408,100 @@ def capture_finished(seat: Seat, root: Path, counts: CaptureCounts) -> None:
     it. Raises ``Budget`` when too little time is left for another capture.
     The record is read before anything is clicked.
     """
-    if not root.is_dir():
-        root.mkdir(mode=DIR_MODE, parents=True)
-        os.chmod(root, DIR_MODE)
-    record = CaptureRecord(root / RECORD_NAME)
+    record = open_record(root)
     to_list(seat)
 
     def capture_one(row: tuple[int, int], key: str, mask: str) -> None:
         capture_replay(seat, root, record, counts, row, key, mask)
 
     sweep(seat, RESULT, "replays", record, counts, capture_one, CAPTURE_BUDGET)
+
+
+# ------------------------------------------------------------ one setup
+
+
+def _button_y(panel: Image.Image, x: int, top: int) -> int | None:
+    """The y of a blue button at ``x`` in the row of a panel's bottom buttons."""
+    return screen.find_blue(panel, x, top + 250, top + 420)
+
+
+def _open_y_or_close(seat: Seat, panel: Image.Image, top: int) -> int | None:
+    """The y of OPEN on a started game's panel; None once any other is closed.
+
+    An invitation is left by its BACK, which neither accepts nor declines. A
+    joined lobby has no OPEN, and its one button is a blue BACK at the centre.
+    A panel with a button wider than OPEN or than that BACK, such as a lobby's
+    START GAME, is none of these: nothing on it is pressed, and the action
+    stops.
+    """
+    if screen.invite_panel(panel):
+        press(seat, screen.INVITE_BACK)
+        wait_for(seat, screen.mp_list, "invite_back")
+        return None
+    open_y = _button_y(panel, PANEL_OPEN_X, top)
+    if open_y is None:
+        back_y = _button_y(panel, 640, top)
+        if back_y is None:
+            raise ScreenStop("lobby_without_back", panel)
+        if any(screen.blue(screen.px(panel, x, back_y)) for x in WIDER_THAN_BACK_X):
+            raise ScreenStop("lobby_without_back", panel)
+        press(seat, (640, back_y))
+        wait_for(seat, screen.mp_list, "panel_closed")
+        return None
+    if screen.blue(screen.px(panel, WIDER_THAN_OPEN_X, open_y)):
+        raise ScreenStop("card_panel_without_open", panel)
+    return open_y
+
+
+def capture_card(
+    seat: Seat,
+    root: Path,
+    record: CaptureRecord,
+    counts: SetupCounts,
+    row: tuple[int, int],
+    key: str,
+    mask: str,
+) -> None:
+    """Capture one game's setup from its card on the Ongoing tab."""
+    press(seat, (640, (row[0] + row[1]) // 2))
+    panel = wait_for(seat, _has_panel, "card_panel")
+    top = screen.panel_top(panel)
+    open_y = _open_y_or_close(seat, panel, top)
+    if open_y is None:
+        counts.not_started += 1
+        return
+
+    directory = _capture_dir(root, SETUP, key)
+    captured_at = _timestamp(seat)
+    _save(panel, directory / "card.png")
+    _save_info(seat, CARD_INFO_X, top, directory / "info.png")
+    # The panel's BACK shares OPEN's row.
+    press(seat, (PANEL_BACK_X, open_y))
+    wait_for(seat, screen.mp_list, "panel_closed")
+
+    write_json(
+        directory / MANIFEST_NAME,
+        {
+            "kind": SETUP,
+            "captured_at": captured_at,
+            "start": "unknown",
+            "screens": {"card": "card.png", "info": "info.png"},
+        },
+        FILE_MODE,
+    )
+    record.add(SETUP, key, mask)
+    counts.captured += 1
+
+
+def capture_setup(seat: Seat, root: Path, counts: SetupCounts) -> None:
+    """Capture the setup of every started game not yet captured.
+
+    As ``capture_finished()``, over the Ongoing tab.
+    """
+    record = open_record(root)
+    to_list(seat)
+
+    def capture_one(row: tuple[int, int], key: str, mask: str) -> None:
+        capture_card(seat, root, record, counts, row, key, mask)
+
+    sweep(seat, SETUP, "ongoing", record, counts, capture_one, SETUP_BUDGET)
