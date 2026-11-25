@@ -51,6 +51,14 @@ from scoretopia.seat.actions import (
     wait_for,
     wheel,
 )
+from scoretopia.seat.panels import (
+    OPEN_X,
+    STARTED,
+    button_y,
+    close_panel,
+    has_panel,
+    open_card,
+)
 from scoretopia.seat.screen import Stop
 from scoretopia.seat.seam import Seat
 
@@ -92,19 +100,10 @@ NOTCHES = 3
 
 #: A replay's bottom-right control: Exit while it plays, Finish Game at its end.
 REPLAY_CONTROL = (765, 665)
-#: The x of a panel's BACK and OPEN, which share a row.
-PANEL_BACK_X, PANEL_OPEN_X = 516, 760
 #: More info on a replay's panel: its x, and how far below the panel's top.
 REPLAY_INFO_X, INFO_BELOW_TOP = 676, 73
 #: More info on an Ongoing card's panel, the last of its icons.
 CARD_INFO_X = 749
-#: A started game's OPEN begins right of this x. An invitation's ACCEPT and a
-#: lobby's START GAME, which share OPEN's row, are blue here; see the screen
-#: layer's notes on ``invite_panel()``.
-WIDER_THAN_OPEN_X = 705
-#: A joined lobby's BACK is a short button centred at x 640, blue at neither
-#: of these. Any button that is blue at one of them is something else.
-WIDER_THAN_BACK_X = (575, WIDER_THAN_OPEN_X)
 
 
 @dataclass
@@ -232,26 +231,30 @@ def read_tab(seat: Seat, tab: str) -> Image.Image:
     return shown if shown is not None else wait_for(seat, screen.mp_list, "list")
 
 
-CaptureOne = Callable[[tuple[int, int], str, str], None]
+Visit = Callable[[tuple[int, int], str, str], None]
 
 
-def sweep(
+def walk(
     seat: Seat,
     kind: str,
     tab: str,
-    record: CaptureRecord,
-    counts: CaptureCounts,
-    capture_one: CaptureOne,
-    capture_budget: float,
-) -> None:
-    """Read a tab from its top to its end, capturing each row not yet captured.
+    visit: Visit,
+    visit_budget: float,
+    passed_over: Callable[[list[str]], bool] = lambda variants: False,
+) -> bool:
+    """Read a tab from its top to its end, visiting each row once.
 
-    A page is read again after each capture, since a capture leaves and
-    returns to the list. Rows seen earlier in the sweep are passed over by
-    their masks. A row cut by the tab bar or by the list's bottom edge is not
-    read, since its mask would be that of another game: it was whole on the
-    page before, or will be on the next. At the list's end the last row is
-    whole.
+    ``visit`` is given a row's span, key, and mask, and must leave the client
+    on the list. ``passed_over`` is asked first, with the row's mask variants,
+    whether to leave the row alone. Returns True when the list's end was
+    reached, False when the page cap stopped the walk. Raises ``Budget`` when
+    fewer than ``visit_budget`` seconds are left for another visit.
+
+    A page is read again after each visit, since a visit leaves and returns to
+    the list. Rows seen earlier in the walk are passed over by their masks. A
+    row cut by the tab bar or by the list's bottom edge is not read, since its
+    mask would be that of another game: it was whole on the page before, or
+    will be on the next. At the list's end the last row is whole.
     """
     seen: list[str] = []
     at_top = False
@@ -274,28 +277,45 @@ def sweep(
                     # row is still settling, and a later page reads it.
                     continue
                 seen.append(mask)
-                if record.knows(kind, variants):
-                    counts.skipped += 1
+                if passed_over(variants):
                     continue
                 todo = (row, screen.key_of(frame, row, kind), mask)
                 break
             if todo is None:
                 break
-            require_budget(seat, capture_budget)
-            capture_one(*todo)
+            require_budget(seat, visit_budget)
+            visit(*todo)
         if page == screen.PAGE_CAP:
-            return
+            return False
         require_budget(seat, SCROLL_WAIT + 30)
         if _wheel_moves_list(seat, frame, kind, NOTCHES) is None:
-            counts.list_end = True
-            return
+            return True
+    return False
+
+
+def sweep(
+    seat: Seat,
+    kind: str,
+    tab: str,
+    record: CaptureRecord,
+    counts: CaptureCounts,
+    capture_one: Visit,
+    capture_budget: float,
+) -> None:
+    """Walk a tab, capturing each row the record does not hold."""
+
+    def captured_before(variants: list[str]) -> bool:
+        if record.knows(kind, variants):
+            counts.skipped += 1
+            return True
+        return False
+
+    counts.list_end = walk(
+        seat, kind, tab, capture_one, capture_budget, captured_before
+    )
 
 
 # ------------------------------------------------------------ one replay
-
-
-def _has_panel(frame: Image.Image) -> bool:
-    return screen.panel_top(frame) is not None
 
 
 def _info_back(frame: Image.Image, top: int) -> int | None:
@@ -310,7 +330,7 @@ def _save_info(seat: Seat, info_x: int, top: int, path: Path) -> None:
     _save(info, path)
     press(seat, (640, _info_back(info, top)))
     wait_for(
-        seat, lambda i: _has_panel(i) and _info_back(i, top) is None, "info_closed"
+        seat, lambda i: has_panel(i) and _info_back(i, top) is None, "info_closed"
     )
 
 
@@ -353,9 +373,9 @@ def capture_replay(
 ) -> None:
     """Capture one finished game from its row on the Replays tab."""
     press(seat, (640, (row[0] + row[1]) // 2))
-    panel = wait_for(seat, _has_panel, "replay_panel")
+    panel = wait_for(seat, has_panel, "replay_panel")
     top = screen.panel_top(panel)
-    open_y = _button_y(panel, PANEL_OPEN_X, top)
+    open_y = button_y(panel, OPEN_X, top)
     if open_y is None:
         raise ScreenStop("replay_panel_without_open", panel)
 
@@ -365,7 +385,7 @@ def capture_replay(
 
     _save_info(seat, REPLAY_INFO_X, top, directory / "info.png")
 
-    press(seat, (PANEL_OPEN_X, open_y))
+    press(seat, (OPEN_X, open_y))
     _await_finish(seat)
     press(seat, REPLAY_CONTROL)
     end = poll_for(seat, screen.game_over, END_WAIT)
@@ -420,39 +440,6 @@ def capture_finished(seat: Seat, root: Path, counts: CaptureCounts) -> None:
 # ------------------------------------------------------------ one setup
 
 
-def _button_y(panel: Image.Image, x: int, top: int) -> int | None:
-    """The y of a blue button at ``x`` in the row of a panel's bottom buttons."""
-    return screen.find_blue(panel, x, top + 250, top + 420)
-
-
-def _open_y_or_close(seat: Seat, panel: Image.Image, top: int) -> int | None:
-    """The y of OPEN on a started game's panel; None once any other is closed.
-
-    An invitation is left by its BACK, which neither accepts nor declines. A
-    joined lobby has no OPEN, and its one button is a blue BACK at the centre.
-    A panel with a button wider than OPEN or than that BACK, such as a lobby's
-    START GAME, is none of these: nothing on it is pressed, and the action
-    stops.
-    """
-    if screen.invite_panel(panel):
-        press(seat, screen.INVITE_BACK)
-        wait_for(seat, screen.mp_list, "invite_back")
-        return None
-    open_y = _button_y(panel, PANEL_OPEN_X, top)
-    if open_y is None:
-        back_y = _button_y(panel, 640, top)
-        if back_y is None:
-            raise ScreenStop("lobby_without_back", panel)
-        if any(screen.blue(screen.px(panel, x, back_y)) for x in WIDER_THAN_BACK_X):
-            raise ScreenStop("lobby_without_back", panel)
-        press(seat, (640, back_y))
-        wait_for(seat, screen.mp_list, "panel_closed")
-        return None
-    if screen.blue(screen.px(panel, WIDER_THAN_OPEN_X, open_y)):
-        raise ScreenStop("card_panel_without_open", panel)
-    return open_y
-
-
 def capture_card(
     seat: Seat,
     root: Path,
@@ -463,21 +450,18 @@ def capture_card(
     mask: str,
 ) -> None:
     """Capture one game's setup from its card on the Ongoing tab."""
-    press(seat, (640, (row[0] + row[1]) // 2))
-    panel = wait_for(seat, _has_panel, "card_panel")
-    top = screen.panel_top(panel)
-    open_y = _open_y_or_close(seat, panel, top)
-    if open_y is None:
+    frame, panel = open_card(seat, row)
+    if panel.kind != STARTED:
+        close_panel(seat, panel)
         counts.not_started += 1
         return
+    top = screen.panel_top(frame)
 
     directory = _capture_dir(root, SETUP, key)
     captured_at = _timestamp(seat)
-    _save(panel, directory / "card.png")
+    _save(frame, directory / "card.png")
     _save_info(seat, CARD_INFO_X, top, directory / "info.png")
-    # The panel's BACK shares OPEN's row.
-    press(seat, (PANEL_BACK_X, open_y))
-    wait_for(seat, screen.mp_list, "panel_closed")
+    close_panel(seat, panel)
 
     write_json(
         directory / MANIFEST_NAME,

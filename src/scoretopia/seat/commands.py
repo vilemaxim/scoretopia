@@ -19,7 +19,8 @@ from pathlib import Path
 
 from PIL import Image
 
-from scoretopia.seat import actions, capture, screen
+from scoretopia.orders import UnknownOrdersVersionError, read_orders
+from scoretopia.seat import actions, capture, invitations, screen
 from scoretopia.seat.seam import Seat
 
 #: The action name of ``scoretopia seat main-menu``.
@@ -28,6 +29,8 @@ MAIN_MENU = "main-menu"
 CAPTURE_FINISHED = "capture-finished"
 #: The action name of ``scoretopia seat capture-setup``.
 CAPTURE_SETUP = "capture-setup"
+#: The action name of ``scoretopia seat accept-invitations``.
+ACCEPT_INVITATIONS = "accept-invitations"
 
 
 class Outcome(Enum):
@@ -148,11 +151,12 @@ def capture_finished(seat: Seat, captures_root: Path, frames_dir: Path) -> SeatR
     manifest, which ingest ignores; the game is not recorded, so the next run
     captures it again.
     """
-    return _capture(
+    return _counted(
         seat,
         CAPTURE_FINISHED,
         capture.CaptureCounts(),
         lambda counts: capture.capture_finished(seat, captures_root, counts),
+        lambda counts: counts.captured,
         frames_dir,
     )
 
@@ -166,19 +170,70 @@ def capture_setup(seat: Seat, captures_root: Path, frames_dir: Path) -> SeatResu
     later run. A capture that stops half way leaves a directory with no
     manifest and is not recorded, so the next run captures it again.
     """
-    return _capture(
+    return _counted(
         seat,
         CAPTURE_SETUP,
         capture.SetupCounts(),
         lambda counts: capture.capture_setup(seat, captures_root, counts),
+        lambda counts: counts.captured,
         frames_dir,
     )
 
 
-def _capture[C: capture.CaptureCounts](
-    seat: Seat, action: str, counts: C, run: Callable[[C], None], frames_dir: Path
+def accept_invitations(
+    seat: Seat,
+    orders_path: Path,
+    seat_name: str | None,
+    frames_dir: Path,
+    read_names: invitations.NameReader,
 ) -> SeatResult:
-    """Run one capture sweep and report its counts, however it ended."""
+    """Accept every invitation from known players, then return to the menu.
+
+    The orders are read once, before anything is clicked. With no orders
+    file, or no name for the seat, nothing is accepted and every invitation
+    is left unanswered. Succeeds when it accepted at least one. A run that
+    accepted none and could not read the names of some fails with
+    ``names_unread``: a reader that does not work must not pass for a list of
+    strangers.
+    """
+    try:
+        known = read_orders(orders_path).known_players
+    except UnknownOrdersVersionError:
+        return SeatResult(
+            ACCEPT_INVITATIONS,
+            Outcome.FAILED,
+            code="orders_version",
+            counts=asdict(invitations.AcceptCounts()),
+        )
+    counts = invitations.AcceptCounts()
+    result = _counted(
+        seat,
+        ACCEPT_INVITATIONS,
+        counts,
+        lambda counts: invitations.accept_invitations(
+            seat, known, seat_name, read_names, counts
+        ),
+        lambda counts: counts.accepted,
+        frames_dir,
+    )
+    if result.outcome is Outcome.NOTHING_TO_DO and counts.unread:
+        return replace(result, outcome=Outcome.FAILED, code="names_unread")
+    return result
+
+
+def _counted[C: capture.CaptureCounts | invitations.AcceptCounts](
+    seat: Seat,
+    action: str,
+    counts: C,
+    run: Callable[[C], None],
+    done: Callable[[C], int],
+    frames_dir: Path,
+) -> SeatResult:
+    """Run an action that fills in ``counts`` and report them, however it
+    ended, with the client back on the main menu.
+
+    ``done`` is how many things the action did: with at least one it succeeded.
+    """
     try:
         try:
             try:
@@ -192,7 +247,7 @@ def _capture[C: capture.CaptureCounts](
             return replace(result, counts=asdict(counts))
     except SEAT_ERRORS as error:
         return replace(failure(action, error), counts=asdict(counts))
-    if counts.captured:
+    if done(counts):
         outcome, code = Outcome.SUCCEEDED, None
     elif counts.budget_reached:
         outcome, code = Outcome.FAILED, "budget"

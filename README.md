@@ -338,6 +338,18 @@ game that has not started, a lobby or an invitation, is closed untouched and
 counted in `not_started`; it is captured once it starts. The record keeps which
 games have a captured setup, because the seat may resign only from those.
 
+`scoretopia seat accept-invitations` opens each invitation on the Ongoing tab
+and reads the names it shows with OCR. It accepts when every human player shown,
+other than the seat, is a known player in the orders file (`orders.path`), and
+otherwise closes the invitation and leaves it pending. It never declines. A name
+is matched as capture ingest matches one, so a digit read as a letter still
+matches; a name that matches no known player, or two, is not known. The seat
+finds itself among the names by `seat_name` in its config: without it, or
+without an orders file, nothing is accepted. The line carries `accepted` and
+`unanswered`, and never a name; `unread` counts the unanswered ones whose
+names could not be read at all, and a run that accepted none and has any of
+those fails with `names_unread`.
+
 Captures are written for the owner and group only: recording's user must share a
 group with seat control's user. `record.json` in the same directory is seat
 control's own record of what it has captured, and is readable by its owner

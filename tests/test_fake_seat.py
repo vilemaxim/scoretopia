@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import pytest
 from fake_seat import (
+    AFTER_ACCEPT,
     BACK_ARROW,
     FORBIDDEN_KINDS,
+    INVITE_ACCEPT,
     INVITE_DECLINE,
     FakeScreen,
     FinishedGame,
@@ -18,9 +20,12 @@ from fake_seat import (
     State,
     draw_card_info,
     draw_card_panel,
+    draw_invitation,
+    draw_invited_lobby,
     draw_joined_lobby,
     draw_ongoing,
     draw_replays,
+    draw_tribe_pick,
     draw_unknown,
     ongoing_states,
     replay_states,
@@ -28,7 +33,7 @@ from fake_seat import (
     seat_states,
 )
 
-from scoretopia.seat import screen
+from scoretopia.seat import panels, screen
 
 #: What the screen layer makes of each drawn state: the tests that must hold.
 RECOGNISED_AS = {
@@ -338,3 +343,55 @@ def test_the_icons_beside_more_info_on_a_cards_panel_are_forbidden() -> None:
 
     with pytest.raises(ForbiddenInput, match="delete"):
         fake.click(700, 250)
+
+
+# ------------------------------------------------------------ accepting
+
+
+def test_the_drawn_invitation_reads_as_one_with_accept_found_beside_its_label() -> None:
+    frame = draw_invitation()
+
+    panel = panels.read_panel(frame)
+
+    assert panel.kind == panels.INVITATION
+    assert INVITE_ACCEPT[0] <= panels.ACCEPT_X < INVITE_ACCEPT[2]
+    assert INVITE_ACCEPT[1] <= panel.y < INVITE_ACCEPT[3]
+    # At its centre the label breaks the button's blue, as on the live client.
+    top = screen.panel_top(frame)
+    assert panels.button_y(frame, panels.ACCEPT_X, top) is None
+    assert panel.y is not None
+
+
+def test_the_drawn_tribe_panel_shows_pick() -> None:
+    assert screen.pick_ready(draw_tribe_pick())
+
+
+def test_the_drawn_lobby_after_an_accept_is_a_joined_lobby() -> None:
+    frame = draw_invited_lobby(OngoingGame(0))
+
+    assert panels.joined_lobby(frame)
+    assert not screen.invite_panel(frame)
+    assert not screen.mp_list(frame)
+
+
+def test_leave_on_a_joined_lobby_is_forbidden() -> None:
+    fake = FakeScreen(ongoing_states([OngoingGame(0, "invitation")]), "joined:0@0")
+
+    with pytest.raises(ForbiddenInput, match="delete"):
+        fake.click(760, 200)
+
+
+def test_after_an_accept_the_lists_back_arrow_reopens_the_tribe_screen() -> None:
+    states = ongoing_states([OngoingGame(0, "invitation")])
+    fake = FakeScreen(states, "joined:0@0")
+
+    fake.click(640, 516)
+    on_list = fake.state
+    fake.click(31, 31)
+    reopened = screen.list_back_tribe(fake.grab())
+    fake.click(31, 31)
+    fake.click(31, 31)
+
+    assert on_list == "ongoing@0" + AFTER_ACCEPT
+    assert reopened
+    assert fake.visited[-3:] == ["reopened_tribe", "ongoing@0", "main_menu"]

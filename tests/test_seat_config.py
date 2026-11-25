@@ -39,6 +39,8 @@ def test_settings_are_read_and_a_relative_path_resolves_beside_the_file(
     assert config == SeatConfig(
         frames_path=(tmp_path / "seen").resolve(),
         captures_path=(tmp_path / "shots").resolve(),
+        orders_path=(tmp_path / "data" / "orders.json").resolve(),
+        seat_name=None,
         budget_seconds=600,
         display=":7",
         x_user="game",
@@ -66,6 +68,8 @@ def test_the_seat_configuration_has_no_field_for_a_token_or_a_database() -> None
     assert names == {
         "frames_path",
         "captures_path",
+        "orders_path",
+        "seat_name",
         "budget_seconds",
         "display",
         "x_user",
@@ -99,3 +103,18 @@ def test_a_file_that_is_not_yaml_is_a_config_error(tmp_path: Path) -> None:
 def test_a_key_beside_captures_path_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="captures.poll_seconds"):
         load_seat_config(_write(tmp_path, "captures:\n  poll_seconds: 5\n"))
+
+
+def test_the_orders_path_and_the_seats_name_are_read(tmp_path: Path) -> None:
+    body = "orders:\n  path: shared/orders.json\nseat_name: ' Scorekeeper '\n"
+
+    config = load_seat_config(_write(tmp_path, body))
+
+    assert config.orders_path == (tmp_path / "shared" / "orders.json").resolve()
+    assert config.seat_name == "Scorekeeper"
+
+
+@pytest.mark.parametrize("value", ["''", "'  '", "7", "[a]"])
+def test_a_seat_name_must_be_text(value: str, tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="seat_name"):
+        load_seat_config(_write(tmp_path, f"seat_name: {value}\n"))
