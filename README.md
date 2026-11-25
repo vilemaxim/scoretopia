@@ -298,6 +298,38 @@ scoretopia report run --all
 
 ---
 
+## Seat control
+
+Seat control drives the game client on the machine that runs it. It is the same
+package, run as a different user with a different config file, so that it never
+holds the Discord token or the database.
+
+```bash
+cp config/seat.example.yaml config/seat.yaml
+scoretopia seat main-menu --config config/seat.yaml
+```
+
+`scoretopia seat main-menu` returns the client to the main menu. Like every
+seat command it prints one line of JSON and says how it ended by its exit code:
+
+| Exit code | Outcome | Meaning |
+| --- | --- | --- |
+| 0 | `succeeded` | The action reached its end |
+| 10 | `nothing_to_do` | There was nothing to do |
+| 20 | `unknown_screen` | It stopped on a screen it did not recognise |
+| 1 | `failed` | Anything else; `code` says what |
+
+```json
+{"action": "main-menu", "outcome": "unknown_screen", "frame": "unknown-20260101T120000Z-main-menu.png"}
+```
+
+On an unknown screen the frame is saved under `frames.path`, readable by its
+owner only, because a frame can show player names. Never commit one or attach
+one to an issue.
+
+Seat control needs `xwd`, `xdotool`, and ImageMagick on the game machine, and a
+1280x720 X display.
+
 ## Development
 
 ```bash

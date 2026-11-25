@@ -32,9 +32,11 @@ name, or an id; card keys are hashes of white-text bit masks.
 Call configure() with the run's arguments, then use session() around the
 work, so frames go to a private temporary directory that is removed after.
 
-The waits and moves call the frame, input, and clock functions directly.
-Putting them behind a seam is later work; until then only the screen tests
-and the list and mask functions can be tested without a display.
+The waits and moves here call the frame, input, and clock functions directly,
+so only the screen tests and the list and mask functions can be tested without
+a display. New code does not call them: actions take a Seat (seam.py) and are
+rewritten in actions.py as each one is needed. These stay until the last
+caller outside this repository is gone.
 """
 
 import contextlib

@@ -1,0 +1,24 @@
+# Seat control configuration example
+#
+# Copy to config/seat.yaml on the machine that runs the game client. This file
+# is separate from scoretopia.yaml on purpose: seat control runs as its own
+# user and holds no Discord token and no database (ADR 003). A key that is not
+# listed here is refused.
+# Relative paths resolve against the directory containing this file.
+
+# Where the frame of a screen seat control did not recognise is saved. Frames
+# can show player names: the directory and its files are readable by their
+# owner only. Default: data/seat-frames.
+frames:
+  path: data/seat-frames
+
+# Seconds a command may spend before it stops itself. Must be under an hour, so
+# that one hourly run never overlaps the next. Default: 3300.
+budget_seconds: 3300
+
+# The X display the game client runs on. Default: ":99".
+display: ":99"
+
+# The user X commands run as when a command is itself run as root.
+# Default: steam.
+x_user: steam
