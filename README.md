@@ -221,8 +221,9 @@ game start and end to the reports channel.
 The bot also writes the orders file at `orders.path`: the registered players'
 Polytopia names, which are the players whose invitations the seat accepts. It
 rewrites the file at start and whenever a player registers. Seat control reads
-the file and never opens the database, so the file must be readable by the
-user seat control runs as.
+the file and never opens the database. The file is written readable by its
+owner and group only, since it holds names: the user seat control runs as must
+share a group with the bot's user and be able to reach the directory.
 
 To process the captures directory once without Discord, printing each post to
 the terminal instead (for testing):

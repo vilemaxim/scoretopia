@@ -1,6 +1,6 @@
 """The orders file: recording writes it, seat control reads it.
 
-Invented names only; no network and no real file outside ``tmp_path``.
+Invented names only, no network, and nothing written outside ``tmp_path``.
 """
 
 from __future__ import annotations
@@ -53,7 +53,19 @@ def test_the_file_states_its_version_and_an_empty_list_of_games_to_start(
     }
 
 
-@pytest.mark.parametrize("content", [None, "", "{not json", "[]", '{"version": 1}'])
+@pytest.mark.parametrize(
+    "content",
+    [
+        None,
+        "",
+        "{not json",
+        "[]",
+        "{}",
+        '{"known_players": ["Alpha"]}',
+        '{"version": 1}',
+        '{"version": 1, "known_players": "Alpha"}',
+    ],
+)
 def test_a_missing_empty_or_malformed_file_reads_as_no_known_players(
     tmp_path: Path,
     content: str | None,
@@ -234,7 +246,8 @@ def test_a_failed_rewrite_after_a_change_does_not_undo_the_registration(
     assert "orders file not written" in caplog.text
 
 
-def test_building_the_bot_writes_the_orders_file_before_it_connects(
+def test_recording_writes_the_orders_as_it_starts_and_after_each_registration(
+    conn: sqlite3.Connection,
     tmp_path: Path,
 ) -> None:
     from scoretopia import cli
@@ -245,8 +258,22 @@ def test_building_the_bot_writes_the_orders_file_before_it_connects(
     config_file.write_text((example / "scoretopia.example.yaml").read_text())
     config = load_config(config_file)
 
-    cli._build_discord_bot(config, "not-a-real-token")
+    service = cli._build_player_service(config, PlayerRepo(conn))
 
     assert config.orders.path == tmp_path / "data" / "orders.json"
-    assert read_orders(config.orders.path) == Orders()
     assert config.orders.path.is_file()
+    assert read_orders(config.orders.path) == Orders()
+
+    _register(service, "1001", "Alpha")
+
+    assert read_orders(config.orders.path) == Orders(known_players=("Alpha",))
+
+
+def test_the_orders_file_is_readable_by_its_group_and_not_by_others(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "orders.json"
+
+    write_orders(path, Orders(known_players=("Alpha",)))
+
+    assert path.stat().st_mode & 0o777 == 0o640

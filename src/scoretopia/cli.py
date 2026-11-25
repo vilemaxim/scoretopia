@@ -136,20 +136,29 @@ def _positive_int(value: str) -> int:
     return number
 
 
+def _build_player_service(
+    config: ScoretopiaConfig,
+    player_repo: PlayerRepo,
+) -> PlayerService:
+    """The player service that keeps the orders file current.
+
+    Writes the orders once now, and again after every change to who is
+    registered.
+    """
+    orders = OrdersKeeper(player_repo, config.orders.path)
+    orders.refresh_or_log()
+    return PlayerService(player_repo, on_players_changed=orders.refresh_or_log)
+
+
 def _build_discord_bot(config: ScoretopiaConfig, token: str) -> DiscordBotAdapter:
     config.database.path.parent.mkdir(parents=True, exist_ok=True)
 
     conn = open_database(str(config.database.path))
     player_repo = PlayerRepo(conn)
-    orders = OrdersKeeper(player_repo, config.orders.path)
-    orders.refresh()
 
     return DiscordBotAdapter(
         config=config,
-        player_service=PlayerService(
-            player_repo,
-            on_players_changed=orders.refresh_or_log,
-        ),
+        player_service=_build_player_service(config, player_repo),
         report_service=ReportService(
             GameRepo(conn),
             GameParticipantRepo(conn),

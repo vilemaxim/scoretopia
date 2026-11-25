@@ -55,9 +55,10 @@ def write_orders(path: Path, orders: Orders) -> None:
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        # Recording and seat control run as different users; the reader needs
-        # to read the file, and mkstemp creates it owner-only.
-        os.chmod(temporary, 0o644)
+        # Recording and seat control run as different users. mkstemp creates
+        # the file owner-only; the group may read it, so the seat's user reads
+        # it by sharing a group with recording. Others may not: it holds names.
+        os.chmod(temporary, 0o640)
         os.replace(temporary, path)
     except BaseException:
         Path(temporary).unlink(missing_ok=True)
@@ -68,23 +69,21 @@ def read_orders(path: Path) -> Orders:
     """The orders at ``path``; no orders when it is missing or unreadable.
 
     A file that cannot be read gives empty orders, so a run with a broken file
-    accepts nothing. A file of an unknown version is refused instead: it was
-    written by other code, and guessing at its meaning could act on it wrongly.
+    accepts nothing. A file that states another version is refused instead: it
+    was written by other code, and guessing at its meaning could act on it
+    wrongly.
     """
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return Orders()
     except (OSError, ValueError):
-        logger.warning("orders file unreadable; treating as no orders")
-        return Orders()
-    if not isinstance(raw, dict):
-        logger.warning("orders file malformed; treating as no orders")
-        return Orders()
-    version = raw.get("version")
-    if version != ORDERS_VERSION:
+        return _no_orders("unreadable")
+    if not isinstance(raw, dict) or not isinstance(raw.get("version"), int):
+        return _no_orders("malformed")
+    if raw["version"] != ORDERS_VERSION:
         raise UnknownOrdersVersionError(
-            f"orders file is version {version}; this code reads version "
+            f"orders file is version {raw['version']}; this code reads version "
             f"{ORDERS_VERSION}"
         )
     names = raw.get("known_players")
@@ -95,19 +94,23 @@ def read_orders(path: Path) -> Orders:
         or not isinstance(games, list)
         or not all(isinstance(game, dict) for game in games)
     ):
-        logger.warning("orders file malformed; treating as no orders")
-        return Orders()
+        return _no_orders("malformed")
     return Orders(known_players=tuple(names), start_games=tuple(games))
 
 
-class _Players(Protocol):
+def _no_orders(why: str) -> Orders:
+    logger.warning("orders file %s; treating as no orders", why)
+    return Orders()
+
+
+class _PlayerSource(Protocol):
     def list_all(self) -> Sequence[Player]: ...
 
 
 class OrdersKeeper:
     """Recording's side: writes the orders from what the players table holds."""
 
-    def __init__(self, player_repo: _Players, path: Path) -> None:
+    def __init__(self, player_repo: _PlayerSource, path: Path) -> None:
         self._players = player_repo
         self._path = path
 
@@ -121,12 +124,16 @@ class OrdersKeeper:
         write_orders(self._path, Orders(known_players=tuple(known)))
 
     def refresh_or_log(self) -> None:
-        """Refresh after a change; a failed write is logged, not raised.
+        """Refresh; a failed write is logged, not raised.
 
-        The change itself is already saved, and the next refresh writes the
-        file again, so failing the caller would only lose the change's reply.
+        What prompted the refresh is already saved, and the next refresh
+        writes the whole file again, so failing the caller would cost more
+        than it protects: recording keeps running with stale orders, under
+        which the seat only does less.
         """
         try:
             self.refresh()
         except OSError:
-            logger.exception("orders file not written; it is rewritten on restart")
+            logger.exception(
+                "orders file not written; the next change or restart rewrites it"
+            )
