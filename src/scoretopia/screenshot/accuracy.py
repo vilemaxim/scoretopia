@@ -4,10 +4,12 @@ Compares each extraction field against its same-stem ``.json`` golden and
 prints counts only — never field values — so the output carries no player
 names or game details from the samples.
 
-Player names are first resolved against a roster, as production resolves
-them against the players table: the roster is every name in the goldens, and
-an OCR name takes a roster spelling only when ``match_known_name`` finds
-exactly one.
+Player names are first resolved against a roster, as capture ingest resolves
+them against the players table (``domain.captures.resolve_known_name``): the
+roster is every name in the goldens, and an OCR name takes a roster spelling
+only when ``match_known_name`` finds exactly one. Ingest goes one step
+further when several players match, preferring the one linked to a Discord
+user; a roster of golden names has no such link.
 """
 
 from __future__ import annotations

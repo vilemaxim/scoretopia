@@ -94,6 +94,7 @@ def _build_capture_service(
         game_repo=game_repo,
         game_service=game_service,
         extractor=OcrCaptureExtractor(),
+        player_repo=PlayerRepo(conn),
     )
 
 

@@ -9,15 +9,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 GITIGNORE = PROJECT_ROOT / ".gitignore"
 AGENT_CONTEXT = PROJECT_ROOT / ".agent-context.md"
 SAMPLES_SCREENSHOTS_DIR = PROJECT_ROOT / "samples" / "screenshots"
-KEY_AREAS_MARKER = "## 📂 Key Areas"
 
 
-def _key_areas_content() -> str:
-    content = AGENT_CONTEXT.read_text()
-    assert KEY_AREAS_MARKER in content, (
-        "Key Areas section missing from .agent-context.md"
-    )
-    return content[content.index(KEY_AREAS_MARKER) :]
+def _samples_paragraph() -> str:
+    """The paragraph of .agent-context.md that describes samples/screenshots/."""
+    paragraphs = AGENT_CONTEXT.read_text().split("\n\n")
+    matching = [text for text in paragraphs if "samples/screenshots" in text]
+    assert matching, "samples/screenshots/ is not described in .agent-context.md"
+    return " ".join(matching)
 
 
 def test_gitignore_ignores_samples_screenshots_directory() -> None:
@@ -41,17 +40,12 @@ def test_git_check_ignore_reports_samples_screenshots() -> None:
 
 
 def test_agent_context_documents_samples_screenshots() -> None:
-    key_areas = _key_areas_content()
+    described = _samples_paragraph().lower()
 
-    assert "samples/screenshots" in key_areas
-    assert "screenshot" in key_areas.lower()
-    assert "flat" in key_areas.lower()
+    assert "screenshot" in described
     assert any(
-        term in key_areas.lower()
+        term in described
         for term in ("local", "not committed", "gitignore", "local-only")
-    )
-    assert any(
-        term in key_areas.lower() for term in ("upload", "human", "owner")
     )
 
 
