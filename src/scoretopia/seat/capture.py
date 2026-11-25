@@ -253,8 +253,9 @@ def walk(
     again, still passing over the rows it has seen. ``passed_over`` is asked
     first, of the frame the row was read from, whether to leave the row alone.
     Returns True when the list's end was reached, False when the page cap
-    stopped the walk, or more restarts from the top than the page cap. Raises ``Budget`` when fewer than ``visit_budget``
-    seconds are left for another visit.
+    stopped the walk, or more restarts from the top than the page cap. Raises
+    ``Budget`` when fewer than ``visit_budget`` seconds are left for another
+    visit.
 
     A page is read again after each visit, since a visit leaves and returns to
     the list. Rows seen earlier in the walk are passed over by their masks. A
