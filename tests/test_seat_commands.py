@@ -123,20 +123,25 @@ def test_two_unknown_screens_in_the_same_second_keep_both_frames(
     assert {path.name for path in tmp_path.iterdir()} == {first.frame, second.frame}
 
 
-def test_a_screen_that_never_arrives_is_a_failure_with_its_code(
+def test_a_screen_that_never_arrives_saves_the_frame_it_waited_on(
     tmp_path: Path,
 ) -> None:
     states = without_exits(seat_states(), "multiplayer")
 
     result = commands.main_menu(FakeScreen(states, "multiplayer").seat(), tmp_path)
 
-    assert result.exit_code == 1
-    assert json.loads(result.line()) == {
+    assert result.exit_code == 20
+    line = json.loads(result.line())
+    assert line == {
         "action": "main-menu",
-        "outcome": "failed",
+        "outcome": "unknown_screen",
         "code": "timeout_main_menu",
+        "frame": line["frame"],
     }
-    assert list(tmp_path.iterdir()) == []
+    (saved,) = tmp_path.iterdir()
+    assert saved.name == line["frame"]
+    with Image.open(saved) as im:
+        assert screen.mp_list(im.convert("RGB"))
 
 
 def test_running_out_of_budget_is_a_failure(tmp_path: Path) -> None:

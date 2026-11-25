@@ -323,6 +323,19 @@ seat command it prints one line of JSON and says how it ended by its exit code:
 {"action": "main-menu", "outcome": "unknown_screen", "frame": "unknown-20260101T120000Z-main-menu.png"}
 ```
 
+`scoretopia seat capture-finished` captures every finished game the seat has not
+captured before. For each row of the Replays tab it saves the game's panel, its
+Game Info, and the end screen under `captures.path`, in `result/<key>/`, and
+writes `manifest.json` last. Recording reads the same directory (its own
+`captures.path`) and posts each game once. The line also carries `captured`,
+`skipped`, `list_end`, and `budget_reached`. It succeeds when it captured at
+least one game.
+
+Captures are written for the owner and group only: recording's user must share a
+group with seat control's user. `record.json` in the same directory is seat
+control's own record of what it has captured, and is readable by its owner
+only.
+
 On an unknown screen the frame is saved under `frames.path`, readable by its
 owner only, because a frame can show player names. Never commit one or attach
 one to an issue.

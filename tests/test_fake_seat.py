@@ -12,9 +12,13 @@ from fake_seat import (
     FORBIDDEN_KINDS,
     INVITE_DECLINE,
     FakeScreen,
+    FinishedGame,
     ForbiddenInput,
     State,
+    draw_replays,
     draw_unknown,
+    replay_states,
+    scroll_offsets,
     seat_states,
 )
 
@@ -185,3 +189,85 @@ def test_declining_an_invitation_is_refused() -> None:
         fake.click(x, y)
 
     assert fake.state == "invitation"
+
+
+# ------------------------------------------------------------ the Replays tab
+
+
+def test_a_state_changes_by_itself_when_its_time_is_up() -> None:
+    states = replay_states([FinishedGame(0, plays_for=40)], loads_for=8)
+    fake = FakeScreen(states, "loading:0@0")
+
+    fake.sleep(7)
+    fake.grab()
+    still_loading = fake.state
+    fake.sleep(2)
+    playing = screen.exit_blue(fake.grab())
+    fake.sleep(39)
+    fake.grab()
+
+    assert still_loading == "loading:0@0"
+    assert playing
+    assert fake.state == "finish:0@0"
+    assert screen.finish_green(fake.grab())
+
+
+def test_the_wheel_moves_a_long_list_and_stops_at_its_ends() -> None:
+    fake = FakeScreen(replay_states([FinishedGame(n) for n in range(5)]), "replays@0")
+
+    fake.scroll(640, 400, -3)
+    at_top = fake.state
+    for _ in range(4):
+        fake.scroll(640, 400, 3)
+
+    assert at_top == "replays@0"
+    assert fake.state == "replays@100"
+    assert fake.log[0] == ("scroll", 640, 400, -3)
+
+
+def test_a_short_list_does_not_scroll() -> None:
+    assert scroll_offsets(4) == [0]
+    assert scroll_offsets(5) == [0, 50, 100]
+
+
+@pytest.mark.parametrize("offset", scroll_offsets(5))
+def test_the_drawn_replays_tab_is_the_list_with_its_whole_rows(offset: int) -> None:
+    games = [FinishedGame(n) for n in range(5)]
+    frame = draw_replays(games, offset)
+
+    rows = screen.bands(frame)
+
+    assert screen.mp_list(frame)
+    assert screen.selected_tab(frame) == "replays"
+    assert all(bottom - top == 60 for top, bottom in rows)
+    keys = [screen.key_of(frame, row, "result") for row in rows]
+    assert None not in keys
+    assert len(set(keys)) == len(keys)
+
+
+def test_a_row_keeps_its_key_wherever_the_list_is_scrolled() -> None:
+    games = [FinishedGame(n) for n in range(5)]
+    middle = draw_replays(games, 50)
+    end = draw_replays(games, 100)
+
+    keys_in_the_middle = [
+        screen.key_of(middle, row, "result") for row in screen.bands(middle)
+    ]
+    keys_at_the_end = [screen.key_of(end, row, "result") for row in screen.bands(end)]
+
+    assert keys_in_the_middle[1:] == keys_at_the_end
+
+
+def test_the_profile_icon_on_the_list_is_forbidden() -> None:
+    # A replay's Exit and Finish Game sit at the same point.
+    fake = FakeScreen(replay_states([FinishedGame(0)]), "replays@0")
+
+    with pytest.raises(ForbiddenInput, match="profile"):
+        fake.click(765, 665)
+
+
+def test_the_panels_other_icons_are_forbidden() -> None:
+    fake = FakeScreen(replay_states([FinishedGame(0)]), "panel:0@0")
+
+    with pytest.raises(ForbiddenInput, match="delete"):
+        fake.click(560, 250)

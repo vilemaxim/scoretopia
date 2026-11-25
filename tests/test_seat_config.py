@@ -22,18 +22,23 @@ def test_an_empty_file_gives_the_defaults(tmp_path: Path) -> None:
 
     assert config.frames_path == (tmp_path / "data" / "seat-frames").resolve()
     assert config.budget_seconds == 3300
+    assert config.captures_path == (tmp_path / "data" / "captures").resolve()
     assert config.display == ":99"
 
 
 def test_settings_are_read_and_a_relative_path_resolves_beside_the_file(
     tmp_path: Path,
 ) -> None:
-    body = 'frames:\n  path: seen\nbudget_seconds: 600\ndisplay: ":7"\nx_user: game\n'
+    body = (
+        "frames:\n  path: seen\ncaptures:\n  path: shots\n"
+        'budget_seconds: 600\ndisplay: ":7"\nx_user: game\n'
+    )
 
     config = load_seat_config(_write(tmp_path, body))
 
     assert config == SeatConfig(
         frames_path=(tmp_path / "seen").resolve(),
+        captures_path=(tmp_path / "shots").resolve(),
         budget_seconds=600,
         display=":7",
         x_user="game",
@@ -58,7 +63,13 @@ def test_a_recording_setting_is_refused(body: str, tmp_path: Path) -> None:
 def test_the_seat_configuration_has_no_field_for_a_token_or_a_database() -> None:
     names = {field.name for field in dataclasses.fields(SeatConfig)}
 
-    assert names == {"frames_path", "budget_seconds", "display", "x_user"}
+    assert names == {
+        "frames_path",
+        "captures_path",
+        "budget_seconds",
+        "display",
+        "x_user",
+    }
 
 
 @pytest.mark.parametrize("budget", ["0", "-5", "3600", "true", "'60'"])
@@ -83,3 +94,8 @@ def test_frames_must_be_a_mapping(body: str, tmp_path: Path) -> None:
 def test_a_file_that_is_not_yaml_is_a_config_error(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="unreadable"):
         load_seat_config(_write(tmp_path, "frames: [unclosed\n"))
+
+
+def test_a_key_beside_captures_path_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="captures.poll_seconds"):
+        load_seat_config(_write(tmp_path, "captures:\n  poll_seconds: 5\n"))
