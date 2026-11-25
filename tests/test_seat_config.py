@@ -72,3 +72,14 @@ def test_a_budget_must_be_a_whole_number_of_seconds_under_an_hour(
 def test_a_missing_file_is_an_error(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="missing"):
         load_seat_config(tmp_path / "absent.yaml")
+
+
+@pytest.mark.parametrize("body", ["frames: false\n", "frames: 0\n", "frames: ''\n"])
+def test_frames_must_be_a_mapping(body: str, tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="frames must be a mapping"):
+        load_seat_config(_write(tmp_path, body))
+
+
+def test_a_file_that_is_not_yaml_is_a_config_error(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="unreadable"):
+        load_seat_config(_write(tmp_path, "frames: [unclosed\n"))

@@ -10,7 +10,9 @@ the two faults the live client shows:
 - ``stale_until_pointer_leaves``: after a click changes the screen, frames show
   the old screen until the pointer has moved off the button clicked.
 - ``drop_unhovered_clicks``: a click is lost unless an earlier, separate input
-  had already moved the pointer onto the button.
+  had already moved the pointer onto the button and time has passed since.
+
+``hovering_grabs`` counts the frames taken while the pointer was on a button.
 
 A click inside a box a state lists as forbidden raises ``ForbiddenInput``. A
 click that lands on no button is logged with no button name, and is listed by
@@ -18,8 +20,9 @@ click that lands on no button is logged with no button name, and is listed by
 
 Frames carry no text at all, so no name, real or invented, appears in them.
 Button boxes come from the measurements recorded in the screen layer's
-comments; the back arrows' boxes are a square around the point the arrow is
-drawn at.
+comments. A back arrow's box is the square the screen tests read as the back
+button's own, x and y 20 to 42; the real button is larger, so a click the fake
+counts as a miss may still land on the live one, never the other way round.
 """
 
 from __future__ import annotations
@@ -48,7 +51,7 @@ GREY = (204, 204, 204)
 RED = (204, 41, 0)
 GREEN = (90, 200, 90)
 
-BACK_ARROW: Box = (14, 14, 50, 50)
+BACK_ARROW: Box = (20, 20, 43, 43)
 MENU_MULTIPLAYER: Box = (520, 384, 760, 424)
 INVITE_DECLINE: Box = (720, 207, 802, 229)
 INVITE_BACK: Box = (477, 480, 555, 515)
@@ -56,6 +59,8 @@ INVITE_ACCEPT: Box = (698, 480, 802, 517)
 LOBBY_START_GAME: Box = (640, 480, 802, 517)
 LOBBY_LEAVE: Box = (477, 480, 555, 515)
 SETTINGS_BODY: Box = (0, 60, 1280, 720)
+PROFILE_BODY: Box = (0, 60, 1280, 720)
+TEAL = (40, 170, 200)
 
 #: The kinds of input no code in seat control may send.
 FORBIDDEN_KINDS = ("decline", "delete", "start_game", "profile", "settings")
@@ -84,6 +89,11 @@ class State:
     #: Key name to the state pressing it leads to.
     on_key: Mapping[str, str] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        unknown = set(self.forbidden) - set(FORBIDDEN_KINDS)
+        if unknown:
+            raise ValueError(f"not a forbidden kind: {sorted(unknown)}")
+
 
 class FakeScreen:
     def __init__(
@@ -110,6 +120,8 @@ class FakeScreen:
         #: None), ("key", name).
         self.log: list[tuple] = []
         self.dropped_clicks = 0
+        self.hovering_grabs = 0
+        self._hovered_at = self._time
         self.frames_served = 0
 
     # ------------------------------------------------------------ the seam
@@ -119,6 +131,8 @@ class FakeScreen:
 
     def grab(self) -> Image.Image:
         self.frames_served += 1
+        if self._hovered is not None:
+            self.hovering_grabs += 1
         if self._held_by is not None:
             return self._states[self._shown].frame.copy()
         if self._stale_left > 0:
@@ -131,6 +145,7 @@ class FakeScreen:
         self.log.append(("move", x, y))
         self._pointer = (x, y)
         self._hovered = self._button_at(x, y)
+        self._hovered_at = self._time
         if self._held_by is not None and not _inside(self._held_by, x, y):
             self._held_by = None
 
@@ -144,9 +159,8 @@ class FakeScreen:
                 )
         button = self._button_at(x, y)
         self.log.append(("click", x, y, button))
-        was_hovered = self._hovered == button
+        was_hovered = self._hovered == button and self._time > self._hovered_at
         self._pointer = (x, y)
-        self._hovered = button
         if button is None:
             return
         if self._drop_unhovered_clicks and not was_hovered:
@@ -276,6 +290,14 @@ def draw_settings() -> Image.Image:
     return im
 
 
+def draw_profile() -> Image.Image:
+    """Player Profile: the list's header and arrow, no tab band, a teal icon."""
+    im, draw = _blank()
+    draw.rectangle((660, 660, 679, 679), fill=TEAL)
+    _back_arrow(draw)
+    return im
+
+
 def draw_game_setup() -> Image.Image:
     im, draw = _blank()
     _back_button(draw)
@@ -305,6 +327,12 @@ def draw_unknown() -> Image.Image:
     im, draw = _blank((10, 60, 10))
     draw.rectangle((0, 0, 400, 400), fill=GREEN)
     return im
+
+
+def without_exits(states: dict[str, State], name: str) -> dict[str, State]:
+    """The states, with one whose buttons and keys now lead nowhere."""
+    stuck = states[name]
+    return {**states, name: State(name, stuck.frame, buttons=stuck.buttons)}
 
 
 def seat_states() -> dict[str, State]:
@@ -371,6 +399,13 @@ def seat_states() -> dict[str, State]:
             draw_tribe(),
             buttons={"back": BACK_ARROW},
             on_click={"back": "game_setup"},
+        ),
+        State(
+            "profile",
+            draw_profile(),
+            buttons={"back": BACK_ARROW},
+            forbidden={"profile": PROFILE_BODY},
+            on_click={"back": "main_menu"},
         ),
         State("unknown", draw_unknown()),
         State("dialog", draw_unknown(), on_key={"Escape": "main_menu"}),

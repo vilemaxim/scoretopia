@@ -46,20 +46,25 @@ def load_seat_config(path: Path | None = None) -> SeatConfig:
     config_path = Path(path) if path is not None else DEFAULT_SEAT_CONFIG_PATH
     if not config_path.is_file():
         raise ConfigError(f"Seat config file missing: {config_path}")
-    raw = yaml.safe_load(config_path.read_text())
+    try:
+        raw = yaml.safe_load(config_path.read_text())
+    except (OSError, yaml.YAMLError) as exc:
+        raise ConfigError(f"Seat config file unreadable: {config_path}") from exc
     if raw is None:
         raw = {}
     if not isinstance(raw, dict):
         raise ConfigError("Seat config root must be a mapping")
 
-    unknown = sorted(set(raw) - _KEYS)
+    unknown = sorted(str(key) for key in raw if key not in _KEYS)
     if unknown:
         raise ConfigError(f"Unknown seat config key: {unknown[0]}")
 
-    frames_raw = raw.get("frames") or {}
+    frames_raw = raw.get("frames", {})
+    if frames_raw is None:
+        frames_raw = {}
     if not isinstance(frames_raw, dict):
         raise ConfigError("frames must be a mapping")
-    unknown = sorted(set(frames_raw) - {"path"})
+    unknown = sorted(str(key) for key in frames_raw if key != "path")
     if unknown:
         raise ConfigError(f"Unknown seat config key: frames.{unknown[0]}")
     frames_value = frames_raw.get("path", DEFAULT_FRAMES_PATH)

@@ -16,8 +16,13 @@ from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 
+from PIL import Image
+
 from scoretopia.seat import actions, screen
 from scoretopia.seat.seam import Seat
+
+#: The action name of ``scoretopia seat main-menu``.
+MAIN_MENU = "main-menu"
 
 
 class Outcome(Enum):
@@ -75,28 +80,34 @@ def _failure_code(error: Exception) -> str:
 SEAT_ERRORS = (screen.Stop, screen.Budget, subprocess.CalledProcessError, OSError)
 
 
-def save_unknown_frame(seat: Seat, frames_dir: Path, action: str) -> str:
-    """Save the screen as it is now; returns the new file's name.
+def save_unknown_frame(
+    frame: Image.Image, frames_dir: Path, action: str, taken_at: float
+) -> str:
+    """Save the frame of a screen no test recognised; returns the file's name.
 
     The file is readable by its owner only: a frame can show player names.
     """
     frames_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    taken = datetime.fromtimestamp(seat.clock.now(), UTC)
-    name = f"unknown-{taken:%Y%m%dT%H%M%SZ}-{action}.png"
-    screen.save(seat.frames.grab(), os.fspath(frames_dir / name))
+    taken = datetime.fromtimestamp(taken_at, UTC)
+    stem = f"unknown-{taken:%Y%m%dT%H%M%SZ}-{action}"
+    name, copy = f"{stem}.png", 1
+    while (frames_dir / name).exists():
+        copy += 1
+        name = f"{stem}-{copy}.png"
+    screen.save(frame, os.fspath(frames_dir / name))
     return name
 
 
 def main_menu(seat: Seat, frames_dir: Path) -> SeatResult:
     """Return the client to the main menu."""
-    action = "main-menu"
+    action = MAIN_MENU
     try:
         try:
             moved = actions.to_main_menu(seat)
-        except screen.Stop as stop:
-            if str(stop) != "unknown_screen":
-                raise
-            frame = save_unknown_frame(seat, frames_dir, action)
+        except actions.UnknownScreen as unknown:
+            frame = save_unknown_frame(
+                unknown.frame, frames_dir, action, seat.clock.now()
+            )
             return SeatResult(action, Outcome.UNKNOWN_SCREEN, frame=frame)
     except SEAT_ERRORS as error:
         return failure(action, error)

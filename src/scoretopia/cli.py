@@ -192,7 +192,7 @@ def _cmd_bot(args: argparse.Namespace) -> None:
 
 def _cmd_seat_main_menu(args: argparse.Namespace) -> int:
     """Return the game client to the main menu; print one line of JSON."""
-    action = "main-menu"
+    action = seat_commands.MAIN_MENU
     try:
         config = load_seat_config(args.config)
     except ConfigError as exc:

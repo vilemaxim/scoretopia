@@ -26,6 +26,15 @@ from scoretopia.seat.seam import Seat
 
 ScreenTest = Callable[[Image.Image], object]
 
+
+class UnknownScreen(Stop):
+    """No known screen showed and Escape did not leave it; carries the frame."""
+
+    def __init__(self, frame: Image.Image) -> None:
+        super().__init__("unknown_screen")
+        self.frame = frame
+
+
 #: Where the pointer rests while a frame is read: empty background on every
 #: screen these actions cross.
 PARK = screen.PARK
@@ -45,8 +54,18 @@ def park(seat: Seat) -> None:
     seat.clock.sleep(seat.settle)
 
 
+def check_budget(seat: Seat) -> None:
+    """Raise ``Budget`` when the seat's deadline has passed."""
+    if seat.deadline is not None and seat.clock.now() > seat.deadline:
+        raise Budget()
+
+
 def press(seat: Seat, point: tuple[int, int]) -> None:
-    """Click a point: pointer onto it first, and off it before any frame."""
+    """Click a point: pointer onto it first, and off it before any frame.
+
+    Raises ``Budget``, with nothing clicked, when the deadline has passed.
+    """
+    check_budget(seat)
     seat.inputs.move(*point)
     seat.clock.sleep(HOVER)
     seat.inputs.click(*point)
@@ -56,7 +75,8 @@ def press(seat: Seat, point: tuple[int, int]) -> None:
 def poll_for(seat: Seat, test: ScreenTest, timeout: float) -> Image.Image | None:
     """The first frame of two in a row that pass ``test``; None on timeout.
 
-    Raises ``Budget`` when the seat's deadline passes first.
+    Raises ``Budget`` when the seat's deadline passes while the screen is
+    still not showing. A screen seen once is given its second frame.
     """
     end = seat.clock.now() + timeout
     held = False
@@ -68,10 +88,9 @@ def poll_for(seat: Seat, test: ScreenTest, timeout: float) -> Image.Image | None
             held = True
         else:
             held = False
-        now = seat.clock.now()
-        if seat.deadline is not None and now > seat.deadline:
-            raise Budget()
-        if now > end:
+        if not held:
+            check_budget(seat)
+        if seat.clock.now() > end:
             return None
         seat.clock.sleep(POLL)
 
@@ -111,7 +130,7 @@ def recover(seat: Seat, frame: Image.Image | None = None) -> Image.Image:
     its BACK, which neither accepts nor declines; Settings by its back arrow;
     PICK YOUR TRIBE and GAME SETUP by theirs. Any other screen is tried with
     Escape, at most ``seat.escapes`` times, and then stops the action with
-    ``unknown_screen``. Escape is never pressed on the list, where it opens
+    ``UnknownScreen``. Escape is never pressed on the list, where it opens
     Settings.
     """
     if frame is None:
@@ -136,7 +155,7 @@ def recover(seat: Seat, frame: Image.Image | None = None) -> Image.Image:
         seat.inputs.key("Escape")
         seat.clock.sleep(seat.settle)
         frame = look(seat)
-    raise Stop("unknown_screen")
+    raise UnknownScreen(frame)
 
 
 def _main_menu_or_reopened_tribe(frame: Image.Image) -> bool:

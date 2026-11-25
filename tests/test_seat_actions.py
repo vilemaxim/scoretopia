@@ -6,9 +6,19 @@ import ast
 from pathlib import Path
 
 import pytest
-from fake_seat import FakeScreen, seat_states
+from fake_seat import (
+    INVITE_DECLINE,
+    FakeScreen,
+    ForbiddenInput,
+    draw_main_menu,
+    draw_multiplayer,
+    seat_states,
+    without_exits,
+)
+from PIL import Image
 
 from scoretopia.seat import actions, screen
+from scoretopia.seat.seam import Seat
 
 
 def _fake(start: str, **faults: object) -> FakeScreen:
@@ -53,15 +63,6 @@ def test_each_known_screen_is_left_by_its_own_way_back(
     assert fake.keys == []
 
 
-def test_escape_is_never_pressed_on_the_multiplayer_list() -> None:
-    # There it opens Settings.
-    fake = _fake("multiplayer")
-
-    actions.to_main_menu(fake.seat())
-
-    assert fake.keys == []
-
-
 def test_a_screen_with_no_known_exit_is_tried_with_escape() -> None:
     fake = _fake("dialog")
 
@@ -83,18 +84,78 @@ def test_an_unknown_screen_stops_after_the_allowed_escapes() -> None:
     assert fake.clicks == []
 
 
-def test_a_lobby_is_unknown_and_none_of_its_buttons_is_clicked() -> None:
-    fake = _fake("lobby")
+@pytest.mark.parametrize("start", ["lobby", "profile"])
+def test_a_screen_it_does_not_know_is_left_unclicked(start: str) -> None:
+    fake = _fake(start)
 
-    with pytest.raises(screen.Stop, match="unknown_screen"):
+    with pytest.raises(actions.UnknownScreen):
         actions.to_main_menu(fake.seat())
 
     assert fake.clicks == []
 
 
+def test_an_unknown_screen_carries_the_frame_that_was_not_recognised() -> None:
+    fake = _fake("unknown")
+
+    with pytest.raises(actions.UnknownScreen) as stopped:
+        actions.to_main_menu(fake.seat())
+
+    assert screen.screen_name(stopped.value.frame) == "unknown"
+    assert str(stopped.value) == "unknown_screen"
+
+
+class _Frames:
+    """Serves the given frames in order, then the last one for ever."""
+
+    def __init__(self, frames: list[Image.Image]) -> None:
+        self._frames = frames
+        self.served = 0
+
+    def grab(self) -> Image.Image:
+        frame = self._frames[min(self.served, len(self._frames) - 1)]
+        self.served += 1
+        return frame
+
+
+def test_a_wait_takes_a_screen_only_when_two_frames_in_a_row_show_it() -> None:
+    menu, other = draw_main_menu(), draw_multiplayer()
+    frames = _Frames([menu, other, other, menu, menu])
+    fake = _fake("main_menu")
+    seat = Seat(frames=frames, inputs=fake, clock=fake)
+
+    found = actions.poll_for(seat, screen.main_menu, timeout=30)
+
+    assert found is not None
+    assert frames.served == 5
+
+
+@pytest.mark.parametrize(
+    "point",
+    [
+        ((INVITE_DECLINE[0] + INVITE_DECLINE[2]) // 2, 218),
+    ],
+)
+def test_an_action_that_clicks_a_forbidden_input_fails_its_test(
+    point: tuple[int, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The invitation's way back, pointed at DECLINE by mistake.
+    monkeypatch.setattr(screen, "INVITE_BACK", point)
+    fake = _fake("invitation")
+
+    with pytest.raises(ForbiddenInput, match="decline"):
+        actions.to_main_menu(fake.seat())
+
+
 @pytest.mark.parametrize(
     "start",
-    ["multiplayer", "settings", "invitation", "tribe", "multiplayer_after_accept"],
+    [
+        "multiplayer",
+        "settings",
+        "invitation",
+        "game_setup",
+        "tribe",
+        "multiplayer_after_accept",
+    ],
 )
 def test_stale_frames_and_dropped_clicks_do_not_stop_it(start: str) -> None:
     fake = _fake(
@@ -121,6 +182,7 @@ def test_every_click_lands_inside_the_button_it_is_meant_for(start: str) -> None
         pass
 
     assert fake.misses == []
+    assert fake.hovering_grabs == 0
 
 
 def test_the_pointer_is_on_the_button_before_each_click_and_off_it_before_a_frame() -> (
@@ -145,15 +207,27 @@ def test_a_wait_that_would_pass_the_deadline_stops_on_the_budget() -> None:
 
 
 def test_a_screen_that_never_arrives_stops_on_a_timeout() -> None:
-    states = seat_states()
-    stuck = states["multiplayer"]
-    states["multiplayer"] = type(stuck)(
-        "multiplayer", stuck.frame, buttons=stuck.buttons
-    )
-    fake = FakeScreen(states, "multiplayer")
+    fake = FakeScreen(without_exits(seat_states(), "multiplayer"), "multiplayer")
 
     with pytest.raises(screen.Stop, match="timeout_main_menu"):
         actions.to_main_menu(fake.seat())
+
+
+def test_nothing_is_clicked_once_the_deadline_has_passed() -> None:
+    fake = _fake("multiplayer")
+
+    with pytest.raises(screen.Budget):
+        actions.press(fake.seat(deadline=fake.now() - 1), actions.BACK_ARROW)
+
+    assert fake.log == []
+
+
+def test_a_screen_already_showing_is_taken_though_the_deadline_passes() -> None:
+    # The deadline falls between the two frames that confirm the main menu.
+    fake = _fake("main_menu")
+    seat = fake.seat(deadline=fake.now() + 0.5)
+
+    assert actions.poll_for(seat, screen.main_menu, timeout=30) is not None
 
 
 #: The screen layer's own frame, input, wait, and move functions, which call
@@ -184,5 +258,25 @@ def test_code_above_the_seam_reaches_no_tool_or_clock_itself(module: str) -> Non
         and node.value.id in {"screen", "subprocess", "time"}
     }
 
-    assert "time" not in imported
+    from_screen = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "scoretopia.seat.screen"
+        for alias in node.names
+    }
+
+    from_modules = {
+        node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+    }
+    clock_reads = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "datetime"
+    } & {"now", "utcnow", "today"}
+
+    assert "time" not in imported | from_modules
+    assert clock_reads == set()
+    assert from_screen & DIRECT_TOOL_CALLS == set()
     assert used & (DIRECT_TOOL_CALLS | {"run", "Popen", "check_output"}) == set()

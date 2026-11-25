@@ -32,6 +32,7 @@ RECOGNISED_AS = {
     # The live client's accept-side grid passes the create side's test too.
     "tribe": {"tribe_screen"},
     "accept_tribe": {"tribe_screen", "list_back_tribe"},
+    "profile": set(),
     "unknown": set(),
     "dialog": set(),
 }
@@ -101,18 +102,40 @@ def test_a_frame_stays_stale_until_the_pointer_leaves_the_button() -> None:
     assert screen.main_menu(fake.grab())
 
 
-def test_a_click_is_dropped_unless_the_pointer_was_moved_onto_the_button() -> None:
+def test_a_click_is_dropped_unless_the_pointer_rested_on_the_button_first() -> None:
     fake = FakeScreen(seat_states(), "multiplayer", drop_unhovered_clicks=True)
 
     fake.click(31, 31)
-    after_bare_click = fake.state
-    fake.move(160, 240)
+    fake.click(31, 31)
+    after_bare_clicks = fake.state
     fake.move(31, 31)
     fake.click(31, 31)
+    after_a_move_with_no_pause = fake.state
+    fake.move(31, 31)
+    fake.sleep(0.5)
+    fake.click(31, 31)
 
-    assert after_bare_click == "multiplayer"
-    assert fake.dropped_clicks == 1
+    assert after_bare_clicks == "multiplayer"
+    assert after_a_move_with_no_pause == "multiplayer"
+    assert fake.dropped_clicks == 3
     assert fake.state == "main_menu"
+
+
+def test_frames_taken_with_the_pointer_on_a_button_are_counted() -> None:
+    fake = FakeScreen(seat_states(), "multiplayer")
+
+    fake.grab()
+    fake.move(31, 31)
+    fake.grab()
+    fake.move(160, 240)
+    fake.grab()
+
+    assert fake.hovering_grabs == 1
+
+
+def test_a_state_refuses_a_forbidden_kind_it_does_not_know() -> None:
+    with pytest.raises(ValueError, match="not a forbidden kind"):
+        State("s", draw_unknown(), forbidden={"mystery": (0, 0, 1, 1)})
 
 
 def test_a_key_moves_state_and_is_logged() -> None:
@@ -147,10 +170,10 @@ def test_a_click_on_a_forbidden_input_raises(kind: str) -> None:
     assert fake.log == [("click", 150, 120, kind)]
 
 
-def test_the_scripted_screens_cover_every_forbidden_kind_but_profile() -> None:
+def test_the_scripted_screens_cover_every_forbidden_kind() -> None:
     covered = {kind for state in seat_states().values() for kind in state.forbidden}
 
-    assert covered == set(FORBIDDEN_KINDS) - {"profile"}
+    assert covered == set(FORBIDDEN_KINDS)
 
 
 def test_declining_an_invitation_is_refused() -> None:

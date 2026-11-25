@@ -48,7 +48,11 @@ class Clock(Protocol):
 
 @dataclass(frozen=True)
 class Seat:
-    """What an action needs to see and drive the client, and how patiently."""
+    """A handle on the seat's game client: how an action sees and drives it.
+
+    The seat itself is the Polytopia account (see the glossary); this is the
+    one client it is signed in on.
+    """
 
     frames: FrameSource
     inputs: InputSink
@@ -59,7 +63,8 @@ class Seat:
     settle: float = 2
     #: Escapes pressed, at most, to leave a screen with no known exit.
     escapes: int = 3
-    #: ``clock.now()`` after which no further wait may start; None for no limit.
+    #: ``clock.now()`` after which nothing more is clicked and a wait for a
+    #: screen that is not showing ends; None for no limit.
     deadline: float | None = None
 
 
