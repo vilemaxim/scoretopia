@@ -26,6 +26,9 @@ project-documentation/
 
 # Local Polytopia screenshot samples for dev/testing (not committed)
 samples/screenshots/
+# Recorded frames of the game client for seat-control tests (not committed:
+# they show player names)
+samples/seat-frames/
 
 # Local training artifact bundles from ingest commits (not committed)
 data/training/
