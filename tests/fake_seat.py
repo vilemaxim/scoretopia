@@ -324,6 +324,8 @@ def draw_invitation() -> Image.Image:
     _fill(draw, INVITE_DECLINE, RED)
     _fill(draw, INVITE_BACK, GREY)
     _fill(draw, INVITE_ACCEPT, BUTTON_BLUE)
+    # The label: white across the button's centre, as the live one's text is.
+    _fill(draw, (728, 490, 773, 507), WHITE)
     return im
 
 
@@ -787,6 +789,36 @@ def draw_wide_button_panel(box: Box) -> Image.Image:
     return im
 
 
+#: Slot 1 of the accept side's tribe grid, and PICK on the tribe's panel.
+ACCEPT_TRIBE_1: Box = (459, 194, 520, 255)
+TRIBE_PICK: Box = (730, 562, 809, 597)
+#: Slot 1 where the grid sits when creating a game.
+CREATE_TRIBE_1: Box = (458, 210, 519, 271)
+#: A joined lobby's LEAVE, top right of its panel.
+JOINED_LEAVE: Box = (720, 189, 802, 211)
+
+
+def draw_tribe_pick() -> Image.Image:
+    """The accept side's tribe screen with a tribe's panel open and PICK lit."""
+    im = draw_accept_tribe()
+    draw = ImageDraw.Draw(im)
+    _fill(draw, (466, 150, 814, 610), BLACK)
+    _fill(draw, TRIBE_PICK, BUTTON_BLUE)
+    return im
+
+
+def draw_invited_lobby(game: OngoingGame) -> Image.Image:
+    """A joined lobby's panel as it shows after an accept: BACK, and LEAVE."""
+    im = draw_joined_lobby(game)
+    _fill(ImageDraw.Draw(im), JOINED_LEAVE, RED)
+    return im
+
+
+#: Marks the states of the list as it is once an invitation has been accepted
+#: in this client session.
+AFTER_ACCEPT = "!"
+
+
 def ongoing_states(
     games: list[OngoingGame], finished: list[FinishedGame] | None = None
 ) -> dict[str, State]:
@@ -796,6 +828,13 @@ def ongoing_states(
     at its end. A card's panel is ``card:<index>@<offset>`` whatever its kind,
     and a started game's Game Info is ``cardinfo:<index>@<offset>``. The
     Replays tab holds ``finished``.
+
+    ACCEPT on an invitation leads through ``accepttribe``, ``pick``, and
+    ``joined``, each named as the card's panel is. From then on the list's
+    states carry ``!`` after the offset: its back arrow reopens the accept
+    side's tribe screen (``reopened_tribe``), whose own back arrow returns to
+    the unmarked list. The cards stay as drawn: an accepted invitation's card
+    still opens its invitation.
     """
     offsets = scroll_offsets(len(games))
     home = f"ongoing@{offsets[-1]}"
@@ -805,87 +844,125 @@ def ongoing_states(
     states["main_menu"] = State(
         "main_menu", menu.frame, buttons=menu.buttons, on_click={"multiplayer": home}
     )
-    for at, offset in enumerate(offsets):
-        cards = {}
-        for index in range(len(games)):
-            seen = _row_span(index, offset)
-            if seen is not None:
-                cards[f"card{index}"] = (479, seen[0], 801, seen[1])
-        scroll = {}
-        if at > 0:
-            scroll["up"] = f"ongoing@{offsets[at - 1]}"
-        if at < len(offsets) - 1:
-            scroll["down"] = f"ongoing@{offsets[at + 1]}"
-        here = f"ongoing@{offset}"
-        states[here] = State(
-            here,
-            lambda offset=offset: draw_ongoing(games, offset),
-            buttons={"back": BACK_ARROW, "replays_tab": REPLAYS_TAB, **cards},
-            forbidden={"profile": PROFILE_ICON},
-            on_click={
-                "back": "main_menu",
-                "replays_tab": replays,
-                **{name: f"card:{name[4:]}@{offset}" for name in cards},
-            },
-            on_key={"Escape": "settings"},
-            on_scroll=scroll,
-        )
-        for index, game in enumerate(games):
-            tag = f"{index}@{offset}"
-            if game.kind == "started":
-                made = [
-                    State(
-                        f"card:{tag}",
-                        lambda game=game: draw_card_panel(game),
-                        buttons={
-                            "panel_back": PANEL_BACK,
-                            "open": PANEL_OPEN,
-                            "more_info": CARD_INFO,
-                        },
-                        forbidden={"delete": CARD_OTHER_ICONS},
-                        on_click={
-                            "panel_back": here,
-                            "more_info": f"cardinfo:{tag}",
-                        },
-                    ),
-                    State(
-                        f"cardinfo:{tag}",
-                        lambda game=game: draw_card_info(game),
-                        buttons={"info_back": INFO_BACK},
-                        forbidden={"delete": CARD_OTHER_ICONS},
-                        on_click={"info_back": f"card:{tag}"},
-                    ),
-                ]
-            elif game.kind == "lobby":
-                made = [
-                    State(
-                        f"card:{tag}",
-                        lambda game=game: draw_joined_lobby(game),
-                        buttons={"lobby_back": LOBBY_BACK},
-                        on_click={"lobby_back": here},
-                    )
-                ]
-            elif game.kind == "invitation":
-                made = [
-                    State(
-                        f"card:{tag}",
-                        draw_invitation,
-                        buttons={"back": INVITE_BACK, "accept": INVITE_ACCEPT},
-                        forbidden={"decline": INVITE_DECLINE},
-                        on_click={"back": here},
-                    )
-                ]
-            else:
-                made = [
-                    State(
-                        f"card:{tag}",
-                        draw_lobby,
-                        forbidden={
-                            "start_game": LOBBY_START_GAME,
-                            "delete": LOBBY_LEAVE,
-                        },
-                    )
-                ]
-            for state in made:
-                states[state.name] = state
+    states["reopened_tribe"] = State(
+        "reopened_tribe",
+        draw_accept_tribe(),
+        buttons={"back": BACK_ARROW},
+        on_click={"back": home},
+    )
+    for mark in ("", AFTER_ACCEPT):
+        for at, offset in enumerate(offsets):
+            _add_ongoing_page(states, games, offsets, at, mark, replays)
     return states
+
+
+def _add_ongoing_page(
+    states: dict[str, State],
+    games: list[OngoingGame],
+    offsets: list[int],
+    at: int,
+    mark: str,
+    replays: str,
+) -> None:
+    """One scroll position of the Ongoing list, and its cards' panels."""
+    offset = offsets[at]
+    cards = {}
+    for index in range(len(games)):
+        seen = _row_span(index, offset)
+        if seen is not None:
+            cards[f"card{index}"] = (479, seen[0], 801, seen[1])
+    scroll = {}
+    if at > 0:
+        scroll["up"] = f"ongoing@{offsets[at - 1]}{mark}"
+    if at < len(offsets) - 1:
+        scroll["down"] = f"ongoing@{offsets[at + 1]}{mark}"
+    here = f"ongoing@{offset}{mark}"
+    states[here] = State(
+        here,
+        lambda: draw_ongoing(games, offset),
+        buttons={"back": BACK_ARROW, "replays_tab": REPLAYS_TAB, **cards},
+        forbidden={"profile": PROFILE_ICON},
+        on_click={
+            "back": "reopened_tribe" if mark else "main_menu",
+            "replays_tab": replays,
+            **{name: f"card:{name[4:]}@{offset}{mark}" for name in cards},
+        },
+        on_key={"Escape": "settings"},
+        on_scroll=scroll,
+    )
+    for index, game in enumerate(games):
+        tag = f"{index}@{offset}{mark}"
+        for state in _card_states(game, tag, here, f"ongoing@{offset}{AFTER_ACCEPT}"):
+            states[state.name] = state
+
+
+def _card_states(
+    game: OngoingGame, tag: str, here: str, after_accept: str
+) -> list[State]:
+    """A card's panel and what it leads to; ``here`` is the list under it."""
+    if game.kind == "started":
+        return [
+            State(
+                f"card:{tag}",
+                lambda: draw_card_panel(game),
+                buttons={
+                    "panel_back": PANEL_BACK,
+                    "open": PANEL_OPEN,
+                    "more_info": CARD_INFO,
+                },
+                forbidden={"delete": CARD_OTHER_ICONS},
+                on_click={"panel_back": here, "more_info": f"cardinfo:{tag}"},
+            ),
+            State(
+                f"cardinfo:{tag}",
+                lambda: draw_card_info(game),
+                buttons={"info_back": INFO_BACK},
+                forbidden={"delete": CARD_OTHER_ICONS},
+                on_click={"info_back": f"card:{tag}"},
+            ),
+        ]
+    if game.kind == "lobby":
+        return [
+            State(
+                f"card:{tag}",
+                lambda: draw_joined_lobby(game),
+                buttons={"lobby_back": LOBBY_BACK},
+                on_click={"lobby_back": here},
+            )
+        ]
+    if game.kind == "invitation":
+        return [
+            State(
+                f"card:{tag}",
+                draw_invitation,
+                buttons={"back": INVITE_BACK, "accept": INVITE_ACCEPT},
+                forbidden={"decline": INVITE_DECLINE},
+                on_click={"back": here, "accept": f"accepttribe:{tag}"},
+            ),
+            State(
+                f"accepttribe:{tag}",
+                draw_accept_tribe,
+                buttons={"tribe1": ACCEPT_TRIBE_1},
+                on_click={"tribe1": f"pick:{tag}"},
+            ),
+            State(
+                f"pick:{tag}",
+                draw_tribe_pick,
+                buttons={"pick": TRIBE_PICK},
+                on_click={"pick": f"joined:{tag}"},
+            ),
+            State(
+                f"joined:{tag}",
+                lambda: draw_invited_lobby(game),
+                buttons={"lobby_back": LOBBY_BACK},
+                forbidden={"delete": JOINED_LEAVE},
+                on_click={"lobby_back": after_accept},
+            ),
+        ]
+    return [
+        State(
+            f"card:{tag}",
+            draw_lobby,
+            forbidden={"start_game": LOBBY_START_GAME, "delete": LOBBY_LEAVE},
+        )
+    ]

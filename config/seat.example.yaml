@@ -20,6 +20,19 @@ frames:
 captures:
   path: data/captures
 
+# The orders file recording writes: the known players, whose invitations the
+# seat accepts. Seat control only reads it, through the group it shares with
+# recording, so this is the file recording's orders.path names. With no file
+# here, nothing is accepted. Default: data/orders.json.
+orders:
+  path: data/orders.json
+
+# The seat's own Polytopia name, as an invitation shows it. An invitation lists
+# every player of its game, the seat among them, and the seat accepts when
+# everyone else shown is a known player, so it has to know which name is its
+# own. Not set: no invitation is accepted.
+# seat_name: the-seats-name
+
 # Seconds a command may spend before it stops itself. Must be under an hour, so
 # that one hourly run never overlaps the next. Default: 3300.
 budget_seconds: 3300

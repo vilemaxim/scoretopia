@@ -30,6 +30,7 @@ from scoretopia.reports.scheduler import (
 )
 from scoretopia.reports.service import ReportService
 from scoretopia.seat import commands as seat_commands
+from scoretopia.seat import invitations as seat_invitations
 from scoretopia.seat.config import SeatConfig, load_seat_config
 from scoretopia.seat.seam import Seat, live_seat
 from scoretopia.storage.db import open_database
@@ -254,6 +255,21 @@ def _cmd_seat_capture_setup(args: argparse.Namespace) -> int:
     )
 
 
+def _cmd_seat_accept_invitations(args: argparse.Namespace) -> int:
+    """Accept every invitation from known players."""
+    return _run_seat_command(
+        args,
+        seat_commands.ACCEPT_INVITATIONS,
+        lambda seat, config: seat_commands.accept_invitations(
+            seat,
+            config.orders_path,
+            config.seat_name,
+            config.frames_path,
+            seat_invitations.ocr_names,
+        ),
+    )
+
+
 def _config_parent_parser() -> argparse.ArgumentParser:
     parent = argparse.ArgumentParser(add_help=False)
     parent.add_argument(
@@ -377,6 +393,14 @@ def main(argv: Sequence[str] | None = None) -> None:
             f"{exit_codes}"
         ),
     ).set_defaults(handler=_cmd_seat_capture_setup)
+    seat_sub.add_parser(
+        "accept-invitations",
+        parents=[seat_config_parent],
+        help=(
+            "Accept invitations from known players; never decline one. "
+            f"{exit_codes}"
+        ),
+    ).set_defaults(handler=_cmd_seat_accept_invitations)
 
     args = parser.parse_args(argv)
     try:

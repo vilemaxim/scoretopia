@@ -19,11 +19,22 @@ from scoretopia.config import ConfigError
 DEFAULT_SEAT_CONFIG_PATH = Path("config/seat.yaml")
 DEFAULT_FRAMES_PATH = Path("data/seat-frames")
 DEFAULT_CAPTURES_PATH = Path("data/captures")
+DEFAULT_ORDERS_PATH = Path("data/orders.json")
 DEFAULT_BUDGET_SECONDS = 3300
 DEFAULT_DISPLAY = ":99"
 DEFAULT_X_USER = "steam"
 
-_KEYS = frozenset({"frames", "captures", "budget_seconds", "display", "x_user"})
+_KEYS = frozenset(
+    {
+        "frames",
+        "captures",
+        "orders",
+        "seat_name",
+        "budget_seconds",
+        "display",
+        "x_user",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -32,6 +43,11 @@ class SeatConfig:
     frames_path: Path
     #: Where captures are written, for recording to read.
     captures_path: Path = DEFAULT_CAPTURES_PATH
+    #: The orders file recording writes: the known players.
+    orders_path: Path = DEFAULT_ORDERS_PATH
+    #: The seat's own Polytopia name, as an invitation shows it; None when not
+    #: set, and then no invitation is accepted.
+    seat_name: str | None = None
     #: Seconds a command may spend before it stops itself.
     budget_seconds: int = DEFAULT_BUDGET_SECONDS
     #: The X display the game client runs on.
@@ -43,8 +59,8 @@ class SeatConfig:
 def load_seat_config(path: Path | None = None) -> SeatConfig:
     """Load and validate seat control's YAML configuration.
 
-    A relative ``frames.path`` or ``captures.path`` resolves against the
-    directory containing the file.
+    A relative ``frames.path``, ``captures.path``, or ``orders.path`` resolves
+    against the directory containing the file.
     """
     config_path = Path(path) if path is not None else DEFAULT_SEAT_CONFIG_PATH
     if not config_path.is_file():
@@ -64,6 +80,12 @@ def load_seat_config(path: Path | None = None) -> SeatConfig:
 
     frames_path = _path(raw, "frames", DEFAULT_FRAMES_PATH, config_path.parent)
     captures_path = _path(raw, "captures", DEFAULT_CAPTURES_PATH, config_path.parent)
+    orders_path = _path(raw, "orders", DEFAULT_ORDERS_PATH, config_path.parent)
+    seat_name = raw.get("seat_name")
+    if seat_name is not None and (
+        not isinstance(seat_name, str) or not seat_name.strip()
+    ):
+        raise ConfigError("seat_name must be a non-empty string")
 
     budget = raw.get("budget_seconds", DEFAULT_BUDGET_SECONDS)
     if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
@@ -74,6 +96,8 @@ def load_seat_config(path: Path | None = None) -> SeatConfig:
     return SeatConfig(
         frames_path=frames_path,
         captures_path=captures_path,
+        orders_path=orders_path,
+        seat_name=seat_name.strip() if seat_name else None,
         budget_seconds=budget,
         display=_text(raw, "display", DEFAULT_DISPLAY),
         x_user=_text(raw, "x_user", DEFAULT_X_USER),

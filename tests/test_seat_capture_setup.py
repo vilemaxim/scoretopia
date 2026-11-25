@@ -14,13 +14,14 @@ from fake_seat import (
     FakeScreen,
     OngoingGame,
     State,
+    draw_invitation,
     draw_ongoing,
     draw_unknown,
     draw_wide_button_panel,
     ongoing_states,
     scroll_offsets,
 )
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from scoretopia import cli
 from scoretopia.domain.captures import scan_manifests
@@ -238,6 +239,32 @@ def test_a_game_that_has_not_started_is_closed_and_not_recorded(
     later = _run(started, tmp_path)
     assert (later["captured"], later["skipped"]) == (1, 1)
     assert _opened(started) == ["0"]
+
+
+def test_an_invitation_whose_accept_cannot_be_found_is_still_closed(
+    tmp_path: Path,
+) -> None:
+    # Capturing needs only the invitation's BACK.
+    def unlabelled() -> Image.Image:
+        frame = draw_invitation()
+        ImageDraw.Draw(frame).rectangle((700, 490, 800, 507), fill=(255, 255, 255))
+        return frame
+
+    games = [OngoingGame(0, "invitation"), OngoingGame(1)]
+    states = ongoing_states(games)
+    card = states["card:0@0"]
+    states["card:0@0"] = State(
+        card.name,
+        unlabelled,
+        buttons=card.buttons,
+        forbidden=card.forbidden,
+        on_click=card.on_click,
+    )
+    fake = _fake(games, start="ongoing@0", states=states)
+
+    line = _run(fake, tmp_path)
+
+    assert (line["exit_code"], line["captured"], line["not_started"]) == (0, 1, 1)
 
 
 def test_an_invitation_is_neither_accepted_nor_declined(tmp_path: Path) -> None:
