@@ -20,7 +20,7 @@ are not pressed, and nothing in the game is but the dialog's OK, Settings,
 RESIGN, the confirmation's OK, and DONE.
 
 Unconfirmed on the live client: where DONE leads from the end screen of a game
-just resigned from. The routine this replaces restarted the client there. Here
+just resigned from. The playbook this replaces restarted the client there. Here
 the main menu and the Multiplayer list are both taken, and any other screen
 stops the action with its frame saved.
 
@@ -51,14 +51,15 @@ RESIGN_BUDGET = 3 * LOAD_WAIT + TURN0_WAIT + 150
 #: The game view's Settings button.
 GAME_SETTINGS = (515, 665)
 #: RESIGN in the game's Settings, and OK on its confirmation.
-RESIGN = (1225, 30)
+RESIGN_BUTTON = (1225, 30)
 CONFIRM_OK = (777, 404)
 
 
 @dataclass
 class ResignCounts:
     resigned: int = 0
-    #: Cards not opened because they are not drawn as the seat's turn.
+    #: Cards not opened because they are not drawn as the seat's turn: games
+    #: on another player's turn, and lobbies.
     not_seats_turn: int = 0
     #: Cards drawn as the seat's turn, not opened because the record holds no
     #: setup for them. An invitation is drawn the same way and counts here.
@@ -98,7 +99,7 @@ def _resign(seat: Seat, panel: Panel, counts: ResignCounts) -> None:
         )
     press(seat, GAME_SETTINGS)
     wait_for(seat, screen.resign_ready, "resign_ready")
-    press(seat, RESIGN)
+    press(seat, RESIGN_BUTTON)
     wait_for(seat, screen.resign_confirm, "resign_confirm")
     press(seat, CONFIRM_OK)
     end = wait_for(seat, screen.game_over, "resigned_over", LOAD_WAIT)

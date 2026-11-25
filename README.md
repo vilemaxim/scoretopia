@@ -354,7 +354,8 @@ those fails with `names_unread`.
 the seat's turn and whose setup the record holds. A game whose setup is not
 captured is left until `capture-setup` has run, and a game on another player's
 turn is not opened. The seat resigns inside the game, from its Settings, and
-never deletes a game. The line carries `resigned`, `not_seats_turn`,
+never deletes a game. The line carries `resigned`, `not_seats_turn` (a lobby
+counts here too),
 `setup_missing` (an unanswered invitation counts here too), and
 `opponent_resigned`, the games already over because the other player resigned.
 It succeeds when it resigned from at least one game. Not yet run on the live

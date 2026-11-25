@@ -253,7 +253,7 @@ def walk(
     again, still passing over the rows it has seen. ``passed_over`` is asked
     first, of the frame the row was read from, whether to leave the row alone.
     Returns True when the list's end was reached, False when the page cap
-    stopped the walk. Raises ``Budget`` when fewer than ``visit_budget``
+    stopped the walk, or more restarts from the top than the page cap. Raises ``Budget`` when fewer than ``visit_budget``
     seconds are left for another visit.
 
     A page is read again after each visit, since a visit leaves and returns to
@@ -264,13 +264,17 @@ def walk(
     """
     seen: list[str] = []
     at_top = False
-    page = 0
+    page = restarts = 0
     while True:
         while True:
             frame = read_tab(seat, tab)
             if not at_top:
+                if restarts > screen.PAGE_CAP:
+                    # Each restart follows a visit to a row not seen before:
+                    # this many means rows are not being recognised again.
+                    return False
                 frame = to_top(seat, kind)
-                at_top, page = True, 0
+                at_top, page, restarts = True, 0, restarts + 1
             todo = None
             for row in screen.bands(frame):
                 if row[0] <= LIST_TOP or row[1] >= LIST_BOTTOM:
