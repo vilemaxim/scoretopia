@@ -34,10 +34,19 @@ A player's withdrawal: either leaving one group, or a permanent refusal of all g
 _Avoid_: unregister, block
 
 **Active group**:
-A group whose every member has consented and is a friend of the seat. Only an active group has games started for it.
+A group whose every member has consented and is a friend of the seat, and which is not paused. Only an active group has games started for it.
 
 **Group's game**:
 A game whose players are exactly a group's members plus the seat. AI opponents do not change this.
+
+**Paused group**:
+A group for which no new game is started until someone resumes it. A member or an admin can pause it, and Scoretopia pauses it when a game could not be got going. A game already in progress carries on and is recorded.
+
+**Lobby**:
+A game that has been created but not started, waiting for its invited players to accept. It counts as the group's game in progress.
+
+**Game settings**:
+A group's choices for the games started for it: mode, score limit, map type, map size, and turn time limit. Each is one fixed value or a random pick from an allowed list, weighted toward values the group has played less.
 
 **Routine**:
 A rule Scoretopia follows on its own, built from its capabilities, such as starting a game when the group has none active.
