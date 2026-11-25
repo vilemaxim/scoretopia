@@ -186,6 +186,10 @@ class GameService:
                 return player
         return self._player_service.resolve_or_create_polytopia_name(name)
 
+    def participant_names(self, game_id: int) -> tuple[str, ...]:
+        """The stored names of everyone in ``game_id``."""
+        return self._participant_repo.get_participant_names(game_id)
+
     def active_game_roster_summaries(self) -> tuple[str, ...]:
         summaries: list[str] = []
         for game in self._game_repo.list_active():
