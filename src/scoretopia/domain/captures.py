@@ -325,7 +325,12 @@ class CaptureIngestService:
         )
         return CapturePost(
             "game_finished",
-            game_finished_dto(completed, capture.victory),
+            game_finished_dto(
+                completed,
+                capture.victory,
+                capture.basics,
+                stored_players=self._game_service.participant_names(completed.id),
+            ),
         )
 
     def _match_for_result(self, capture: ResultCapture) -> Game | None:
@@ -428,13 +433,7 @@ def game_started_dto(
     *,
     start: str,
 ) -> ReportDTO:
-    fields = [
-        ReportField("Players", ", ".join(player.name for player in basics.players)),
-        ReportField("Map", _map_summary(game)),
-        ReportField("Mode", game.game_type or "unknown"),
-    ]
-    if game.target_score is not None:
-        fields.append(ReportField("Points needed", str(game.target_score)))
+    fields = _setup_fields(game, basics)
     fields.append(ReportField("Start", _START_LABELS.get(start, _UNKNOWN_START)))
     return ReportDTO(
         title=f"Game started: {game.name}",
@@ -444,13 +443,26 @@ def game_started_dto(
     )
 
 
-def game_finished_dto(game: Game, victory: GameEndExtraction) -> ReportDTO:
+def game_finished_dto(
+    game: Game,
+    victory: GameEndExtraction,
+    basics: GameBasicsExtraction,
+    *,
+    stored_players: Sequence[str] = (),
+) -> ReportDTO:
+    """The post for a finished game: its setup, then winner and end points.
+
+    The setup fields come from the replay's setup panel (``basics``), so a
+    game that never had a start post still shows its full record. A field the
+    panel did not give falls back to the stored game.
+    """
     winner = victory.winner or "unknown"
     points = _winner_points(victory)
     return ReportDTO(
         title=f"Game finished: {game.name}",
         description="",
         fields=[
+            *_setup_fields(game, basics, stored_players=stored_players),
             ReportField("Winner", winner),
             ReportField("End points", str(points) if points is not None else "unknown"),
         ],
@@ -458,12 +470,39 @@ def game_finished_dto(game: Game, victory: GameEndExtraction) -> ReportDTO:
     )
 
 
-def _map_summary(game: Game) -> str:
+def _setup_fields(
+    game: Game,
+    basics: GameBasicsExtraction,
+    *,
+    stored_players: Sequence[str] = (),
+) -> list[ReportField]:
+    """Players, map, mode, and points needed: panel first, then the stored game."""
+    players = [player.name for player in basics.players] or list(stored_players)
+    target_score = (
+        basics.target_score if basics.target_score is not None else game.target_score
+    )
+    fields = [
+        ReportField("Players", ", ".join(players) or "unknown"),
+        ReportField(
+            "Map",
+            _map_summary(
+                basics.map_size if basics.map_size is not None else game.map_size,
+                basics.terrain or game.terrain,
+            ),
+        ),
+        ReportField("Mode", basics.game_type or game.game_type or "unknown"),
+    ]
+    if target_score is not None:
+        fields.append(ReportField("Points needed", str(target_score)))
+    return fields
+
+
+def _map_summary(map_size: int | None, terrain: str | None) -> str:
     parts: list[str] = []
-    if game.map_size is not None:
-        parts.append(f"{game.map_size} tiles")
-    if game.terrain:
-        parts.append(game.terrain)
+    if map_size is not None:
+        parts.append(f"{map_size} tiles")
+    if terrain:
+        parts.append(terrain)
     return ", ".join(parts) or "unknown"
 
 

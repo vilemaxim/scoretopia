@@ -490,6 +490,123 @@ def test_result_completes_the_matched_game_and_posts_game_finished(
     assert winner is not None and winner.polytopia_name == "Alpha"
 
 
+def _finished_post(
+    conn: sqlite3.Connection,
+    root: Path,
+    result_basics: GameBasicsExtraction,
+    *,
+    setup_basics: GameBasicsExtraction | None = None,
+) -> ReportDTO:
+    extractor = StubExtractor()
+    if setup_basics is not None:
+        _write_manifest(root, "setup", "s1")
+        extractor.setups["s1"] = SetupCapture(basics=setup_basics)
+    _write_manifest(root, "result", "r1")
+    extractor.results["r1"] = ResultCapture(basics=result_basics, victory=_victory())
+    publisher = RecordingPublisher()
+    _service(conn, root, extractor).run_once(publisher)
+    name, dto, _ = publisher.posts[-1]
+    assert name == "game_finished"
+    return dto
+
+
+def test_finished_post_for_a_game_never_seen_starting_carries_its_setup(
+    conn: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    finished = _finished_post(conn, tmp_path, _basics())
+
+    assert [field.label for field in finished.fields] == [
+        "Players",
+        "Map",
+        "Mode",
+        "Points needed",
+        "Winner",
+        "End points",
+    ]
+    assert _fields(finished) == {
+        "Players": "Alpha, Bravo",
+        "Map": "256 tiles, Lakes",
+        "Mode": "Glory",
+        "Points needed": "10000",
+        "Winner": "Alpha",
+        "End points": "10450",
+    }
+
+
+def test_finished_post_for_a_might_game_has_no_points_needed(
+    conn: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    might = GameBasicsExtraction(
+        game_name="Test Game",
+        map_size=121,
+        terrain="Dryland",
+        game_type="Might",
+        players=(GameBasicsPlayer(name="Alpha"), GameBasicsPlayer(name="Bravo")),
+    )
+
+    finished = _finished_post(conn, tmp_path, might)
+
+    assert [field.label for field in finished.fields] == [
+        "Players",
+        "Map",
+        "Mode",
+        "Winner",
+        "End points",
+    ]
+    assert _fields(finished)["Mode"] == "Might"
+
+
+def test_finished_post_for_a_game_seen_starting_carries_the_same_fields(
+    conn: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    finished = _finished_post(conn, tmp_path, _basics(), setup_basics=_basics())
+
+    assert _fields(finished) == {
+        "Players": "Alpha, Bravo",
+        "Map": "256 tiles, Lakes",
+        "Mode": "Glory",
+        "Points needed": "10000",
+        "Winner": "Alpha",
+        "End points": "10450",
+    }
+
+
+def test_finished_post_falls_back_to_the_stored_game_for_an_empty_panel(
+    conn: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    empty_panel = GameBasicsExtraction(game_name="Test Game")
+
+    finished = _finished_post(conn, tmp_path, empty_panel, setup_basics=_basics())
+
+    assert _fields(finished) == {
+        "Players": "Alpha, Bravo",
+        "Map": "256 tiles, Lakes",
+        "Mode": "Glory",
+        "Points needed": "10000",
+        "Winner": "Alpha",
+        "End points": "10450",
+    }
+
+
+def test_finished_post_says_unknown_when_neither_panel_nor_game_has_a_field(
+    conn: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    bare = GameBasicsExtraction(
+        players=(GameBasicsPlayer(name="Alpha"), GameBasicsPlayer(name="Bravo")),
+    )
+
+    finished = _finished_post(conn, tmp_path, bare)
+
+    assert _fields(finished)["Map"] == "unknown"
+    assert _fields(finished)["Mode"] == "unknown"
+    assert "Points needed" not in _fields(finished)
+
+
 def test_result_records_end_points_for_every_player(
     conn: sqlite3.Connection,
     tmp_path: Path,
