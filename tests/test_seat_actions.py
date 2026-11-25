@@ -280,3 +280,13 @@ def test_code_above_the_seam_reaches_no_tool_or_clock_itself(module: str) -> Non
     assert clock_reads == set()
     assert from_screen & DIRECT_TOOL_CALLS == set()
     assert used & (DIRECT_TOOL_CALLS | {"run", "Popen", "check_output"}) == set()
+
+
+def test_a_screen_first_seen_as_the_wait_runs_out_still_gets_its_second_frame() -> None:
+    menu, other = draw_main_menu(), draw_multiplayer()
+    frames = _Frames([other, other, other, menu, menu])
+    fake = _fake("main_menu")
+    seat = Seat(frames=frames, inputs=fake, clock=fake)
+
+    # Looks come a second apart, so the fourth is just past the timeout.
+    assert actions.poll_for(seat, screen.main_menu, timeout=2.5) is not None

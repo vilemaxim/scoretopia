@@ -12,8 +12,8 @@ Seat control keeps its own record of what it has captured, ``record.json`` in
 the captures root, readable by its owner only. A row is known by a mask of its
 white text, matched with a tolerance because the list renders rows at
 sub-pixel heights; the screen layer's ``key_of()`` and ``match()`` carry the
-measurements. The record's format is the one the earlier capture job wrote, so
-games that job captured are not captured again.
+measurements. The record's format is the one written by the capture routine
+this module replaces, so games already captured are not captured again.
 
 Nothing here reads a name: rows are told apart by their pixels, and directory
 names are hashes.
@@ -71,6 +71,8 @@ SCROLL_WAIT = 10.0
 LIST_WAIT = 30.0
 #: The worst case of one capture: the replay, plus the waits around it.
 CAPTURE_BUDGET = FINISH_WAIT + 180
+#: The span the screen layer reads rows in: a row touching either edge is cut.
+LIST_TOP, LIST_BOTTOM = 130, 625
 #: Notches per wheel turn.
 NOTCHES = 3
 
@@ -105,7 +107,9 @@ class CaptureRecord:
         except (OSError, ValueError) as error:
             raise Stop("record_unreadable") from error
         if not isinstance(raw, dict) or not all(
-            isinstance(raw.get(key, []), list) for key in RECORD_KEYS
+            isinstance(raw.get(key, []), list)
+            and all(isinstance(item, str) for item in raw.get(key, []))
+            for key in RECORD_KEYS
         ):
             raise Stop("record_unreadable")
         self._data = raw
@@ -128,6 +132,8 @@ def write_json(path: Path, data: object, mode: int) -> None:
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
     with os.fdopen(fd, "w") as handle:
         json.dump(data, handle, indent=1, sort_keys=True)
+        handle.flush()
+        os.fsync(handle.fileno())
     os.chmod(tmp, mode)
     os.replace(tmp, path)
 
@@ -207,8 +213,10 @@ def sweep(
 
     A page is read again after each capture, since a capture leaves and
     returns to the list. Rows seen earlier in the sweep are passed over by
-    their masks. A row cut by the tab bar is not read: it was whole on the
-    page before.
+    their masks. A row cut by the tab bar or by the list's bottom edge is not
+    read, since its mask would be that of another game: it was whole on the
+    page before, or will be on the next. At the list's end the last row is
+    whole.
     """
     seen: list[str] = []
     at_top = False
@@ -220,12 +228,16 @@ def sweep(
                 at_top = True
             todo = None
             for row in screen.bands(frame):
-                if row[0] <= 130:
+                if row[0] <= LIST_TOP or row[1] >= LIST_BOTTOM:
                     continue
                 variants = screen.mask_variants(frame, row, kind)
                 if not variants or screen.match(variants, seen) is not None:
                     continue
-                mask = screen.mask_of(frame, row, kind) or variants[0]
+                mask = screen.mask_of(frame, row, kind)
+                if mask is None:
+                    # Text shows only a pixel or two off the row's box: the
+                    # row is still settling, and a later page reads it.
+                    continue
                 seen.append(mask)
                 if record.knows(kind, variants):
                     counts.skipped += 1
@@ -348,7 +360,9 @@ def capture_finished(seat: Seat, root: Path, counts: CaptureCounts) -> None:
     it. Raises ``Budget`` when too little time is left for another capture.
     The record is read before anything is clicked.
     """
-    root.mkdir(mode=DIR_MODE, parents=True, exist_ok=True)
+    if not root.is_dir():
+        root.mkdir(mode=DIR_MODE, parents=True)
+        os.chmod(root, DIR_MODE)
     record = CaptureRecord(root / RECORD_NAME)
     to_list(seat)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -13,6 +14,7 @@ from fake_seat import (
     FakeScreen,
     FinishedGame,
     State,
+    draw_replays,
     draw_unknown,
     replay_states,
     scroll_offsets,
@@ -21,7 +23,7 @@ from PIL import Image
 
 from scoretopia import cli
 from scoretopia.domain.captures import scan_manifests
-from scoretopia.seat import commands, screen
+from scoretopia.seat import capture, commands, screen
 from scoretopia.seat.seam import Seat
 
 SCREENS = {"setup": "setup.png", "info": "info.png", "victory": "victory.png"}
@@ -131,15 +133,38 @@ def test_the_time_in_the_manifest_is_when_the_first_screen_was_saved(
     assert fake.elapsed > 45
 
 
-def test_the_manifest_is_written_after_the_screens(tmp_path: Path) -> None:
-    _run(_fake(_games(2)), tmp_path)
+def test_the_manifest_is_written_last_and_the_record_after_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _fake(_games(2))
+    seen_at_write: list[tuple[str, list[str], str, bool]] = []
+    write_json = capture.write_json
 
-    for directory in _capture_dirs(tmp_path):
-        written = (directory / "manifest.json").stat().st_mtime_ns
-        assert all(
-            (directory / file).stat().st_mtime_ns <= written
-            for file in SCREENS.values()
+    def spying_write(path: Path, data: object, mode: int) -> None:
+        manifests = _complete(tmp_path)
+        seen_at_write.append(
+            (
+                path.name,
+                sorted(p.name for p in path.parent.iterdir() if p.suffix == ".png"),
+                fake.state.split("@")[0],
+                len(manifests) > sum(1 for w in seen_at_write if w[0] == "record.json"),
+            )
         )
+        write_json(path, data, mode)
+
+    monkeypatch.setattr(capture, "write_json", spying_write)
+
+    _run(fake, tmp_path)
+
+    screens = sorted(SCREENS.values())
+    # Each manifest is written with all three screens saved and the client
+    # back on the list; each record write finds that game's manifest there.
+    assert seen_at_write == [
+        ("manifest.json", screens, "replays", False),
+        ("record.json", [], "replays", True),
+        ("manifest.json", screens, "replays", False),
+        ("record.json", [], "replays", True),
+    ]
 
 
 def test_the_run_ends_on_the_main_menu(tmp_path: Path) -> None:
@@ -304,6 +329,38 @@ def test_a_replay_that_never_finishes_is_left_by_exit_and_not_recorded(
     assert fake.state == "main_menu"
 
 
+def test_a_replay_that_does_not_open_is_not_waited_on_for_ten_minutes(
+    tmp_path: Path,
+) -> None:
+    games = _games(1)
+    states = replay_states(games)
+    panel = states["panel:0@0"]
+    states["panel:0@0"] = State(
+        panel.name,
+        panel.frame,
+        buttons=panel.buttons,
+        forbidden=panel.forbidden,
+        on_click={k: v for k, v in panel.on_click.items() if k != "open"},
+    )
+    fake = _fake(games, states=states)
+
+    line = _run(fake, tmp_path)
+
+    assert (line["exit_code"], line["code"]) == (20, "replay_not_open")
+    assert fake.elapsed < 200
+    assert _complete(tmp_path) == []
+
+
+def test_a_record_with_anything_but_text_in_it_is_unreadable(tmp_path: Path) -> None:
+    root = tmp_path / "captures"
+    root.mkdir()
+    (root / "record.json").write_text('{"result_masks": [1]}')
+
+    line = _run(_fake(_games(1)), tmp_path)
+
+    assert (line["exit_code"], line["code"]) == (1, "record_unreadable")
+
+
 def test_no_capture_starts_without_the_time_to_finish_it(tmp_path: Path) -> None:
     fake = _fake(_games(2))
 
@@ -344,19 +401,75 @@ def test_the_record_holds_no_file_names_or_text_from_the_screen(
     assert set(record) == {"setup", "result", "setup_masks", "result_masks"}
 
 
-def test_a_record_written_by_the_earlier_job_is_honoured(tmp_path: Path) -> None:
-    # The earlier job kept the same file: games it recorded are not retaken.
-    games = _games(2)
-    _run(_fake(games), tmp_path)
-    record_path = tmp_path / "captures" / "record.json"
-    record = json.loads(record_path.read_text())
-    record["setup"] = ["0123456789abcdef"]
-    record_path.write_text(json.dumps(record))
+def test_a_record_written_before_this_command_existed_is_honoured(
+    tmp_path: Path,
+) -> None:
+    # The routine this replaces kept the same file. This one is written by hand,
+    # from the rows as the list draws them, not by the command.
+    games = _games(3)
+    listed = draw_replays(games, 0)
+    rows = screen.bands(listed)
+    record = {
+        "setup": ["0123456789abcdef"],
+        "setup_masks": [],
+        "result": [screen.key_of(listed, row, "result") for row in rows[:2]],
+        "result_masks": [screen.mask_of(listed, row, "result") for row in rows[:2]],
+    }
+    root = tmp_path / "captures"
+    root.mkdir()
+    (root / "record.json").write_text(json.dumps(record, indent=1, sort_keys=True))
+    fake = _fake(games)
 
-    line = _run(_fake(games), tmp_path)
+    line = _run(fake, tmp_path)
 
-    assert (line["captured"], line["skipped"]) == (0, 2)
-    assert json.loads(record_path.read_text())["setup"] == ["0123456789abcdef"]
+    assert (line["captured"], line["skipped"]) == (1, 2)
+    assert _opened(fake) == ["2"]
+    kept = json.loads((root / "record.json").read_text())
+    assert kept["setup"] == ["0123456789abcdef"]
+    assert kept["result"][:2] == record["result"]
+
+
+def test_more_games_than_fit_are_each_captured_once(tmp_path: Path) -> None:
+    # Seven rows: on most pages one is cut by the list's bottom edge.
+    games = _games(7)
+    fake = _fake(games)
+
+    line = _run(fake, tmp_path)
+    again = _run(_fake(games, start=f"replays@{scroll_offsets(7)[2]}"), tmp_path)
+
+    assert line["captured"] == 7
+    assert sorted(_opened(fake)) == [str(n) for n in range(7)]
+    assert len(_capture_dirs(tmp_path)) == 7
+    assert (again["captured"], again["skipped"]) == (0, 7)
+
+
+def _with_unknown_after(games: list[FinishedGame], prefix: str) -> dict[str, State]:
+    """The states, where every state named ``<prefix>:...`` is an unknown screen."""
+    states = replay_states(games)
+    for name in list(states):
+        if name.startswith(prefix + ":"):
+            states[name] = State(name, draw_unknown())
+    return states
+
+
+@pytest.mark.parametrize(
+    ("stage", "code"),
+    [("panel", "timeout_replay_panel"), ("info", "timeout_info")],
+)
+def test_an_unrecognised_screen_at_any_stage_saves_it_and_completes_nothing(
+    stage: str, code: str, tmp_path: Path
+) -> None:
+    games = _games(1)
+    fake = _fake(games, states=_with_unknown_after(games, stage))
+
+    line = _run(fake, tmp_path)
+
+    assert (line["exit_code"], line["code"]) == (20, code)
+    (saved,) = (tmp_path / "frames").iterdir()
+    with Image.open(saved) as im:
+        assert screen.screen_name(im.convert("RGB")) == "unknown"
+    assert _complete(tmp_path) == []
+    assert not (tmp_path / "captures" / "record.json").exists()
 
 
 def test_the_command_prints_its_counts_on_one_line(
@@ -374,9 +487,15 @@ def test_the_command_prints_its_counts_on_one_line(
     config = tmp_path / "seat.yaml"
     config.write_text("captures:\n  path: captures\nframes:\n  path: frames\n")
 
-    with pytest.raises(SystemExit) as exit_info:
-        cli.main(["seat", "capture-finished", "--config", str(config)])
+    before = os.umask(0)
+    try:
+        with pytest.raises(SystemExit) as exit_info:
+            cli.main(["seat", "capture-finished", "--config", str(config)])
+        during = os.umask(0)
+    finally:
+        os.umask(before)
 
+    assert during == 0o027
     assert exit_info.value.code == 0
     out = capsys.readouterr().out
     assert out.count("\n") == 1

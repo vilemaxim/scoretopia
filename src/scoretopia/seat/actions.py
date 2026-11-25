@@ -110,8 +110,8 @@ def _poll(
             held = False
         if not held:
             check_budget(seat)
-        if seat.clock.now() > end:
-            return None, frame
+            if seat.clock.now() > end:
+                return None, frame
         seat.clock.sleep(POLL)
 
 

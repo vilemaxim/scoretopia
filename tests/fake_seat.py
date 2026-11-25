@@ -215,9 +215,15 @@ class FakeScreen:
     def scroll(self, x: int, y: int, notches: int) -> None:
         self._tick()
         self.log.append(("scroll", x, y, notches))
-        target = self._states[self.state].on_scroll.get("down" if notches > 0 else "up")
-        if target is not None:
-            self._go(target, clicked=None)
+        self._pointer = (x, y)
+        direction = "down" if notches > 0 else "up"
+        # Three notches are one step of the list.
+        for _ in range(max(1, round(abs(notches) / 3))):
+            target = self._states[self.state].on_scroll.get(direction)
+            if target is not None:
+                self._go(target, clicked=None)
+        self._hovered = self._button_at(x, y)
+        self._hovered_at = self._time
 
     def now(self) -> float:
         return self._time
@@ -473,9 +479,10 @@ FINISH_GREEN = (60, 200, 80)
 #: A row's height, the distance from one row's top to the next, and the first
 #: row's top with the list at its top.
 ROW_HEIGHT, ROW_PITCH, FIRST_ROW_TOP = 60, 77, 185
-#: The list shows between the tab bar and here. The live list runs on over
-#: the menu scenery, where a row can read as split; the fake simply ends.
-LIST_TOP, LIST_BOTTOM = 130, 520
+#: The list shows between the tab bar and the bottom bar: the span the screen
+#: layer reads rows in. The live list lies over the menu scenery lower down,
+#: where a row can read as split; the fake has no scenery.
+LIST_TOP, LIST_BOTTOM = 130, 626
 #: How far one call of three wheel notches moves the list.
 WHEEL_STEP = 50
 

@@ -143,7 +143,8 @@ def capture_finished(seat: Seat, captures_root: Path, frames_dir: Path) -> SeatR
 
     Succeeds when it captured at least one game; a list with nothing new is
     nothing to do. A capture that stops half way leaves a directory with no
-    manifest, which ingest ignores and the next run completes.
+    manifest, which ingest ignores; the game is not recorded, so the next run
+    captures it again.
     """
     action = CAPTURE_FINISHED
     counts = capture.CaptureCounts()
