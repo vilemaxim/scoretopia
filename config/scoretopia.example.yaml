@@ -24,6 +24,12 @@ captures:
   path: data/captures
   poll_seconds: 300
 
+# The orders file: what the bot tells seat control (ADR 003). The bot rewrites
+# it at start and whenever the registered players change; seat control only
+# reads it. Default path: data/orders.json (relative to this file).
+orders:
+  path: data/orders.json
+
 # Scheduled reports. Each entry must use a known report name.
 # channel references a key under channels (reports), not the name.
 reports:

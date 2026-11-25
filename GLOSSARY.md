@@ -17,7 +17,7 @@ A computer-controlled player supplied by Polytopia.
 _Avoid_: bot
 
 **Known player**:
-A person on the list of players Scoretopia accepts invitations from and keeps statistics for.
+A person on the list of players Scoretopia accepts invitations from and keeps statistics for. A person becomes one by registering.
 
 **Admin**:
 A person allowed to manage groups: create, change, and delete them, and consent on a player's behalf.

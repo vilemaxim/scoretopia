@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from scoretopia.domain.results import RegisterResult
 from scoretopia.screenshot.models import GameBasicsExtraction
 from scoretopia.storage.models import Player
@@ -9,8 +11,14 @@ from scoretopia.storage.repos import PlayerRepo
 
 
 class PlayerService:
-    def __init__(self, player_repo: PlayerRepo) -> None:
+    def __init__(
+        self,
+        player_repo: PlayerRepo,
+        *,
+        on_players_changed: Callable[[], None] | None = None,
+    ) -> None:
         self._player_repo = player_repo
+        self._on_players_changed = on_players_changed
 
     @property
     def player_repo(self) -> PlayerRepo:
@@ -52,6 +60,7 @@ class PlayerService:
             discord_user_id=discord_user_id,
             discord_display_name=discord_display_name,
         )
+        self._players_changed()
         return RegisterResult.success(player)
 
     def auto_link_from_game_basics(
@@ -102,8 +111,14 @@ class PlayerService:
         discord_user_id: str,
         discord_display_name: str | None,
     ) -> Player:
-        return self._player_repo.update_discord_link(
+        player = self._player_repo.update_discord_link(
             player_id,
             discord_user_id=discord_user_id,
             discord_display_name=discord_display_name,
         )
+        self._players_changed()
+        return player
+
+    def _players_changed(self) -> None:
+        if self._on_players_changed is not None:
+            self._on_players_changed()

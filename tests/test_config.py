@@ -429,3 +429,31 @@ def test_load_config_rejects_a_non_mapping_discord_block(
 
     with pytest.raises(ConfigError, match="discord must be a mapping"):
         load_config(config_file)
+
+
+def test_load_config_orders_path_defaults_beside_the_config(tmp_path: Path) -> None:
+    config_file = _write_config(tmp_path, _minimal_valid_yaml())
+    config = load_config(config_file)
+
+    assert config.orders.path == (config_file.parent / "data" / "orders.json").resolve()
+
+
+def test_load_config_parses_orders_path(tmp_path: Path) -> None:
+    body = _minimal_valid_yaml() + """
+        orders:
+          path: /srv/shared/orders.json
+    """
+    config_file = _write_config(tmp_path, body)
+    config = load_config(config_file)
+
+    assert config.orders.path == Path("/srv/shared/orders.json")
+
+
+def test_load_config_rejects_orders_that_is_not_a_mapping(tmp_path: Path) -> None:
+    body = _minimal_valid_yaml() + """
+        orders: nope
+    """
+    config_file = _write_config(tmp_path, body)
+
+    with pytest.raises(ConfigError, match="orders must be a mapping"):
+        load_config(config_file)

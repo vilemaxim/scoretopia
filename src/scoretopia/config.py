@@ -14,6 +14,7 @@ DEFAULT_CONFIG_PATH = Path("config/scoretopia.yaml")
 DEFAULT_DATABASE_PATH = Path("data/scoretopia.db")
 DEFAULT_CAPTURES_PATH = Path("data/captures")
 DEFAULT_CAPTURES_POLL_SECONDS = 300
+DEFAULT_ORDERS_PATH = Path("data/orders.json")
 
 
 class ConfigError(ValueError):
@@ -39,6 +40,13 @@ class CapturesConfig:
 
 
 @dataclass(frozen=True)
+class OrdersConfig:
+    """Where recording writes the orders file that seat control reads."""
+
+    path: Path
+
+
+@dataclass(frozen=True)
 class ReportConfig:
     enabled: bool
     schedule: str
@@ -60,14 +68,15 @@ class ScoretopiaConfig:
     reports: dict[str, ReportConfig]
     captures: CapturesConfig = CapturesConfig(path=DEFAULT_CAPTURES_PATH)
     discord: DiscordConfig = DiscordConfig()
+    orders: OrdersConfig = OrdersConfig(path=DEFAULT_ORDERS_PATH)
 
 
 def load_config(path: Path | None = None) -> ScoretopiaConfig:
     """Load and validate Scoretopia YAML configuration.
 
-    Relative paths in ``database.path`` and ``captures.path`` resolve against
-    the directory containing the config file (not the process working
-    directory).
+    Relative paths in ``database.path``, ``captures.path``, and ``orders.path``
+    resolve against the directory containing the config file (not the process
+    working directory).
     """
     config_path = Path(path) if path is not None else DEFAULT_CONFIG_PATH
     if not config_path.is_file():
@@ -106,6 +115,7 @@ def _parse_config(raw: dict[str, Any], base_dir: Path) -> ScoretopiaConfig:
 
     captures = _parse_captures(raw.get("captures"), base_dir)
     discord = _parse_discord(raw.get("discord"))
+    orders = _parse_orders(raw.get("orders"), base_dir)
 
     return ScoretopiaConfig(
         channels=channels,
@@ -113,6 +123,7 @@ def _parse_config(raw: dict[str, Any], base_dir: Path) -> ScoretopiaConfig:
         reports=reports,
         captures=captures,
         discord=discord,
+        orders=orders,
     )
 
 
@@ -138,6 +149,16 @@ def _parse_discord(raw: Any) -> DiscordConfig:
     if guild_id < 1:
         raise ConfigError(message)
     return DiscordConfig(guild_id=guild_id)
+
+
+def _parse_orders(raw: Any, base_dir: Path) -> OrdersConfig:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ConfigError("orders must be a mapping")
+    return OrdersConfig(
+        path=_resolve_path(base_dir, raw.get("path", DEFAULT_ORDERS_PATH))
+    )
 
 
 def _parse_captures(raw: Any, base_dir: Path) -> CapturesConfig:

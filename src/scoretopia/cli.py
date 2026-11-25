@@ -15,6 +15,7 @@ from scoretopia.discord.adapter import DiscordBotAdapter, load_discord_token
 from scoretopia.domain.captures import CaptureIngestService, seed_captures
 from scoretopia.domain.games import GameService
 from scoretopia.domain.players import PlayerService
+from scoretopia.orders import OrdersKeeper
 from scoretopia.reports.publisher import StdoutReportPublisher
 from scoretopia.reports.scheduler import (
     run_due_reports,
@@ -135,6 +136,20 @@ def _positive_int(value: str) -> int:
     return number
 
 
+def _build_player_service(
+    config: ScoretopiaConfig,
+    player_repo: PlayerRepo,
+) -> PlayerService:
+    """The player service that keeps the orders file current.
+
+    Writes the orders once now, and again after every change to who is
+    registered.
+    """
+    orders = OrdersKeeper(player_repo, config.orders.path)
+    orders.refresh_or_log()
+    return PlayerService(player_repo, on_players_changed=orders.refresh_or_log)
+
+
 def _build_discord_bot(config: ScoretopiaConfig, token: str) -> DiscordBotAdapter:
     config.database.path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -143,7 +158,7 @@ def _build_discord_bot(config: ScoretopiaConfig, token: str) -> DiscordBotAdapte
 
     return DiscordBotAdapter(
         config=config,
-        player_service=PlayerService(player_repo),
+        player_service=_build_player_service(config, player_repo),
         report_service=ReportService(
             GameRepo(conn),
             GameParticipantRepo(conn),
