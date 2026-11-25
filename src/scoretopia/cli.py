@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sqlite3
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -29,8 +30,8 @@ from scoretopia.reports.scheduler import (
 )
 from scoretopia.reports.service import ReportService
 from scoretopia.seat import commands as seat_commands
-from scoretopia.seat.config import load_seat_config
-from scoretopia.seat.seam import live_seat
+from scoretopia.seat.config import SeatConfig, load_seat_config
+from scoretopia.seat.seam import Seat, live_seat
 from scoretopia.storage.db import open_database
 from scoretopia.storage.repos import (
     CaptureManifestRepo,
@@ -190,9 +191,13 @@ def _cmd_bot(args: argparse.Namespace) -> None:
     adapter.run()
 
 
-def _cmd_seat_main_menu(args: argparse.Namespace) -> int:
-    """Return the game client to the main menu; print one line of JSON."""
-    action = seat_commands.MAIN_MENU
+SeatCommand = Callable[[Seat, SeatConfig], seat_commands.SeatResult]
+
+
+def _run_seat_command(
+    args: argparse.Namespace, action: str, command: SeatCommand
+) -> int:
+    """Run one seat command on the live client; print one line of JSON."""
     try:
         config = load_seat_config(args.config)
     except ConfigError as exc:
@@ -207,11 +212,34 @@ def _cmd_seat_main_menu(args: argparse.Namespace) -> int:
                 x_user=config.x_user,
                 budget_seconds=config.budget_seconds,
             ) as seat:
-                result = seat_commands.main_menu(seat, config.frames_path)
+                result = command(seat, config)
         except seat_commands.SEAT_ERRORS as error:
             result = seat_commands.failure(action, error)
     print(result.line())
     return result.exit_code
+
+
+def _cmd_seat_main_menu(args: argparse.Namespace) -> int:
+    """Return the game client to the main menu."""
+    return _run_seat_command(
+        args,
+        seat_commands.MAIN_MENU,
+        lambda seat, config: seat_commands.main_menu(seat, config.frames_path),
+    )
+
+
+def _cmd_seat_capture_finished(args: argparse.Namespace) -> int:
+    """Capture every finished game not yet captured."""
+    # Captures are read by recording through a shared group, and by no one
+    # else.
+    os.umask(0o027)
+    return _run_seat_command(
+        args,
+        seat_commands.CAPTURE_FINISHED,
+        lambda seat, config: seat_commands.capture_finished(
+            seat, config.captures_path, config.frames_path
+        ),
+    )
 
 
 def _config_parent_parser() -> argparse.ArgumentParser:
@@ -306,20 +334,29 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Control the seat's game client (one action per command)",
     )
     seat_sub = seat_parser.add_subparsers(dest="seat_command", required=True)
-    seat_main_menu_parser = seat_sub.add_parser(
-        "main-menu",
-        help=(
-            "Return the client to the main menu. Prints one line of JSON; exits "
-            "0 succeeded, 10 nothing to do, 20 unknown screen, 1 other failure"
-        ),
-    )
-    seat_main_menu_parser.add_argument(
+    seat_config_parent = argparse.ArgumentParser(add_help=False)
+    seat_config_parent.add_argument(
         "--config",
         type=Path,
         default=None,
         help="Path to seat control's own config (default: config/seat.yaml)",
     )
-    seat_main_menu_parser.set_defaults(handler=_cmd_seat_main_menu)
+    exit_codes = (
+        "Prints one line of JSON; exits 0 succeeded, 10 nothing to do, "
+        "20 unknown screen, 1 other failure"
+    )
+    seat_sub.add_parser(
+        "main-menu",
+        parents=[seat_config_parent],
+        help=f"Return the client to the main menu. {exit_codes}",
+    ).set_defaults(handler=_cmd_seat_main_menu)
+    seat_sub.add_parser(
+        "capture-finished",
+        parents=[seat_config_parent],
+        help=(
+            f"Capture the screens of every finished game not yet captured. {exit_codes}"
+        ),
+    ).set_defaults(handler=_cmd_seat_capture_finished)
 
     args = parser.parse_args(argv)
     try:

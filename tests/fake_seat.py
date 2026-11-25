@@ -14,6 +14,10 @@ the two faults the live client shows:
 
 ``hovering_grabs`` counts the frames taken while the pointer was on a button.
 
+A state can also change by itself after a time (``after``), as a replay does
+when it reaches its last turn, and by the wheel (``on_scroll``). A state's
+frame may be a function, drawn when first shown.
+
 A click inside a box a state lists as forbidden raises ``ForbiddenInput``. A
 click that lands on no button is logged with no button name, and is listed by
 ``misses``.
@@ -27,7 +31,7 @@ counts as a miss may still land on the live one, never the other way round.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
 from PIL import Image, ImageDraw
@@ -60,6 +64,9 @@ LOBBY_START_GAME: Box = (640, 480, 802, 517)
 LOBBY_LEAVE: Box = (477, 480, 555, 515)
 SETTINGS_BODY: Box = (0, 60, 1280, 720)
 PROFILE_BODY: Box = (0, 60, 1280, 720)
+#: The Multiplayer list's Profile icon. A replay's Exit and Finish Game sit
+#: at the same point.
+PROFILE_ICON: Box = (745, 645, 785, 685)
 TEAL = (40, 170, 200)
 
 #: The kinds of input no code in seat control may send.
@@ -79,7 +86,8 @@ def _inside(box: Box, x: int, y: int) -> bool:
 @dataclass(frozen=True)
 class State:
     name: str
-    frame: Image.Image
+    #: The frame, or a function that draws it when the state is first shown.
+    frame: Image.Image | Callable[[], Image.Image]
     #: Button name to its box on the screen.
     buttons: Mapping[str, Box] = field(default_factory=dict)
     #: Forbidden kind (one of FORBIDDEN_KINDS) to the box it covers.
@@ -88,6 +96,10 @@ class State:
     on_click: Mapping[str, str] = field(default_factory=dict)
     #: Key name to the state pressing it leads to.
     on_key: Mapping[str, str] = field(default_factory=dict)
+    #: "up" or "down" to the state the wheel leads to.
+    on_scroll: Mapping[str, str] = field(default_factory=dict)
+    #: Seconds in this state, and the state it then becomes by itself.
+    after: tuple[float, str] | None = None
 
     def __post_init__(self) -> None:
         unknown = set(self.forbidden) - set(FORBIDDEN_KINDS)
@@ -123,6 +135,10 @@ class FakeScreen:
         self.hovering_grabs = 0
         self._hovered_at = self._time
         self.frames_served = 0
+        self._entered_at = self._time
+        self._drawn: dict[str, Image.Image] = {}
+        #: Every state the screen has been in, in order.
+        self.visited: list[str] = [start]
 
     # ------------------------------------------------------------ the seam
 
@@ -130,18 +146,36 @@ class FakeScreen:
         return Seat(frames=self, inputs=self, clock=self, **settings)
 
     def grab(self) -> Image.Image:
+        self._tick()
         self.frames_served += 1
         if self._hovered is not None:
             self.hovering_grabs += 1
         if self._held_by is not None:
-            return self._states[self._shown].frame.copy()
+            return self._frame(self._shown)
         if self._stale_left > 0:
             self._stale_left -= 1
-            return self._states[self._shown].frame.copy()
+            return self._frame(self._shown)
         self._shown = self.state
-        return self._states[self.state].frame.copy()
+        return self._frame(self.state)
+
+    def _frame(self, name: str) -> Image.Image:
+        if name not in self._drawn:
+            frame = self._states[name].frame
+            self._drawn[name] = frame() if callable(frame) else frame
+        return self._drawn[name].copy()
+
+    def _tick(self) -> None:
+        """Apply every timed change that is due."""
+        while True:
+            after = self._states[self.state].after
+            if after is None or self._time - self._entered_at < after[0]:
+                return
+            due = self._entered_at + after[0]
+            self._go(after[1], clicked=None)
+            self._entered_at = due
 
     def move(self, x: int, y: int) -> None:
+        self._tick()
         self.log.append(("move", x, y))
         self._pointer = (x, y)
         self._hovered = self._button_at(x, y)
@@ -150,6 +184,7 @@ class FakeScreen:
             self._held_by = None
 
     def click(self, x: int, y: int) -> None:
+        self._tick()
         current = self._states[self.state]
         for kind, box in current.forbidden.items():
             if _inside(box, x, y):
@@ -171,8 +206,16 @@ class FakeScreen:
             self._go(target, clicked=current.buttons[button])
 
     def key(self, name: str) -> None:
+        self._tick()
         self.log.append(("key", name))
         target = self._states[self.state].on_key.get(name)
+        if target is not None:
+            self._go(target, clicked=None)
+
+    def scroll(self, x: int, y: int, notches: int) -> None:
+        self._tick()
+        self.log.append(("scroll", x, y, notches))
+        target = self._states[self.state].on_scroll.get("down" if notches > 0 else "up")
         if target is not None:
             self._go(target, clicked=None)
 
@@ -211,6 +254,8 @@ class FakeScreen:
         if target == self.state:
             return
         self.state = target
+        self.visited.append(target)
+        self._entered_at = self._time
         self._stale_left = self._stale_frames
         if self._stale_until_pointer_leaves and clicked is not None:
             self._held_by = clicked
@@ -245,11 +290,14 @@ def draw_main_menu() -> Image.Image:
     return im
 
 
-def draw_multiplayer() -> Image.Image:
+def draw_multiplayer(tab: str = "ongoing") -> Image.Image:
     im, draw = _blank()
     draw.rectangle((0, 72, 1279, 119), fill=TAB_BAND)
     draw.rectangle((580, 85, 700, 117), fill=WHITE)  # the selected tab's pill
-    draw.rectangle((712, 85, 819, 117), fill=WHITE)  # Replays, right of it
+    if tab == "ongoing":
+        draw.rectangle((712, 85, 819, 117), fill=WHITE)  # Replays, right of it
+    else:
+        draw.rectangle((455, 85, 569, 117), fill=WHITE)  # Ongoing, left of it
     draw.rectangle((660, 660, 679, 679), fill=AMBER)
     _back_arrow(draw)
     return im
@@ -353,6 +401,7 @@ def seat_states() -> dict[str, State]:
             "multiplayer",
             draw_multiplayer(),
             buttons={"back": BACK_ARROW},
+            forbidden={"profile": PROFILE_ICON},
             on_click={"back": "main_menu"},
             on_key={"Escape": "settings"},
         ),
@@ -411,3 +460,229 @@ def seat_states() -> dict[str, State]:
         State("dialog", draw_unknown(), on_key={"Escape": "main_menu"}),
     ]
     return {state.name: state for state in states}
+
+
+# ------------------------------------------------------------ the Replays tab
+
+ROW = (49, 26, 23)
+GAME_VIEW = (30, 70, 40)
+END_SCREEN = (20, 30, 40)
+EXIT_BLUE = (0, 153, 255)
+FINISH_GREEN = (60, 200, 80)
+
+#: A row's height, the distance from one row's top to the next, and the first
+#: row's top with the list at its top.
+ROW_HEIGHT, ROW_PITCH, FIRST_ROW_TOP = 60, 77, 185
+#: The list shows between the tab bar and here. The live list runs on over
+#: the menu scenery, where a row can read as split; the fake simply ends.
+LIST_TOP, LIST_BOTTOM = 130, 520
+#: How far one call of three wheel notches moves the list.
+WHEEL_STEP = 50
+
+ONGOING_TAB: Box = (455, 85, 570, 118)
+REPLAYS_TAB: Box = (712, 85, 820, 118)
+PANEL: Box = (466, 177, 814, 545)
+PANEL_BACK: Box = (477, 500, 556, 533)
+PANEL_OPEN: Box = (720, 500, 801, 533)
+PANEL_INFO: Box = (660, 234, 693, 267)
+#: The panel's other icons. One of them deletes the game.
+PANEL_OTHER_ICONS: Box = (480, 234, 650, 267)
+INFO_BACK: Box = (600, 400, 681, 437)
+REPLAY_CONTROL: Box = PROFILE_ICON
+VICTORY_DONE: Box = (594, 395, 687, 432)
+RESIGNED_DONE: Box = (594, 418, 687, 456)
+
+
+@dataclass(frozen=True)
+class FinishedGame:
+    """A row of the Replays tab, and how its replay plays out."""
+
+    #: Which of the drawn text patterns its row carries; rows differ by it.
+    pattern: int
+    #: Seconds the replay plays before Finish Game shows.
+    plays_for: float = 40
+    #: "victory" or "resigned": the end screen Finish Game leads to.
+    ending: str = "victory"
+
+
+def _row_text(
+    draw: ImageDraw.ImageDraw, top: int, pattern: int, left: int = 479
+) -> None:
+    """A block of white where a row's text is; its place tells rows apart.
+
+    ``left`` is the x of the row's left edge on what is drawn on.
+    """
+    x = left + 66 + 46 * (pattern % 4)
+    y = top + 10 + 22 * (pattern // 4 % 2)
+    draw.rectangle((x, y, x + 39, y + 13), fill=WHITE)
+
+
+def scroll_offsets(rows: int) -> list[int]:
+    """The list's positions, in wheel steps from its top to its end."""
+    travel = 0 if rows < 5 else 100 + ROW_PITCH * (rows - 5)
+    offsets = list(range(0, travel, WHEEL_STEP))
+    return offsets + [travel]
+
+
+def _row_span(index: int, offset: int) -> tuple[int, int] | None:
+    """The visible part of a row, top and bottom, or None when none shows."""
+    top = FIRST_ROW_TOP + ROW_PITCH * index - offset
+    seen = (max(top, LIST_TOP), min(top + ROW_HEIGHT, LIST_BOTTOM))
+    return seen if seen[0] < seen[1] else None
+
+
+def draw_replays(games: list[FinishedGame], offset: int) -> Image.Image:
+    im = draw_multiplayer("replays")
+    for index, game in enumerate(games):
+        if _row_span(index, offset) is None:
+            continue
+        top = FIRST_ROW_TOP + ROW_PITCH * index - offset
+        row = Image.new("RGB", (322, ROW_HEIGHT), ROW)
+        _row_text(ImageDraw.Draw(row), 0, game.pattern, left=0)
+        seen = _row_span(index, offset)
+        im.paste(row.crop((0, seen[0] - top, 322, seen[1] - top)), (479, seen[0]))
+    return im
+
+
+def draw_replay_panel(game: FinishedGame) -> Image.Image:
+    im = draw_multiplayer("replays")
+    draw = ImageDraw.Draw(im)
+    _fill(draw, PANEL, BLACK)
+    _row_text(draw, 290, game.pattern)
+    _fill(draw, PANEL_INFO, WHITE)
+    _fill(draw, PANEL_OTHER_ICONS, GREY)
+    _fill(draw, PANEL_BACK, GREY)
+    _fill(draw, PANEL_OPEN, BUTTON_BLUE)
+    return im
+
+
+def draw_game_info(game: FinishedGame) -> Image.Image:
+    im = draw_replay_panel(game)
+    draw = ImageDraw.Draw(im)
+    _fill(draw, (480, 280, 800, 480), BLACK)
+    _row_text(draw, 300, game.pattern)
+    _fill(draw, INFO_BACK, BUTTON_BLUE)
+    return im
+
+
+def draw_loading() -> Image.Image:
+    im, draw = _blank(BLACK)
+    draw.rectangle((560, 340, 720, 380), fill=(90, 90, 90))
+    return im
+
+
+def draw_replay(control: tuple[int, int, int]) -> Image.Image:
+    im, draw = _blank(GAME_VIEW)
+    _fill(draw, REPLAY_CONTROL, control)
+    return im
+
+
+def draw_end(game: FinishedGame) -> Image.Image:
+    im, draw = _blank(END_SCREEN)
+    draw.rectangle((0, 0, 1279, 59), fill=(9, 8, 9))
+    _row_text(draw, 200, game.pattern)
+    done = VICTORY_DONE if game.ending == "victory" else RESIGNED_DONE
+    _fill(draw, done, BUTTON_BLUE)
+    return im
+
+
+def replay_states(
+    games: list[FinishedGame], *, loads_for: float = 8
+) -> dict[str, State]:
+    """The seat's screens with these finished games on the Replays tab.
+
+    The list is ``replays@<offset>``. A game's states are ``panel``, ``info``,
+    ``loading``, ``playing``, ``finish``, and ``end``, each named
+    ``<state>:<game index>@<offset>``, the offset being where the list returns
+    to.
+    """
+    states = seat_states()
+    offsets = scroll_offsets(len(games))
+    menu = states["main_menu"]
+    states["main_menu"] = State(
+        "main_menu", menu.frame, buttons=menu.buttons, on_click=menu.on_click
+    )
+    ongoing = states["multiplayer"]
+    states["multiplayer"] = State(
+        "multiplayer",
+        ongoing.frame,
+        buttons={**ongoing.buttons, "replays_tab": REPLAYS_TAB},
+        forbidden=ongoing.forbidden,
+        on_click={**ongoing.on_click, "replays_tab": f"replays@{offsets[-1]}"},
+        on_key=ongoing.on_key,
+    )
+    for at, offset in enumerate(offsets):
+        rows = {}
+        for index in range(len(games)):
+            seen = _row_span(index, offset)
+            if seen is not None:
+                rows[f"row{index}"] = (479, seen[0], 801, seen[1])
+        scroll = {}
+        if at > 0:
+            scroll["up"] = f"replays@{offsets[at - 1]}"
+        if at < len(offsets) - 1:
+            scroll["down"] = f"replays@{offsets[at + 1]}"
+        states[f"replays@{offset}"] = State(
+            f"replays@{offset}",
+            lambda offset=offset: draw_replays(games, offset),
+            buttons={"back": BACK_ARROW, "ongoing_tab": ONGOING_TAB, **rows},
+            forbidden={"profile": PROFILE_ICON},
+            on_click={
+                "back": "main_menu",
+                "ongoing_tab": "multiplayer",
+                **{name: f"panel:{name[3:]}@{offset}" for name in rows},
+            },
+            on_key={"Escape": "settings"},
+            on_scroll=scroll,
+        )
+        for index, game in enumerate(games):
+            tag = f"{index}@{offset}"
+            done = VICTORY_DONE if game.ending == "victory" else RESIGNED_DONE
+            for state in (
+                State(
+                    f"panel:{tag}",
+                    lambda game=game: draw_replay_panel(game),
+                    buttons={
+                        "panel_back": PANEL_BACK,
+                        "open": PANEL_OPEN,
+                        "more_info": PANEL_INFO,
+                    },
+                    forbidden={"delete": PANEL_OTHER_ICONS},
+                    on_click={
+                        "panel_back": f"replays@{offset}",
+                        "open": f"loading:{tag}",
+                        "more_info": f"info:{tag}",
+                    },
+                ),
+                State(
+                    f"info:{tag}",
+                    lambda game=game: draw_game_info(game),
+                    buttons={"info_back": INFO_BACK},
+                    forbidden={"delete": PANEL_OTHER_ICONS},
+                    on_click={"info_back": f"panel:{tag}"},
+                ),
+                State(
+                    f"loading:{tag}", draw_loading, after=(loads_for, f"playing:{tag}")
+                ),
+                State(
+                    f"playing:{tag}",
+                    lambda: draw_replay(EXIT_BLUE),
+                    buttons={"exit": REPLAY_CONTROL},
+                    on_click={"exit": f"replays@{offset}"},
+                    after=(game.plays_for, f"finish:{tag}"),
+                ),
+                State(
+                    f"finish:{tag}",
+                    lambda: draw_replay(FINISH_GREEN),
+                    buttons={"finish_game": REPLAY_CONTROL},
+                    on_click={"finish_game": f"end:{tag}"},
+                ),
+                State(
+                    f"end:{tag}",
+                    lambda game=game: draw_end(game),
+                    buttons={"done": done},
+                    on_click={"done": f"replays@{offset}"},
+                ),
+            ):
+                states[state.name] = state
+    return states

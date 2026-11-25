@@ -27,12 +27,22 @@ from scoretopia.seat.seam import Seat
 ScreenTest = Callable[[Image.Image], object]
 
 
-class UnknownScreen(Stop):
-    """No known screen showed and Escape did not leave it; carries the frame."""
+class ScreenStop(Stop):
+    """An action stopped on a screen it did not expect; carries the frame.
+
+    The exception's text is a fixed word saying which expectation failed.
+    """
+
+    def __init__(self, code: str, frame: Image.Image) -> None:
+        super().__init__(code)
+        self.frame = frame
+
+
+class UnknownScreen(ScreenStop):
+    """No known screen showed and Escape did not leave it."""
 
     def __init__(self, frame: Image.Image) -> None:
-        super().__init__("unknown_screen")
-        self.frame = frame
+        super().__init__("unknown_screen", frame)
 
 
 #: Where the pointer rests while a frame is read: empty background on every
@@ -46,6 +56,12 @@ POLL = 1.0
 BACK_ARROW = (31, 31)
 #: The back arrow of GAME SETUP and of both PICK YOUR TRIBE screens.
 SETUP_BACK = screen.TRIBE_BACK
+#: The main menu's MULTIPLAYER button.
+MENU_MULTIPLAYER = (640, 404)
+#: The Multiplayer list's two tabs.
+TABS = {"ongoing": (513, 100), "replays": (765, 100)}
+#: Where the wheel is turned to scroll the Multiplayer list.
+LIST_WHEEL = (640, 400)
 
 
 def park(seat: Seat) -> None:
@@ -57,6 +73,12 @@ def park(seat: Seat) -> None:
 def check_budget(seat: Seat) -> None:
     """Raise ``Budget`` when the seat's deadline has passed."""
     if seat.deadline is not None and seat.clock.now() > seat.deadline:
+        raise Budget()
+
+
+def require_budget(seat: Seat, need: float) -> None:
+    """Raise ``Budget`` unless ``need`` seconds remain before the deadline."""
+    if seat.deadline is not None and seat.clock.now() + need > seat.deadline:
         raise Budget()
 
 
@@ -72,36 +94,47 @@ def press(seat: Seat, point: tuple[int, int]) -> None:
     park(seat)
 
 
-def poll_for(seat: Seat, test: ScreenTest, timeout: float) -> Image.Image | None:
-    """The first frame of two in a row that pass ``test``; None on timeout.
-
-    Raises ``Budget`` when the seat's deadline passes while the screen is
-    still not showing. A screen seen once is given its second frame.
-    """
+def _poll(
+    seat: Seat, test: ScreenTest, timeout: float
+) -> tuple[Image.Image | None, Image.Image]:
+    """The frame ``poll_for()`` returns, and the last frame looked at."""
     end = seat.clock.now() + timeout
     held = False
     while True:
         frame = seat.frames.grab()
         if test(frame):
             if held:
-                return frame
+                return frame, frame
             held = True
         else:
             held = False
         if not held:
             check_budget(seat)
         if seat.clock.now() > end:
-            return None
+            return None, frame
         seat.clock.sleep(POLL)
+
+
+def poll_for(seat: Seat, test: ScreenTest, timeout: float) -> Image.Image | None:
+    """The first frame of two in a row that pass ``test``; None on timeout.
+
+    Raises ``Budget`` when the seat's deadline passes while the screen is
+    still not showing. A screen seen once is given its second frame.
+    """
+    return _poll(seat, test, timeout)[0]
 
 
 def wait_for(
     seat: Seat, test: ScreenTest, what: str, timeout: float | None = None
 ) -> Image.Image:
-    """As ``poll_for()``, for at least the seat's wait; ``Stop`` on timeout."""
-    frame = poll_for(seat, test, max(timeout or seat.wait, seat.wait))
+    """As ``poll_for()``, for at least the seat's wait.
+
+    On timeout raises ``ScreenStop`` with ``timeout_<what>`` and the last
+    frame looked at.
+    """
+    frame, last = _poll(seat, test, max(timeout or seat.wait, seat.wait))
     if frame is None:
-        raise Stop("timeout_" + what)
+        raise ScreenStop("timeout_" + what, last)
     return frame
 
 
@@ -190,3 +223,39 @@ def to_main_menu(seat: Seat) -> bool:
         press(seat, SETUP_BACK)
         frame = wait_for(seat, _main_menu_or_list, "list_back_tribe")
     return True
+
+
+def to_list(seat: Seat) -> Image.Image:
+    """To the Multiplayer list with no panel open, through the main menu's
+    MULTIPLAYER when the client is there."""
+    frame = recover(seat)
+    if screen.main_menu(frame):
+        press(seat, MENU_MULTIPLAYER)
+        frame = wait_for(seat, screen.mp_list, "multiplayer", 30)
+    return frame
+
+
+def go_tab(seat: Seat, name: str) -> Image.Image:
+    """Show one tab of the Multiplayer list, ``ongoing`` or ``replays``."""
+    park(seat)
+    frame, last = _poll(seat, screen.mp_list, seat.wait)
+    if frame is None:
+        raise ScreenStop("not_on_multiplayer_list", last)
+    if screen.selected_tab(frame) != name:
+        press(seat, TABS[name])
+        frame = wait_for(
+            seat,
+            lambda i: screen.mp_list(i) and screen.selected_tab(i) == name,
+            "tab_" + name,
+        )
+    return frame
+
+
+def wheel(seat: Seat, notches: int) -> None:
+    """Turn the wheel over the Multiplayer list: down for positive notches.
+
+    The pointer is parked afterwards, as after a click.
+    """
+    check_budget(seat)
+    seat.inputs.scroll(*LIST_WHEEL, notches)
+    park(seat)

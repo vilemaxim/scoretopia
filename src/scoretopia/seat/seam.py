@@ -37,6 +37,9 @@ class InputSink(Protocol):
     def key(self, name: str) -> None:
         """Press and release one key, named as the input tool names it."""
 
+    def scroll(self, x: int, y: int, notches: int) -> None:
+        """Turn the wheel at a point: down for positive notches, up for negative."""
+
 
 class Clock(Protocol):
     def now(self) -> float:
@@ -86,6 +89,12 @@ class LiveInputs:
 
     def key(self, name: str) -> None:
         screen.xdo("key", name)
+
+    def scroll(self, x: int, y: int, notches: int) -> None:
+        button = 5 if notches > 0 else 4
+        screen.xdo(
+            "mousemove", x, y, "click", "--repeat", abs(notches), "--delay", 200, button
+        )
 
 
 class SystemClock:
