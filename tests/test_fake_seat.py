@@ -14,9 +14,15 @@ from fake_seat import (
     FakeScreen,
     FinishedGame,
     ForbiddenInput,
+    OngoingGame,
     State,
+    draw_card_info,
+    draw_card_panel,
+    draw_joined_lobby,
+    draw_ongoing,
     draw_replays,
     draw_unknown,
+    ongoing_states,
     replay_states,
     scroll_offsets,
     seat_states,
@@ -271,3 +277,64 @@ def test_the_panels_other_icons_are_forbidden() -> None:
 
     with pytest.raises(ForbiddenInput, match="delete"):
         fake.click(560, 250)
+
+
+# ------------------------------------------------------------ the Ongoing tab
+
+
+@pytest.mark.parametrize("offset", scroll_offsets(5))
+def test_the_drawn_ongoing_tab_is_the_list_with_its_whole_cards(offset: int) -> None:
+    games = [OngoingGame(n) for n in range(5)]
+    frame = draw_ongoing(games, offset)
+
+    cards = screen.bands(frame)
+
+    assert screen.mp_list(frame)
+    assert screen.selected_tab(frame) == "ongoing"
+    assert all(bottom - top == 60 for top, bottom in cards)
+    keys = [screen.key_of(frame, card, "setup") for card in cards]
+    assert None not in keys
+    assert len(set(keys)) == len(keys)
+
+
+def test_no_two_drawn_cards_are_within_the_matching_tolerance() -> None:
+    games = [OngoingGame(n) for n in range(10)]
+    masks = []
+    for start in (0, 4, 8):
+        frame = draw_ongoing(games[start : start + 4], 0)
+        masks += [screen.mask_of(frame, card, "setup") for card in screen.bands(frame)]
+
+    assert len(masks) == 10
+    for at, mask in enumerate(masks):
+        assert screen.match(mask, masks[:at] + masks[at + 1 :]) is None
+
+
+def test_only_a_started_games_panel_has_open_and_nothing_wider() -> None:
+    started = draw_card_panel(OngoingGame(0))
+    joined = draw_joined_lobby(OngoingGame(0))
+    top = screen.panel_top(started)
+
+    open_y = screen.find_blue(started, 760, top + 250, top + 420)
+
+    assert open_y is not None
+    assert not screen.blue(screen.px(started, 705, open_y))
+    assert not screen.invite_panel(started)
+    assert screen.find_blue(joined, 760, top + 250, top + 420) is None
+    assert screen.find_blue(joined, 640, top + 250, top + 420) is not None
+
+
+def test_a_cards_game_info_shows_its_back_over_the_panel() -> None:
+    panel = draw_card_panel(OngoingGame(0))
+    info = draw_card_info(OngoingGame(0))
+    top = screen.panel_top(info)
+
+    assert top == screen.panel_top(panel)
+    assert screen.find_blue(panel, 640, top + 200, top + 300) is None
+    assert screen.find_blue(info, 640, top + 200, top + 300) is not None
+
+
+def test_the_icons_beside_more_info_on_a_cards_panel_are_forbidden() -> None:
+    fake = FakeScreen(ongoing_states([OngoingGame(0)]), "card:0@0")
+
+    with pytest.raises(ForbiddenInput, match="delete"):
+        fake.click(700, 250)

@@ -594,14 +594,14 @@ def draw_end(game: FinishedGame) -> Image.Image:
 
 
 def replay_states(
-    games: list[FinishedGame], *, loads_for: float = 8
+    games: list[FinishedGame], *, loads_for: float = 8, ongoing: str = "multiplayer"
 ) -> dict[str, State]:
     """The seat's screens with these finished games on the Replays tab.
 
     The list is ``replays@<offset>``. A game's states are ``panel``, ``info``,
     ``loading``, ``playing``, ``finish``, and ``end``, each named
     ``<state>:<game index>@<offset>``, the offset being where the list returns
-    to.
+    to. ``ongoing`` names the state the Ongoing tab leads to.
     """
     states = seat_states()
     offsets = scroll_offsets(len(games))
@@ -636,7 +636,7 @@ def replay_states(
             forbidden={"profile": PROFILE_ICON},
             on_click={
                 "back": "main_menu",
-                "ongoing_tab": "multiplayer",
+                "ongoing_tab": ongoing,
                 **{name: f"panel:{name[3:]}@{offset}" for name in rows},
             },
             on_key={"Escape": "settings"},
@@ -691,5 +691,201 @@ def replay_states(
                     on_click={"done": f"replays@{offset}"},
                 ),
             ):
+                states[state.name] = state
+    return states
+
+
+# ------------------------------------------------------------ the Ongoing tab
+
+#: More info on a card's panel: the last of its icons.
+CARD_INFO: Box = (733, 234, 766, 267)
+#: The panel's icons left of More info. One of them deletes the game.
+CARD_OTHER_ICONS: Box = (480, 234, 725, 267)
+#: The one button of a joined lobby's panel: a blue BACK at the centre.
+LOBBY_BACK: Box = (600, 500, 681, 533)
+
+#: What an Ongoing card can be. ``started`` is a game in progress. ``lobby``
+#: is a game the seat has joined that has not started. ``invitation`` is one
+#: it has not answered. ``own_lobby`` is a lobby the seat itself created, whose
+#: panel offers START GAME where a started game's has OPEN.
+CARD_KINDS = ("started", "lobby", "invitation", "own_lobby")
+
+
+@dataclass(frozen=True)
+class OngoingGame:
+    """A card of the Ongoing tab."""
+
+    #: Which of the drawn title patterns its card carries; cards differ by it.
+    pattern: int
+    kind: str = "started"
+
+    def __post_init__(self) -> None:
+        if self.kind not in CARD_KINDS:
+            raise ValueError(f"not a card kind: {self.kind}")
+
+
+def _card_title(
+    draw: ImageDraw.ImageDraw, top: int, pattern: int, left: int = 479
+) -> None:
+    """A block of white on a card's title line; its place tells cards apart."""
+    x = left + 62 + 40 * (pattern % 5)
+    y = top + 9 + 13 * (pattern // 5 % 2)
+    draw.rectangle((x, y, x + 35, y + 12), fill=WHITE)
+
+
+def draw_ongoing(games: list[OngoingGame], offset: int) -> Image.Image:
+    im = draw_multiplayer("ongoing")
+    for index, game in enumerate(games):
+        seen = _row_span(index, offset)
+        if seen is None:
+            continue
+        top = FIRST_ROW_TOP + ROW_PITCH * index - offset
+        card = Image.new("RGB", (322, ROW_HEIGHT), ROW)
+        _card_title(ImageDraw.Draw(card), 0, game.pattern, left=0)
+        im.paste(card.crop((0, seen[0] - top, 322, seen[1] - top)), (479, seen[0]))
+    return im
+
+
+def draw_card_panel(game: OngoingGame) -> Image.Image:
+    """A started game's panel: grey BACK, blue OPEN, More info last of its icons."""
+    im = draw_multiplayer("ongoing")
+    draw = ImageDraw.Draw(im)
+    _fill(draw, PANEL, BLACK)
+    _card_title(draw, 290, game.pattern)
+    _fill(draw, CARD_OTHER_ICONS, GREY)
+    _fill(draw, CARD_INFO, WHITE)
+    _fill(draw, PANEL_BACK, GREY)
+    _fill(draw, PANEL_OPEN, BUTTON_BLUE)
+    return im
+
+
+def draw_card_info(game: OngoingGame) -> Image.Image:
+    im = draw_card_panel(game)
+    draw = ImageDraw.Draw(im)
+    _fill(draw, (480, 280, 800, 480), BLACK)
+    _card_title(draw, 300, game.pattern)
+    _fill(draw, INFO_BACK, BUTTON_BLUE)
+    return im
+
+
+def draw_joined_lobby(game: OngoingGame) -> Image.Image:
+    """The panel of a game that has not started: no OPEN, a blue BACK."""
+    im = draw_multiplayer("ongoing")
+    draw = ImageDraw.Draw(im)
+    _fill(draw, PANEL, BLACK)
+    _card_title(draw, 290, game.pattern)
+    _fill(draw, LOBBY_BACK, BUTTON_BLUE)
+    return im
+
+
+def draw_wide_button_panel(box: Box) -> Image.Image:
+    """A panel no card is known to open, with one blue button at ``box``."""
+    im = draw_multiplayer("ongoing")
+    draw = ImageDraw.Draw(im)
+    _fill(draw, PANEL, BLACK)
+    _fill(draw, box, BUTTON_BLUE)
+    return im
+
+
+def ongoing_states(
+    games: list[OngoingGame], finished: list[FinishedGame] | None = None
+) -> dict[str, State]:
+    """The seat's screens with these cards on the Ongoing tab.
+
+    The list is ``ongoing@<offset>``, and the main menu's MULTIPLAYER opens it
+    at its end. A card's panel is ``card:<index>@<offset>`` whatever its kind,
+    and a started game's Game Info is ``cardinfo:<index>@<offset>``. The
+    Replays tab holds ``finished``.
+    """
+    offsets = scroll_offsets(len(games))
+    home = f"ongoing@{offsets[-1]}"
+    states = replay_states(finished or [], ongoing=home)
+    replays = f"replays@{scroll_offsets(len(finished or []))[-1]}"
+    menu = states["main_menu"]
+    states["main_menu"] = State(
+        "main_menu", menu.frame, buttons=menu.buttons, on_click={"multiplayer": home}
+    )
+    for at, offset in enumerate(offsets):
+        cards = {}
+        for index in range(len(games)):
+            seen = _row_span(index, offset)
+            if seen is not None:
+                cards[f"card{index}"] = (479, seen[0], 801, seen[1])
+        scroll = {}
+        if at > 0:
+            scroll["up"] = f"ongoing@{offsets[at - 1]}"
+        if at < len(offsets) - 1:
+            scroll["down"] = f"ongoing@{offsets[at + 1]}"
+        here = f"ongoing@{offset}"
+        states[here] = State(
+            here,
+            lambda offset=offset: draw_ongoing(games, offset),
+            buttons={"back": BACK_ARROW, "replays_tab": REPLAYS_TAB, **cards},
+            forbidden={"profile": PROFILE_ICON},
+            on_click={
+                "back": "main_menu",
+                "replays_tab": replays,
+                **{name: f"card:{name[4:]}@{offset}" for name in cards},
+            },
+            on_key={"Escape": "settings"},
+            on_scroll=scroll,
+        )
+        for index, game in enumerate(games):
+            tag = f"{index}@{offset}"
+            if game.kind == "started":
+                made = [
+                    State(
+                        f"card:{tag}",
+                        lambda game=game: draw_card_panel(game),
+                        buttons={
+                            "panel_back": PANEL_BACK,
+                            "open": PANEL_OPEN,
+                            "more_info": CARD_INFO,
+                        },
+                        forbidden={"delete": CARD_OTHER_ICONS},
+                        on_click={
+                            "panel_back": here,
+                            "more_info": f"cardinfo:{tag}",
+                        },
+                    ),
+                    State(
+                        f"cardinfo:{tag}",
+                        lambda game=game: draw_card_info(game),
+                        buttons={"info_back": INFO_BACK},
+                        forbidden={"delete": CARD_OTHER_ICONS},
+                        on_click={"info_back": f"card:{tag}"},
+                    ),
+                ]
+            elif game.kind == "lobby":
+                made = [
+                    State(
+                        f"card:{tag}",
+                        lambda game=game: draw_joined_lobby(game),
+                        buttons={"lobby_back": LOBBY_BACK},
+                        on_click={"lobby_back": here},
+                    )
+                ]
+            elif game.kind == "invitation":
+                made = [
+                    State(
+                        f"card:{tag}",
+                        draw_invitation,
+                        buttons={"back": INVITE_BACK, "accept": INVITE_ACCEPT},
+                        forbidden={"decline": INVITE_DECLINE},
+                        on_click={"back": here},
+                    )
+                ]
+            else:
+                made = [
+                    State(
+                        f"card:{tag}",
+                        draw_lobby,
+                        forbidden={
+                            "start_game": LOBBY_START_GAME,
+                            "delete": LOBBY_LEAVE,
+                        },
+                    )
+                ]
+            for state in made:
                 states[state.name] = state
     return states

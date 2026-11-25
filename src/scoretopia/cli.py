@@ -242,6 +242,18 @@ def _cmd_seat_capture_finished(args: argparse.Namespace) -> int:
     )
 
 
+def _cmd_seat_capture_setup(args: argparse.Namespace) -> int:
+    """Capture the setup of every started game not yet captured."""
+    os.umask(0o027)  # As capture-finished: for the owner and the group only.
+    return _run_seat_command(
+        args,
+        seat_commands.CAPTURE_SETUP,
+        lambda seat, config: seat_commands.capture_setup(
+            seat, config.captures_path, config.frames_path
+        ),
+    )
+
+
 def _config_parent_parser() -> argparse.ArgumentParser:
     parent = argparse.ArgumentParser(add_help=False)
     parent.add_argument(
@@ -357,6 +369,14 @@ def main(argv: Sequence[str] | None = None) -> None:
             f"Capture the screens of every finished game not yet captured. {exit_codes}"
         ),
     ).set_defaults(handler=_cmd_seat_capture_finished)
+    seat_sub.add_parser(
+        "capture-setup",
+        parents=[seat_config_parent],
+        help=(
+            "Capture the setup of every started game not yet captured. "
+            f"{exit_codes}"
+        ),
+    ).set_defaults(handler=_cmd_seat_capture_setup)
 
     args = parser.parse_args(argv)
     try:

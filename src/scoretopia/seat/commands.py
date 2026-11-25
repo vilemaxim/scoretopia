@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from enum import Enum
@@ -26,6 +26,8 @@ from scoretopia.seat.seam import Seat
 MAIN_MENU = "main-menu"
 #: The action name of ``scoretopia seat capture-finished``.
 CAPTURE_FINISHED = "capture-finished"
+#: The action name of ``scoretopia seat capture-setup``.
+CAPTURE_SETUP = "capture-setup"
 
 
 class Outcome(Enum):
@@ -146,12 +148,41 @@ def capture_finished(seat: Seat, captures_root: Path, frames_dir: Path) -> SeatR
     manifest, which ingest ignores; the game is not recorded, so the next run
     captures it again.
     """
-    action = CAPTURE_FINISHED
-    counts = capture.CaptureCounts()
+    return _capture(
+        seat,
+        CAPTURE_FINISHED,
+        capture.CaptureCounts(),
+        lambda counts: capture.capture_finished(seat, captures_root, counts),
+        frames_dir,
+    )
+
+
+def capture_setup(seat: Seat, captures_root: Path, frames_dir: Path) -> SeatResult:
+    """Capture the setup of every started game not yet captured, then return
+    to the menu.
+
+    Succeeds when it captured at least one setup; a list with nothing new is
+    nothing to do. A game that has not started is counted and left for a
+    later run. A capture that stops half way leaves a directory with no
+    manifest and is not recorded, so the next run captures it again.
+    """
+    return _capture(
+        seat,
+        CAPTURE_SETUP,
+        capture.SetupCounts(),
+        lambda counts: capture.capture_setup(seat, captures_root, counts),
+        frames_dir,
+    )
+
+
+def _capture[C: capture.CaptureCounts](
+    seat: Seat, action: str, counts: C, run: Callable[[C], None], frames_dir: Path
+) -> SeatResult:
+    """Run one capture sweep and report its counts, however it ended."""
     try:
         try:
             try:
-                capture.capture_finished(seat, captures_root, counts)
+                run(counts)
             except screen.Budget:
                 counts.budget_reached = True
             actions.to_main_menu(seat)
