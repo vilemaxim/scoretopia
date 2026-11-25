@@ -136,6 +136,9 @@ database:
 captures:
   path: data/captures             # where capture directories arrive
   poll_seconds: 300               # how often the bot looks for new ones
+
+orders:
+  path: data/orders.json          # what the bot tells seat control
 ```
 
 The channel value is a **channel name**, not an ID. The bot resolves it when it
@@ -214,6 +217,12 @@ The process must **keep running** while you want the bot online. Use `tmux`,
 
 The bot polls `captures.path` every `captures.poll_seconds` and posts each new
 game start and end to the reports channel.
+
+The bot also writes the orders file at `orders.path`: the registered players'
+Polytopia names, which are the players whose invitations the seat accepts. It
+rewrites the file at start and whenever a player registers. Seat control reads
+the file and never opens the database, so the file must be readable by the
+user seat control runs as.
 
 To process the captures directory once without Discord, printing each post to
 the terminal instead (for testing):
