@@ -6,11 +6,16 @@ import argparse
 import logging
 import sqlite3
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
-from scoretopia.config import KNOWN_REPORTS, ScoretopiaConfig, load_config
+from scoretopia.config import (
+    KNOWN_REPORTS,
+    ConfigError,
+    ScoretopiaConfig,
+    load_config,
+)
 from scoretopia.discord.adapter import DiscordBotAdapter, load_discord_token
 from scoretopia.domain.captures import CaptureIngestService, seed_captures
 from scoretopia.domain.games import GameService
@@ -23,6 +28,9 @@ from scoretopia.reports.scheduler import (
     run_scheduler_loop,
 )
 from scoretopia.reports.service import ReportService
+from scoretopia.seat import commands as seat_commands
+from scoretopia.seat.config import load_seat_config
+from scoretopia.seat.seam import live_seat
 from scoretopia.storage.db import open_database
 from scoretopia.storage.repos import (
     CaptureManifestRepo,
@@ -182,6 +190,30 @@ def _cmd_bot(args: argparse.Namespace) -> None:
     adapter.run()
 
 
+def _cmd_seat_main_menu(args: argparse.Namespace) -> int:
+    """Return the game client to the main menu; print one line of JSON."""
+    action = seat_commands.MAIN_MENU
+    try:
+        config = load_seat_config(args.config)
+    except ConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        result = seat_commands.SeatResult(
+            action, seat_commands.Outcome.FAILED, code="config_error"
+        )
+    else:
+        try:
+            with live_seat(
+                display=config.display,
+                x_user=config.x_user,
+                budget_seconds=config.budget_seconds,
+            ) as seat:
+                result = seat_commands.main_menu(seat, config.frames_path)
+        except seat_commands.SEAT_ERRORS as error:
+            result = seat_commands.failure(action, error)
+    print(result.line())
+    return result.exit_code
+
+
 def _config_parent_parser() -> argparse.ArgumentParser:
     parent = argparse.ArgumentParser(add_help=False)
     parent.add_argument(
@@ -193,7 +225,7 @@ def _config_parent_parser() -> argparse.ArgumentParser:
     return parent
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     config_parent = _config_parent_parser()
     parser = argparse.ArgumentParser(description="Scoretopia Polytopia game tracker")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -269,12 +301,34 @@ def main() -> None:
     )
     bot_parser.set_defaults(handler=_cmd_bot)
 
-    args = parser.parse_args()
+    seat_parser = subparsers.add_parser(
+        "seat",
+        help="Control the seat's game client (one action per command)",
+    )
+    seat_sub = seat_parser.add_subparsers(dest="seat_command", required=True)
+    seat_main_menu_parser = seat_sub.add_parser(
+        "main-menu",
+        help=(
+            "Return the client to the main menu. Prints one line of JSON; exits "
+            "0 succeeded, 10 nothing to do, 20 unknown screen, 1 other failure"
+        ),
+    )
+    seat_main_menu_parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Path to seat control's own config (default: config/seat.yaml)",
+    )
+    seat_main_menu_parser.set_defaults(handler=_cmd_seat_main_menu)
+
+    args = parser.parse_args(argv)
     try:
-        args.handler(args)
+        exit_code = args.handler(args)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         raise
+    if exit_code is not None:
+        sys.exit(exit_code)
 
 
 if __name__ == "__main__":
