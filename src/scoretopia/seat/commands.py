@@ -21,6 +21,7 @@ from PIL import Image
 
 from scoretopia.orders import UnknownOrdersVersionError, read_orders
 from scoretopia.seat import actions, capture, invitations, screen
+from scoretopia.seat import resign as resigning
 from scoretopia.seat.seam import Seat
 
 #: The action name of ``scoretopia seat main-menu``.
@@ -31,6 +32,8 @@ CAPTURE_FINISHED = "capture-finished"
 CAPTURE_SETUP = "capture-setup"
 #: The action name of ``scoretopia seat accept-invitations``.
 ACCEPT_INVITATIONS = "accept-invitations"
+#: The action name of ``scoretopia seat resign``.
+RESIGN = "resign"
 
 
 class Outcome(Enum):
@@ -221,7 +224,29 @@ def accept_invitations(
     return result
 
 
-def _counted[C: capture.CaptureCounts | invitations.AcceptCounts](
+def resign(seat: Seat, captures_root: Path, frames_dir: Path) -> SeatResult:
+    """Resign from every game on the seat's turn whose setup is captured, then
+    return to the menu.
+
+    Succeeds when it resigned from at least one game. A game whose setup is
+    not captured is counted and left for a later run. No game is deleted.
+    """
+    return _counted(
+        seat,
+        RESIGN,
+        resigning.ResignCounts(),
+        lambda counts: resigning.resign(seat, captures_root, counts),
+        lambda counts: counts.resigned,
+        frames_dir,
+    )
+
+
+type _Counts = (
+    capture.CaptureCounts | invitations.AcceptCounts | resigning.ResignCounts
+)
+
+
+def _counted[C: _Counts](
     seat: Seat,
     action: str,
     counts: C,

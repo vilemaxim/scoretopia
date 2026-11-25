@@ -712,6 +712,33 @@ LOBBY_BACK: Box = (600, 500, 681, 533)
 #: panel offers START GAME where a started game's has OPEN.
 CARD_KINDS = ("started", "lobby", "invitation", "own_lobby")
 
+#: A card under "Your Turn" or "Game Invitations"; the others are ``ROW``.
+TURN_BLUE = (49, 146, 228)
+#: A started game's panel carries a red RESIGN of its own on the seat's turn.
+#: Seat control resigns in the game, so this is no button: a click is a miss.
+PANEL_RESIGN: Box = (725, 197, 807, 219)
+#: The robot portrait of a player who resigned, and its eyes.
+ROBOT: Box = (655, 373, 686, 414)
+ROBOT_EYES: Box = (662, 385, 678, 388)
+ROBOT_GREY = (170, 170, 170)
+
+#: The game view's Settings button, and what in-game Settings shows.
+GAME_SETTINGS: Box = (497, 647, 534, 684)
+GAME_BACK: Box = (14, 14, 50, 50)
+GAME_RESIGN: Box = (1195, 16, 1256, 45)
+GAME_EXIT: Box = (590, 562, 691, 597)
+#: Everything in-game Settings can change.
+GAME_OPTIONS: Box = (300, 80, 980, 520)
+CONFIRM_OK: Box = (751, 384, 805, 424)
+CONFIRM_BACK: Box = (490, 390, 537, 419)
+#: The turn 0 dialog's OK, on a game the seat created and on one it accepted.
+TURN0_OK: Mapping[str, Box] = {
+    "created": (600, 442, 681, 473),
+    "accepted": (600, 513, 681, 544),
+}
+DIM_VIEW = (12, 28, 16)
+DIM_RED = (90, 20, 0)
+
 
 @dataclass(frozen=True)
 class OngoingGame:
@@ -720,10 +747,25 @@ class OngoingGame:
     #: Which of the drawn title patterns its card carries; cards differ by it.
     pattern: int
     kind: str = "started"
+    #: A started game on the seat's turn: its card is drawn blue, and OPEN on
+    #: its panel leads into the game.
+    seat_turn: bool = False
+    #: The other player has resigned: the panel shows a robot's portrait.
+    opponent_resigned: bool = False
+    #: Where the turn 0 dialog's OK shows once the game has loaded: "created",
+    #: "accepted", or None for no dialog.
+    turn0: str | None = "created"
 
     def __post_init__(self) -> None:
         if self.kind not in CARD_KINDS:
             raise ValueError(f"not a card kind: {self.kind}")
+        if self.turn0 not in (None, *TURN0_OK):
+            raise ValueError(f"not a turn 0 dialog: {self.turn0}")
+
+    @property
+    def blue(self) -> bool:
+        """Whether the card is drawn blue, as under "Your Turn"."""
+        return self.kind == "invitation" or (self.kind == "started" and self.seat_turn)
 
 
 def _card_title(
@@ -742,7 +784,7 @@ def draw_ongoing(games: list[OngoingGame], offset: int) -> Image.Image:
         if seen is None:
             continue
         top = FIRST_ROW_TOP + ROW_PITCH * index - offset
-        card = Image.new("RGB", (322, ROW_HEIGHT), ROW)
+        card = Image.new("RGB", (322, ROW_HEIGHT), TURN_BLUE if game.blue else ROW)
         _card_title(ImageDraw.Draw(card), 0, game.pattern, left=0)
         im.paste(card.crop((0, seen[0] - top, 322, seen[1] - top)), (479, seen[0]))
     return im
@@ -758,6 +800,36 @@ def draw_card_panel(game: OngoingGame) -> Image.Image:
     _fill(draw, CARD_INFO, WHITE)
     _fill(draw, PANEL_BACK, GREY)
     _fill(draw, PANEL_OPEN, BUTTON_BLUE)
+    if game.seat_turn:
+        _fill(draw, PANEL_RESIGN, RED)
+    if game.opponent_resigned:
+        _fill(draw, ROBOT, ROBOT_GREY)
+        _fill(draw, ROBOT_EYES, RED)
+    return im
+
+
+def draw_game_view(turn0: str | None = None) -> Image.Image:
+    """A game as OPEN shows it, with the turn 0 dialog over it when asked."""
+    im, draw = _blank(GAME_VIEW)
+    _fill(draw, GAME_SETTINGS, GREY)
+    if turn0 is not None:
+        _fill(draw, (462, 259, 816, 560), BLACK)
+        _fill(draw, TURN0_OK[turn0], CIRCLE_BLUE)
+    return im
+
+
+def draw_game_settings(*, confirm: bool = False) -> Image.Image:
+    """In-game Settings; with ``confirm``, the Resign confirmation over it."""
+    im, draw = _blank(DIM_VIEW)
+    _fill(draw, GAME_BACK, (188, 188, 188))
+    draw.rectangle((30, 30, 32, 32), fill=WHITE)
+    draw.rectangle((540, 538, 739, 542), fill=(166, 166, 166))
+    _fill(draw, GAME_EXIT, (8, 131, 214))
+    _fill(draw, GAME_RESIGN, DIM_RED if confirm else RED)
+    if confirm:
+        _fill(draw, (462, 300, 816, 440), BLACK)
+        _fill(draw, CONFIRM_BACK, WHITE)
+        _fill(draw, CONFIRM_OK, CIRCLE_BLUE)
     return im
 
 
@@ -820,7 +892,10 @@ AFTER_ACCEPT = "!"
 
 
 def ongoing_states(
-    games: list[OngoingGame], finished: list[FinishedGame] | None = None
+    games: list[OngoingGame],
+    finished: list[FinishedGame] | None = None,
+    *,
+    resigned_to: str | None = None,
 ) -> dict[str, State]:
     """The seat's screens with these cards on the Ongoing tab.
 
@@ -835,6 +910,12 @@ def ongoing_states(
     side's tribe screen (``reopened_tribe``), whose own back arrow returns to
     the unmarked list. The cards stay as drawn: an accepted invitation's card
     still opens its invitation.
+
+    OPEN on a started game on the seat's turn leads through ``gameload``,
+    ``turn0`` when the game has the dialog, ``game``, ``gamesettings``,
+    ``confirm``, and ``over``, each named as the card's panel is. DONE on
+    ``over`` leads to ``resigned_to``: by default the list at its end, as the
+    main menu's MULTIPLAYER opens it. The resigned game's card stays as drawn.
     """
     offsets = scroll_offsets(len(games))
     home = f"ongoing@{offsets[-1]}"
@@ -852,7 +933,9 @@ def ongoing_states(
     )
     for mark in ("", AFTER_ACCEPT):
         for at, offset in enumerate(offsets):
-            _add_ongoing_page(states, games, offsets, at, mark, replays)
+            _add_ongoing_page(
+                states, games, offsets, at, mark, replays, resigned_to or home
+            )
     return states
 
 
@@ -863,6 +946,7 @@ def _add_ongoing_page(
     at: int,
     mark: str,
     replays: str,
+    resigned_to: str,
 ) -> None:
     """One scroll position of the Ongoing list, and its cards' panels."""
     offset = offsets[at]
@@ -892,16 +976,70 @@ def _add_ongoing_page(
     )
     for index, game in enumerate(games):
         tag = f"{index}@{offset}{mark}"
-        for state in _card_states(game, tag, here, f"ongoing@{offset}{AFTER_ACCEPT}"):
+        for state in _card_states(
+            game, tag, here, f"ongoing@{offset}{AFTER_ACCEPT}", resigned_to
+        ):
             states[state.name] = state
 
 
+def _game_states(game: OngoingGame, tag: str, resigned_to: str) -> list[State]:
+    """The game OPEN leads into, as far as its end screen after a resign."""
+    loaded = f"turn0:{tag}" if game.turn0 else f"game:{tag}"
+    states = [
+        State(f"gameload:{tag}", draw_loading, after=(8, loaded)),
+        State(
+            f"game:{tag}",
+            draw_game_view,
+            buttons={"game_settings": GAME_SETTINGS},
+            on_click={"game_settings": f"gamesettings:{tag}"},
+        ),
+        State(
+            f"gamesettings:{tag}",
+            draw_game_settings,
+            buttons={"resign": GAME_RESIGN, "back": GAME_BACK, "exit": GAME_EXIT},
+            forbidden={"settings": GAME_OPTIONS},
+            on_click={"resign": f"confirm:{tag}", "back": f"game:{tag}"},
+        ),
+        State(
+            f"confirm:{tag}",
+            lambda: draw_game_settings(confirm=True),
+            buttons={"confirm_ok": CONFIRM_OK, "confirm_back": CONFIRM_BACK},
+            on_click={
+                "confirm_ok": f"over:{tag}",
+                "confirm_back": f"gamesettings:{tag}",
+            },
+        ),
+        State(
+            f"over:{tag}",
+            lambda: draw_end(FinishedGame(game.pattern)),
+            buttons={"done": VICTORY_DONE},
+            on_click={"done": resigned_to},
+        ),
+    ]
+    if game.turn0:
+        states.append(
+            State(
+                f"turn0:{tag}",
+                lambda: draw_game_view(game.turn0),
+                buttons={"turn0_ok": TURN0_OK[game.turn0]},
+                on_click={"turn0_ok": f"game:{tag}"},
+            )
+        )
+    return states
+
+
 def _card_states(
-    game: OngoingGame, tag: str, here: str, after_accept: str
+    game: OngoingGame, tag: str, here: str, after_accept: str, resigned_to: str
 ) -> list[State]:
     """A card's panel and what it leads to; ``here`` is the list under it."""
     if game.kind == "started":
+        into_game = (
+            {"open": f"gameload:{tag}"}
+            if game.seat_turn and not game.opponent_resigned
+            else {}
+        )
         return [
+            *(_game_states(game, tag, resigned_to) if into_game else []),
             State(
                 f"card:{tag}",
                 lambda: draw_card_panel(game),
@@ -911,7 +1049,11 @@ def _card_states(
                     "more_info": CARD_INFO,
                 },
                 forbidden={"delete": CARD_OTHER_ICONS},
-                on_click={"panel_back": here, "more_info": f"cardinfo:{tag}"},
+                on_click={
+                    "panel_back": here,
+                    "more_info": f"cardinfo:{tag}",
+                    **into_game,
+                },
             ),
             State(
                 f"cardinfo:{tag}",

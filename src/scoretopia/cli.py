@@ -255,6 +255,19 @@ def _cmd_seat_capture_setup(args: argparse.Namespace) -> int:
     )
 
 
+def _cmd_seat_resign(args: argparse.Namespace) -> int:
+    """Resign from each game on the seat's turn whose setup is captured."""
+    # The record is the one capturing writes; see _cmd_seat_capture_finished.
+    os.umask(0o027)
+    return _run_seat_command(
+        args,
+        seat_commands.RESIGN,
+        lambda seat, config: seat_commands.resign(
+            seat, config.captures_path, config.frames_path
+        ),
+    )
+
+
 def _cmd_seat_accept_invitations(args: argparse.Namespace) -> int:
     """Accept every invitation from known players."""
     return _run_seat_command(
@@ -401,6 +414,14 @@ def main(argv: Sequence[str] | None = None) -> None:
             f"{exit_codes}"
         ),
     ).set_defaults(handler=_cmd_seat_accept_invitations)
+    seat_sub.add_parser(
+        "resign",
+        parents=[seat_config_parent],
+        help=(
+            "Resign from each game on the seat's turn whose setup is captured; "
+            f"never delete one. {exit_codes}"
+        ),
+    ).set_defaults(handler=_cmd_seat_resign)
 
     args = parser.parse_args(argv)
     try:
